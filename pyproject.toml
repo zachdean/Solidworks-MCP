@@ -1,0 +1,21 @@
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F"]
+# Pre-existing style in solidworks_mcp/ that predates this lint gate.
+# These are intentionally ignored rather than mass-rewriting existing modules.
+ignore = [
+    "E501",  # line too long
+    "E722",  # bare except — the existing COM code relies on this deliberately
+    "F401",  # unused imports
+    "F541",  # f-string missing placeholders
+]
+
+[tool.pytest.ini_options]
+testpaths = ["solidworks_mcp/tests"]
+markers = [
+    "windows: marks tests that require Windows + SolidWorks",
+    "integration: marks integration tests",
+]

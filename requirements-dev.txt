@@ -1,0 +1,4 @@
+# Dev/test dependencies (safe on any platform, including macOS/Linux)
+pytest>=7.0.0
+pytest-cov>=4.0.0
+ruff>=0.5.0
