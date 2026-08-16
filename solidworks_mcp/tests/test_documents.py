@@ -8,7 +8,7 @@ from solidworks_mcp.testing.fake_com import FakeComObject
 
 class TestCreateNewPart:
     def test_happy_path(self, automation, fake_sw):
-        new_doc = FakeComObject(fake_sw._scripts, fake_sw._log, "new_part", name="new_part")
+        new_doc = fake_sw.new_object("new_part")
         new_doc.set_return("GetTitle", "Part1")
         fake_sw.set_return("NewDocument", new_doc)
 
@@ -31,7 +31,7 @@ class TestOpenDocument:
         filepath = tmp_path / "Bracket.sldprt"
         filepath.write_text("stub")
 
-        opened_doc = FakeComObject(fake_sw._scripts, fake_sw._log, "opened_doc", name="opened_doc")
+        opened_doc = fake_sw.new_object("opened_doc")
         opened_doc.set_return("GetTitle", "Bracket")
         fake_sw.set_return("OpenDoc6", opened_doc)
 

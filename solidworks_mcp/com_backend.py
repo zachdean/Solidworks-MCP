@@ -1,7 +1,9 @@
 """
 COM Backend Accessor
 ---------------------
-Lazy, injectable access to the `win32com.client` and `pythoncom` modules.
+Lazy, injectable access to the `win32com.client` and `pythoncom` modules,
+plus the handful of COM operations the automation layer actually performs
+with them.
 
 `solidworks_mcp.automation` needs COM to actually talk to SolidWorks, but
 pywin32 only exists on Windows. Importing `win32com.client` / `pythoncom` at
@@ -13,78 +15,88 @@ objects (`get_win32com()` / `get_pythoncom()`), and raises a clear
 `ComUnavailableError` instead of `ModuleNotFoundError` when pywin32 isn't
 installed. Tests can also install fake modules via `set_backend()` /
 `reset_backend()` without touching `sys.modules`.
+
+Prefer the operation-level helpers (`null_dispatch()`, `byref_int()`) over
+fetching the raw modules: between them they cover every VARIANT the
+automation layer builds, so the `VT_BYREF | VT_I4` bit-fiddling lives in
+exactly one place.
 """
 
-import importlib.util
+import importlib
+from typing import Any, Dict
+
+_WIN32COM = "win32com.client"
+_PYTHONCOM = "pythoncom"
+
+_UNAVAILABLE_MSG = (
+    "pywin32 is required; this operation only runs on Windows with SolidWorks installed"
+)
 
 
 class ComUnavailableError(RuntimeError):
     """Raised when COM automation is attempted without pywin32 available."""
 
 
-_win32com_override = None
-_pythoncom_override = None
+# Test-injected stand-ins (see `set_backend`), checked ahead of the real
+# modules, and the memoized real imports.
+_overrides: Dict[str, Any] = {}
+_loaded: Dict[str, Any] = {}
 
 
-def _find_spec_safe(name: str):
-    try:
-        return importlib.util.find_spec(name)
-    except (ImportError, ValueError):
-        return None
+def _load(name: str) -> Any:
+    if name in _overrides:
+        return _overrides[name]
+    module = _loaded.get(name)
+    if module is None:
+        try:
+            module = importlib.import_module(name)
+        except ImportError as exc:
+            raise ComUnavailableError(_UNAVAILABLE_MSG) from exc
+        _loaded[name] = module
+    return module
 
 
 def is_com_available() -> bool:
-    """Whether real pywin32-backed COM access is currently usable."""
-    if _win32com_override is not None and _pythoncom_override is not None:
-        return True
-    return (
-        _find_spec_safe("win32com.client") is not None
-        and _find_spec_safe("pythoncom") is not None
-    )
+    """Whether COM access is currently usable (real pywin32 or an injected
+    test backend). Computed on each call, so it tracks
+    `set_backend()`/`reset_backend()`."""
+    try:
+        _load(_WIN32COM)
+        _load(_PYTHONCOM)
+    except ComUnavailableError:
+        return False
+    return True
 
 
-def __getattr__(name: str):
-    # Computed on each access (not cached at import time) so tests that
-    # monkeypatch availability, or call set_backend()/reset_backend(), see
-    # up-to-date results.
-    if name == "COM_AVAILABLE":
-        return is_com_available()
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-def get_win32com():
+def get_win32com() -> Any:
     """Return the win32com.client module (real or injected test stub)."""
-    if _win32com_override is not None:
-        return _win32com_override
-    if _find_spec_safe("win32com.client") is None:
-        raise ComUnavailableError(
-            "pywin32 is required; this operation only runs on Windows with SolidWorks installed"
-        )
-    import win32com.client
-    return win32com.client
+    return _load(_WIN32COM)
 
 
-def get_pythoncom():
+def get_pythoncom() -> Any:
     """Return the pythoncom module (real or injected test stub)."""
-    if _pythoncom_override is not None:
-        return _pythoncom_override
-    if _find_spec_safe("pythoncom") is None:
-        raise ComUnavailableError(
-            "pywin32 is required; this operation only runs on Windows with SolidWorks installed"
-        )
-    import pythoncom
-    return pythoncom
+    return _load(_PYTHONCOM)
 
 
-def set_backend(win32com_stub, pythoncom_stub) -> None:
+def null_dispatch() -> Any:
+    """A null `VT_DISPATCH` VARIANT -- what SolidWorks' `SelectByID2` and
+    `Extension.SaveAs` want for their optional callout/export arguments."""
+    return get_win32com().VARIANT(get_pythoncom().VT_DISPATCH, None)
+
+
+def byref_int(initial: int = 0) -> Any:
+    """A by-reference 32-bit int VARIANT, for SolidWorks' `errors`/`warnings`
+    out-parameters. Read the result back off `.value` after the call."""
+    pythoncom = get_pythoncom()
+    return get_win32com().VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, initial)
+
+
+def set_backend(win32com_stub: Any, pythoncom_stub: Any) -> None:
     """Inject fake win32com.client / pythoncom modules for testing."""
-    global _win32com_override, _pythoncom_override
-    _win32com_override = win32com_stub
-    _pythoncom_override = pythoncom_stub
+    _overrides[_WIN32COM] = win32com_stub
+    _overrides[_PYTHONCOM] = pythoncom_stub
 
 
 def reset_backend() -> None:
     """Remove any injected test backend, reverting to real pywin32 imports."""
-    global _win32com_override, _pythoncom_override
-    _win32com_override = None
-    _pythoncom_override = None
+    _overrides.clear()

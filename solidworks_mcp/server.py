@@ -30,6 +30,7 @@ from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
 # Local imports
+from . import com_backend
 from .automation import SolidWorksAutomation
 from .constants import SwErrors
 from .config import get_config, save_config
@@ -543,20 +544,26 @@ def _execute_python_fixed(code: str) -> Dict:
             if not r["success"]:
                 return r
         
-        import win32com.client
-        import pythoncom
         import math
         import os as os_module
-        
+        from types import SimpleNamespace
+
+        # Go through the same seam as the automation layer, so this tool
+        # honours an injected test backend and raises ComUnavailableError
+        # (not ModuleNotFoundError) off Windows. Executed snippets reach COM
+        # as `win32com.client.<...>`, so keep that shape.
+        win32com_client = com_backend.get_win32com()
+        pythoncom = com_backend.get_pythoncom()
+
         # Prepare execution context with many useful objects
         exec_globals = {
             # SolidWorks objects
             'sw': sw_automation.app,
             'doc': sw_automation.app.ActiveDoc if sw_automation.app else None,
             'automation': sw_automation,
-            
+
             # COM libraries
-            'win32com': win32com,
+            'win32com': SimpleNamespace(client=win32com_client),
             'pythoncom': pythoncom,
             
             # Standard libraries

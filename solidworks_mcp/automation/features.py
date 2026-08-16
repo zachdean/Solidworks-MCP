@@ -136,9 +136,7 @@ class FeatureOperations:
                 return False, "", "No sketch found in feature tree"
             
             # Step 4: Select the sketch
-            win32com_client = com_backend.get_win32com()
-            pythoncom = com_backend.get_pythoncom()
-            empty_callout = win32com_client.VARIANT(pythoncom.VT_DISPATCH, None)
+            empty_callout = com_backend.null_dispatch()
             selected = doc.Extension.SelectByID2(
                 sketch_name, "SKETCH", 0, 0, 0, False, 0, empty_callout, 0
             )
@@ -146,7 +144,8 @@ class FeatureOperations:
             if not selected:
                 # Fallback: try pythoncom.Nothing
                 selected = doc.Extension.SelectByID2(
-                    sketch_name, "SKETCH", 0, 0, 0, False, 0, pythoncom.Nothing, 0
+                    sketch_name, "SKETCH", 0, 0, 0, False, 0,
+                    com_backend.get_pythoncom().Nothing, 0
                 )
             
             if not selected:

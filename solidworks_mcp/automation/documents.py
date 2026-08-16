@@ -178,11 +178,9 @@ class DocumentOperations:
             doc_type = type_map.get(ext, SwDocumentTypes.swDocPART)
 
             # Open document
-            win32com_client = com_backend.get_win32com()
-            pythoncom = com_backend.get_pythoncom()
-            errors = win32com_client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-            warnings = win32com_client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-            
+            errors = com_backend.byref_int()
+            warnings = com_backend.byref_int()
+
             doc = self._sw_app.OpenDoc6(filepath, int(doc_type), 0, "", errors, warnings)
             
             if doc is None or errors.value != 0:
@@ -240,11 +238,9 @@ class DocumentOperations:
                 # Method 2: Extension.SaveAs with proper VARIANT null dispatch
                 if not saved:
                     try:
-                        win32com_client = com_backend.get_win32com()
-                        pythoncom = com_backend.get_pythoncom()
-                        empty_export = win32com_client.VARIANT(pythoncom.VT_DISPATCH, None)
-                        errors = win32com_client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-                        warnings = win32com_client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+                        empty_export = com_backend.null_dispatch()
+                        errors = com_backend.byref_int()
+                        warnings = com_backend.byref_int()
 
                         result = doc.Extension.SaveAs(
                             filepath, 0, 0, empty_export, errors, warnings
@@ -258,11 +254,9 @@ class DocumentOperations:
                 # Method 3: Extension.SaveAs2
                 if not saved:
                     try:
-                        win32com_client = com_backend.get_win32com()
-                        pythoncom = com_backend.get_pythoncom()
-                        errors = win32com_client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-                        warnings = win32com_client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-                        
+                        errors = com_backend.byref_int()
+                        warnings = com_backend.byref_int()
+
                         result = doc.Extension.SaveAs2(
                             filepath, 0, 0, None, "", False, errors, warnings
                         )

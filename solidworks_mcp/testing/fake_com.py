@@ -58,7 +58,7 @@ Quick start
 Scripting successive calls (e.g. walking a `FirstFeature` / `GetNextFeature`
 chain) and forcing an error path:
 
-    feat1, feat2 = FakeComObject(app._scripts, app._log, "feat1"), None
+    feat1, feat2 = app.new_object("feat1"), None
     doc.set_sequence("GetNextFeature", [feat1, feat2])
 
     doc.SketchManager.set_raises("InsertSketch", RuntimeError("no active sketch"))
@@ -185,27 +185,26 @@ class CallLog:
 _UNSET = object()
 
 
-class _PeekableIterator:
-    """An iterator that supports a non-destructive `peek()` in addition to
-    the consuming `advance()`, so property-style access can preview a
-    scripted sequence's next value without consuming it."""
+class _ScriptedSequence:
+    """A finite list of scripted values with a cursor, supporting a
+    non-destructive `peek()` alongside the consuming `advance()`, so
+    property-style access can preview the next value without consuming it."""
 
     def __init__(self, values: Iterable[Any]) -> None:
-        self._it = iter(values)
-        self._buffer: List[Any] = []
+        self._values: List[Any] = list(values)
+        self._index = 0
 
     def peek(self) -> Any:
-        if not self._buffer:
-            try:
-                self._buffer.append(next(self._it))
-            except StopIteration:
-                return _UNSET
-        return self._buffer[0]
+        if self._index >= len(self._values):
+            return _UNSET
+        return self._values[self._index]
 
-    def advance(self) -> Any:
-        if self._buffer:
-            return self._buffer.pop(0)
-        return next(self._it)
+    def advance(self, key: str) -> Any:
+        if self._index >= len(self._values):
+            raise AssertionError(f"scripted sequence for {key!r} is exhausted")
+        value = self._values[self._index]
+        self._index += 1
+        return value
 
 
 class _ScriptRegistry:
@@ -214,7 +213,7 @@ class _ScriptRegistry:
 
     def __init__(self) -> None:
         self.returns: Dict[str, Any] = {}
-        self.sequences: Dict[str, _PeekableIterator] = {}
+        self.sequences: Dict[str, _ScriptedSequence] = {}
         self.raises: Dict[str, BaseException] = {}
 
 
@@ -297,13 +296,22 @@ class FakeComObject:
     def set_sequence(self, key: str, values: Iterable[Any]) -> "FakeComObject":
         """Script successive call return values for `key`: the first call
         returns `values[0]`, the second `values[1]`, etc."""
-        self._scripts.sequences[key] = _PeekableIterator(values)
+        self._scripts.sequences[key] = _ScriptedSequence(values)
         return self
 
     def set_raises(self, key: str, exc: BaseException) -> "FakeComObject":
         """Script `key` to raise `exc` when invoked."""
         self._scripts.raises[key] = exc
         return self
+
+    def new_object(self, path: str) -> "FakeComObject":
+        """A standalone `FakeComObject` sharing this graph's script registry
+        and call log, but not wired into any parent's children -- for use as
+        a scripted return value (e.g. the object `GetCurrentSheet` hands
+        back, or the features a `GetNextFeature` chain walks)."""
+        return FakeComObject(
+            self._scripts, self._log, path, name=path.rsplit(".", 1)[-1]
+        )
 
     def tag(self, com_type: str) -> "FakeComObject":
         """Declare this object's COM interface name (e.g. `"IDrawingDoc"`),
@@ -348,10 +356,7 @@ class FakeComObject:
         for key in keys:
             seq = self._scripts.sequences.get(key)
             if seq is not None:
-                try:
-                    return seq.advance()
-                except StopIteration:
-                    raise AssertionError(f"scripted sequence for {key!r} is exhausted")
+                return seq.advance(key)
         for key in keys:
             if key in self._scripts.returns:
                 return self._scripts.returns[key]
@@ -365,9 +370,6 @@ class FakeComObject:
         if value is not _UNSET:
             return value == other
         return self is other
-
-    def __ne__(self, other: Any) -> bool:
-        return not self.__eq__(other)
 
     def __hash__(self) -> int:
         return id(self)
@@ -401,13 +403,6 @@ _DOC_TYPES = {
     "assembly": (2, "IAssemblyDoc"),
     "drawing": (3, "IDrawingDoc"),
 }
-
-
-def _fresh(scripts: _ScriptRegistry, log: CallLog, path: str) -> FakeComObject:
-    """A standalone `FakeComObject` not wired into any parent's children,
-    for use as a scripted return value (e.g. the object `GetCurrentSheet`
-    hands back)."""
-    return FakeComObject(scripts, log, path, name=path.rsplit(".", 1)[-1])
 
 
 def FakeSldWorks(doc_type: str = "part", *, sheet_names: Optional[List[str]] = None) -> FakeComObject:
@@ -451,7 +446,7 @@ def FakeSldWorks(doc_type: str = "part", *, sheet_names: Optional[List[str]] = N
 
     if doc_type == "drawing":
         names = list(sheet_names) if sheet_names else ["Sheet1"]
-        sheet = _fresh(scripts, log, f"{doc._path}.<{names[0]}>")
+        sheet = doc.new_object(f"{doc._path}.<{names[0]}>")
         sheet.tag("ISheet")
         doc.set_return("GetCurrentSheet", sheet)
         doc.set_return("GetSheetNames", names)

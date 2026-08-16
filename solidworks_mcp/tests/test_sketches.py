@@ -30,7 +30,7 @@ class TestCreateSketch:
 
 
 class TestDrawCircle:
-    def test_happy_path_converts_mm_to_meters(self, automation, fake_sw, call_log):
+    def test_happy_path_converts_mm_to_meters(self, automation, fake_sw):
         doc = fake_sw.ActiveDoc
         doc.SketchManager.set_return("CreateCircle", object())
 
@@ -38,8 +38,8 @@ class TestDrawCircle:
 
         assert result["success"] is True
         # Center point (0, 0) and the edge point x = center_x + radius, in meters.
-        assert call_log.arg_of("CreateCircle", 0) == pytest.approx(0.0)
-        assert call_log.arg_of("CreateCircle", 3) == pytest.approx(0.025)
+        assert fake_sw.call_log.arg_of("CreateCircle", 0) == pytest.approx(0.0)
+        assert fake_sw.call_log.arg_of("CreateCircle", 3) == pytest.approx(0.025)
         assert result["data"] == {
             "radius": 25, "unit": "mm", "center_x": 0, "center_y": 0
         }

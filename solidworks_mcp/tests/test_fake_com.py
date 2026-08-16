@@ -4,16 +4,18 @@ Tests for the recording fake-COM harness (`solidworks_mcp.testing.fake_com`).
 
 import pytest
 
-from solidworks_mcp.testing.fake_com import Call, CallLog, FakeComObject, FakeSldWorks
+from solidworks_mcp.testing.fake_com import (
+    Call,
+    CallLog,
+    FakeComObject,
+    FakeSldWorks,
+    _ScriptRegistry,
+)
 
 
-def new_object():
-    return FakeComObject(scripts=_scripts(), log=CallLog(), path="root", name="root")
-
-
-def _scripts():
-    from solidworks_mcp.testing.fake_com import _ScriptRegistry
-    return _ScriptRegistry()
+def root_object():
+    """A fresh, standalone graph root with its own registry and log."""
+    return FakeComObject(scripts=_ScriptRegistry(), log=CallLog(), path="root", name="root")
 
 
 # ============================================================================
@@ -22,21 +24,21 @@ def _scripts():
 
 class TestAutoVivify:
     def test_unknown_attribute_does_not_raise(self):
-        obj = new_object()
+        obj = root_object()
         assert obj.Whatever is not None
 
     def test_deep_chain_auto_vivifies(self):
-        obj = new_object()
+        obj = root_object()
         # doc.SketchManager.InsertSketch(True) style chaining
         result = obj.SketchManager.InsertSketch(True)
         assert result is not None
 
     def test_repeated_attribute_access_returns_same_child(self):
-        obj = new_object()
+        obj = root_object()
         assert obj.SketchManager is obj.SketchManager
 
     def test_attribute_used_as_value_and_as_callable(self):
-        obj = new_object()
+        obj = root_object()
         obj.set_return("GetTypeName2", "RefPlane")
 
         as_value = obj.GetTypeName2
@@ -47,7 +49,7 @@ class TestAutoVivify:
         assert callable(obj.GetTypeName2)
 
     def test_unscripted_attribute_is_callable_and_truthy(self):
-        obj = new_object()
+        obj = root_object()
         feat = obj.FirstFeature
         assert callable(feat)
         assert bool(feat) is True
@@ -60,12 +62,12 @@ class TestAutoVivify:
 
 class TestSetReturn:
     def test_scripted_return_by_bare_name(self):
-        obj = new_object()
+        obj = root_object()
         obj.set_return("CreateCircle", "circle-1")
         assert obj.SketchManager.CreateCircle(0.01, 0.02, 0, 0.03, 0.02, 0) == "circle-1"
 
     def test_scripted_return_by_type_qualified_name(self):
-        obj = new_object()
+        obj = root_object()
         obj.tag("IDrawingDoc")
         view_obj = object()
         obj.set_return("IDrawingDoc.CreateDrawViewFromModelView3", view_obj)
@@ -73,14 +75,14 @@ class TestSetReturn:
         assert obj.CreateDrawViewFromModelView3("Sheet1", "*Front", 0, 0, 0) is view_obj
 
     def test_exact_path_key_is_most_specific(self):
-        obj = new_object()
+        obj = root_object()
         obj.set_return("InsertSketch", "generic")
         obj.SketchManager.set_return("root.SketchManager.InsertSketch", "specific")
 
         assert obj.SketchManager.InsertSketch(True) == "specific"
 
     def test_set_return_is_reusable_across_multiple_calls(self):
-        obj = new_object()
+        obj = root_object()
         obj.set_return("GetType", 1)
         assert obj.GetType() == 1
         assert obj.GetType() == 1
@@ -88,7 +90,7 @@ class TestSetReturn:
 
 class TestSetSequence:
     def test_successive_calls_return_successive_values(self):
-        obj = new_object()
+        obj = root_object()
         feat2 = object()
         obj.set_sequence("GetNextFeature", ["feat2", feat2, None])
 
@@ -97,14 +99,14 @@ class TestSetSequence:
         assert obj.GetNextFeature() is None
 
     def test_sequence_exhaustion_raises_assertion_error(self):
-        obj = new_object()
+        obj = root_object()
         obj.set_sequence("Foo", [1])
         obj.Foo()
         with pytest.raises(AssertionError):
             obj.Foo()
 
     def test_property_style_peek_does_not_consume_sequence(self):
-        obj = new_object()
+        obj = root_object()
         obj.set_sequence("Foo", ["a", "b"])
 
         # Touching the attribute without calling it should not advance the
@@ -117,14 +119,14 @@ class TestSetSequence:
 
 class TestSetRaises:
     def test_raises_on_call(self):
-        obj = new_object()
+        obj = root_object()
         obj.SketchManager.set_raises("InsertSketch", RuntimeError("no active sketch"))
 
         with pytest.raises(RuntimeError, match="no active sketch"):
             obj.SketchManager.InsertSketch(True)
 
     def test_raises_does_not_fire_on_bare_attribute_access(self):
-        obj = new_object()
+        obj = root_object()
         obj.set_raises("Foo", RuntimeError("boom"))
         # Merely referencing the attribute should not raise -- only calling it.
         _ = obj.Foo
@@ -136,7 +138,7 @@ class TestSetRaises:
 
 class TestCallLog:
     def test_records_positional_args_in_order(self):
-        obj = new_object()
+        obj = root_object()
         obj.SketchManager.CreateLine(0.01, 0.02, 0, 0.03, 0.02, 0)
 
         call = obj.call_log.assert_called_with("CreateLine", 0.01, 0.02, 0, 0.03, 0.02, 0)
@@ -144,20 +146,20 @@ class TestCallLog:
         assert call.args == (0.01, 0.02, 0, 0.03, 0.02, 0)
 
     def test_arg_of(self):
-        obj = new_object()
+        obj = root_object()
         obj.SketchManager.CreateCircle(0.025, 0.05, 0, 0.05, 0.05, 0)
         assert obj.call_log.arg_of("CreateCircle", 0) == 0.025
         assert obj.call_log.arg_of("CreateCircle", 1) == 0.05
 
     def test_ordered_names_reflects_call_order_not_attribute_access_order(self):
-        obj = new_object()
+        obj = root_object()
         obj.SketchManager.InsertSketch(True)
         obj.SketchManager.CreateCircle(0, 0, 0, 1, 0, 0)
 
         assert obj.call_log.ordered_names() == ["InsertSketch", "CreateCircle"]
 
     def test_calls_to_only_returns_actual_invocations(self):
-        obj = new_object()
+        obj = root_object()
         _ = obj.Name  # bare attribute access, never called
         obj.Name()
 
@@ -166,18 +168,18 @@ class TestCallLog:
         assert matches[0].args == ()
 
     def test_assert_called_with_raises_when_never_called(self):
-        obj = new_object()
+        obj = root_object()
         with pytest.raises(AssertionError):
             obj.call_log.assert_called_with("Never", 1, 2)
 
     def test_assert_called_with_raises_on_arg_mismatch(self):
-        obj = new_object()
+        obj = root_object()
         obj.Foo(1, 2)
         with pytest.raises(AssertionError):
             obj.call_log.assert_called_with("Foo", 9, 9)
 
     def test_attribute_only_access_is_recorded_with_none_args(self):
-        obj = new_object()
+        obj = root_object()
         _ = obj.SketchManager
         access = [c for c in obj.call_log.calls if c.name == "SketchManager"][0]
         assert access.args is None
@@ -190,7 +192,7 @@ class TestCallLog:
 
 class TestPropertySet:
     def test_setattr_then_getattr_roundtrips_raw_value(self):
-        obj = new_object()
+        obj = root_object()
         obj.Visible = True
         assert obj.Visible is True
 
@@ -246,7 +248,7 @@ class TestFakeSldWorksPart:
     def test_feature_walk_can_be_scripted(self):
         app = FakeSldWorks("part")
         doc = app.ActiveDoc
-        feat1 = FakeComObject(app._scripts, app._log, "feat1", name="feat1")
+        feat1 = app.new_object("feat1")
         feat1.set_return("Name", "Boss-Extrude1")
 
         doc.set_sequence("FirstFeature", [feat1])
@@ -309,7 +311,7 @@ class TestToolShapedUsage:
         """Mirrors server.py::_list_features_fixed's
         `feat_type = feat.GetTypeName2; if callable(feat_type): feat_type = feat_type()`."""
         app = FakeSldWorks("part")
-        feat = FakeComObject(app._scripts, app._log, "feat", name="feat")
+        feat = app.new_object("feat")
         feat.set_return("GetTypeName2", "RefPlane")
 
         feat_type = feat.GetTypeName2

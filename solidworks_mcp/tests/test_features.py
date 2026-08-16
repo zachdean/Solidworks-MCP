@@ -33,7 +33,7 @@ def _install_profile_sketch(fake_sw, name="Sketch1"):
     """Wire `doc.FirstFeature` to a single ProfileFeature named `name`,
     terminating the GetNextFeature walk after one iteration."""
     doc = fake_sw.ActiveDoc
-    feat1 = FakeComObject(fake_sw._scripts, fake_sw._log, "feat1", name="feat1")
+    feat1 = fake_sw.new_object("feat1")
     feat1.GetTypeName2 = "ProfileFeature"
     feat1.Name = name
     feat1.GetNextFeature = None
