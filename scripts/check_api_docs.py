@@ -15,7 +15,7 @@ from pathlib import Path
 DOCS_DIR = Path(__file__).resolve().parent.parent / "docs" / "api"
 
 FRONT_MATTER_RE = re.compile(r"\A---\r?\n(.*?)\r?\n---\r?\n", re.S)
-RECORD_HEADING_RE = re.compile(r"^### +(.+?)\s*$", re.M)
+HEADING_RE = re.compile(r"^(#{1,6}) +(.+?)\s*$", re.M)
 
 # Every per-record rule lives here as data, so adding or relaxing a required
 # field is a row edit rather than a new regex + branch + message string. Order
@@ -28,7 +28,13 @@ RECORD_CHECKS: list[tuple[re.Pattern[str], str]] = [
         "missing **Signature:** fenced code block",
     ),
     (
-        re.compile(r"^\|.*\|\s*\n\|[ \t]*:?-{2,}.*\|\s*$", re.M),
+        # Anchored to the **Parameters:** label (and stopped at the next bold
+        # field label) so an unrelated table elsewhere in the record — one in
+        # Gotchas, say — can't stand in for the parameter table.
+        re.compile(
+            r"\*\*Parameters:?\*\*(?:(?!\n\*\*).)*?^\|.*\|[ \t]*\n\|[ \t]*:?-{2,}.*\|[ \t]*$",
+            re.S | re.M,
+        ),
         "missing Parameter table (markdown table with header separator)",
     ),
     (
@@ -78,13 +84,21 @@ def parse_front_matter(text: str) -> dict[str, str] | None:
 
 
 def split_records(text: str) -> list[tuple[str, str]]:
-    """Return (heading, body) for each H3 method record in document order."""
-    headings = list(RECORD_HEADING_RE.finditer(text))
+    """Return (heading, body) for each H3 method record in document order.
+
+    A record ends at the next heading of level 3 or shallower, not merely the
+    next H3: otherwise the last record in a file swallows the trailing
+    `## Enums` section and satisfies per-record checks with tables that aren't
+    part of the record at all.
+    """
+    headings = [m for m in HEADING_RE.finditer(text) if len(m.group(1)) <= 3]
     records = []
     for i, m in enumerate(headings):
+        if len(m.group(1)) != 3:
+            continue
         start = m.end()
         end = headings[i + 1].start() if i + 1 < len(headings) else len(text)
-        records.append((m.group(1), text[start:end]))
+        records.append((m.group(2), text[start:end]))
     return records
 
 
@@ -107,7 +121,10 @@ def check_file(path: Path) -> list[str]:
     min_methods = front_matter.get("min_methods")
     if min_methods is None:
         errors.append(f"{path}: front matter missing required 'min_methods' key")
-    elif not min_methods.isdigit():
+    elif not min_methods.isdecimal():
+        # isdecimal(), not isdigit(): the latter is true for characters like
+        # "²" that int() then rejects, turning this clean message into an
+        # uncaught ValueError out of the build gate.
         errors.append(f"{path}: front matter 'min_methods' is not an integer: {min_methods!r}")
     elif len(records) < int(min_methods):
         errors.append(
@@ -123,6 +140,12 @@ def main(docs_dir: Path = DOCS_DIR) -> int:
         return 1
 
     doc_files = sorted(p for p in docs_dir.glob("*.md") if is_dossier(p))
+    if not doc_files:
+        # Validating nothing must not read as success: a stray `_` rename or a
+        # moved docs/api/ would otherwise take every dossier out of the gate
+        # while both this script and the pytest suite stayed green.
+        print(f"error: {docs_dir} contains no dossier files to validate", file=sys.stderr)
+        return 1
 
     all_errors: list[str] = []
     for path in doc_files:

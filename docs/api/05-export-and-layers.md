@@ -144,7 +144,7 @@ a selection might be present.
   2025 despite being used in this still-current example — see this dossier's intro
   discrepancy list.
 - The `SaveAs` example call is `IModelDocExtension::SaveAs(Name, Version, Options,
-  ExportData, Errors, Warnings)` — 5 parameters, no `AdvancedSaveAsOptions`, with
+  ExportData, Errors, Warnings)` — 6 parameters, no `AdvancedSaveAsOptions`, with
   `ExportData` in the same relative role `SaveAs3` gives it. `SaveAs3` simply inserts
   `AdvancedSaveAsOptions` before `Errors`; nothing in the fetched pages suggests
   `ExportData`'s behavior differs between the two, but this was not independently

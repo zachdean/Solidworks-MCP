@@ -460,16 +460,19 @@ Function NewSheet4( _
 | Width | Double | meters | Yes | Paper width; only used if `TemplateIn` is `swDwgTemplateNone` or `PaperSize` is `swDwgPapersUserDefined` | `swDwgPaperSizes_e` |
 | Height | Double | meters | Yes | Paper height; same validity condition as `Width` | `swDwgPaperSizes_e` |
 | PropertyViewName | String | n/a | Yes | Name of the view whose model supplies custom property values. Pass `""` for none | |
-| ZoneLeftMargin | Double | meters | Yes | Zone area left margin, distance from the sheet's left edge | |
-| ZoneRightMargin | Double | meters | Yes | Zone area right margin, distance from the sheet's right edge | |
-| ZoneTopMargin | Double | meters | Yes | Zone area top margin, distance from the sheet's top edge | |
-| ZoneBottomMargin | Double | meters | Yes | Zone area bottom margin, distance from the sheet's bottom edge | |
+| ZoneLeftMargin | Double | **unverified — not meters**, see Gotchas | Yes | Zone area left margin, distance from the sheet's left edge | |
+| ZoneRightMargin | Double | **unverified — not meters**, see Gotchas | Yes | Zone area right margin, distance from the sheet's right edge | |
+| ZoneTopMargin | Double | **unverified — not meters**, see Gotchas | Yes | Zone area top margin, distance from the sheet's top edge | |
+| ZoneBottomMargin | Double | **unverified — not meters**, see Gotchas | Yes | Zone area bottom margin, distance from the sheet's bottom edge | |
 | ZoneRow | Integer | n/a | Yes | Number of zone rows in the sheet's zone area; `ZoneRow x ZoneCol` is the total zone count | |
 | ZoneCol | Integer | n/a | Yes | Number of zone columns in the sheet's zone area | |
 
-The help page states no explicit units for `Width`/`Height`/the `Zone*Margin` params —
-`meters` above follows the API-wide convention in [`README.md`](README.md#units-convention),
-not an explicit statement on this page.
+The help page states no explicit units for `Width`/`Height`/the `Zone*Margin` params.
+`meters` for `Width`/`Height` follows the API-wide convention in
+[`README.md`](README.md#units-convention) and is corroborated by the worked example below.
+The `Zone*Margin` params are the documented exception to that convention: the same example
+contradicts it outright (see Gotchas), so do **not** write a mm-to-meters conversion for
+them without confirming empirically.
 
 **Returns:** `Boolean`. The help page states only "True if drawing sheet creation was
 successful, false if not" — it does not enumerate failure causes (e.g. a duplicate
@@ -499,10 +502,18 @@ live SolidWorks session. No exception is thrown on failure.
 - The zone parameters are not optional even when zones aren't wanted. The official
   "Create Drawing Sheet Zones" VBA example calls
   `NewSheet4("Test", swDwgPaperAsize, swDwgTemplateAsize, 1, 1, True, "", 0, 0, "", 0.5, 0.5, 0.5, 0.5, 2, 2)`
-  to create a sheet with a 2x2 (4-zone) grid and 0.5 m margins on all sides — the
+  to create a sheet with a 2x2 (4-zone) grid and margins of `0.5` on all sides — the
   example does not demonstrate a zero-zone call, so how to fully suppress the zone
   grid (e.g. `ZoneRow`/`ZoneCol` of `0` or `1`) is unverified; confirm empirically if a
   caller needs zones disabled.
+- **The `Zone*Margin` units are not meters, despite the API-wide convention.** The same
+  official example's `SetupSheet6` call passes an explicitly metric
+  `Width=0.2794, Height=0.2159` (an 11 x 8.5 in A-size landscape sheet) alongside the
+  same `0.5, 0.5, 0.5, 0.5` margins. A 0.5 m margin on a 0.2794 m sheet is geometrically
+  impossible, so the margins are in some other unit — `0.5` in inches (12.7 mm) is the
+  plausible reading, but nothing on either page states it. Treat the unit as unverified
+  and confirm against a live session before converting: a wrapper that helpfully
+  converts mm to meters here will produce a rejected or nonsensical zone grid.
 - Cross-checked: the syntax block on the fetched page is internally consistent across
   its VB, C#, and C++/CLI declarations, and the fetched 2025 page content is
   byte-identical to the archived 2024 revision of the same page — the two-source
@@ -580,7 +591,7 @@ Full positional list, in order, exactly as documented on the help page:
 | FirstAngle | Boolean | n/a | Yes | True for first angle projection, false for third angle projection | see `swDrawingProjectionType_e` in Enums for the equivalent named constants used elsewhere in the API; this parameter itself is a raw Boolean, not that enum |
 | TemplateName | String | n/a | Yes | Full path + filename of the custom sheet-format template; only meaningful if `TemplateIn` is `swDwgTemplateCustom` | |
 | Width | Double | meters | Yes | Paper width; valid only if `TemplateIn` is `swDwgTemplateNone` or `PaperSize` is `swDwgPapersUserDefined` | |
-| Height | Double | meters | Yes | Paper height; valid only if `TemplateIn` is `swDwgTemplateNone` or `swDwgPapersUserDefined` | |
+| Height | Double | meters | Yes | Paper height; valid only if `TemplateIn` is `swDwgTemplateNone` or `PaperSize` is `swDwgPapersUserDefined` | |
 | PropertyViewName | String | n/a | Yes | Name of the view containing the model from which to pull custom property values | |
 | RemoveModifiedNotes | Boolean | n/a | Yes | True to delete modified notes, false to leave them | |
 

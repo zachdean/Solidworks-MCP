@@ -19,6 +19,13 @@ return value, and property in a dossier's Parameter table must state its unit ex
 as `meters` or `radians` (or `n/a` for non-geometric values). Never assume a parameter is
 in "current document units" without a source confirming it.
 
+The convention is a default, not a guarantee. Where a source actively contradicts it, mark
+the units cell `unverified` and explain the contradiction in that record's Gotchas rather
+than asserting `meters` — see the `Zone*Margin` parameters in
+[`01-documents-and-sheets.md`](01-documents-and-sheets.md) for the worked example. An
+implementer writing a unit conversion against a wrong "meters" claim gets silently broken
+geometry, so a documented unknown beats a confident guess.
+
 ## Canonical source URLs
 
 - API method/property pages:

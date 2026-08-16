@@ -52,30 +52,32 @@ for a quick scan:
   parameter to back one.
 - `swBreakDir_e` does not exist — the real enum is `swBreakLineOrientation_e`.
 
-`help.solidworks.com` blocked several direct fetch attempts with HTTP 403 during this
-research pass (standard-3-view and predefined-view methods especially — see that
-section's access note). Where a page could not be fetched, the record is marked
+`help.solidworks.com` blocked several direct fetch attempts with HTTP 403 during the
+original research pass (standard-3-view and predefined-view methods especially). Those
+pages have since been retrieved with a browser `User-Agent` — see
+[`README.md`](README.md#canonical-source-urls) — and the affected records are now
+page-verified. Where a page still cannot be fetched, the record stays
 `status: unverified` with cross-checked secondary sources instead of a help-page
 transcription, per this dossier format's rule against inventing signatures.
 
 ## Standard & predefined view creation
 
 **Access note applying to this section's five records:** `help.solidworks.com`
-returned HTTP 403 for every direct fetch attempt across multiple URLs/years and a
-proxy retry. Signatures below were reconstructed from a type-library mirror
-(rimptec.com, generated from the SOLIDWORKS Interop type library) and cross-checked
-against working VBA examples (thecadcoder.com, codestack.net) and forum discussion —
-not transcribed from the live help page. All five are marked `status: unverified`
-accordingly; treat as high-confidence but not page-verified.
+returned HTTP 403 for every direct fetch attempt during the original research pass, so
+the signatures below were first reconstructed from a type-library mirror (rimptec.com,
+generated from the SOLIDWORKS Interop type library) and cross-checked against working
+VBA examples (thecadcoder.com, codestack.net) and forum discussion. All five 2025 help
+pages have since been fetched successfully with a browser `User-Agent`, and each
+reconstructed signature matched its page exactly — parameter names, types, order, and
+arity — so all five are now `status: verified`. The reconstruction route is recorded
+here because it is why these records cite two independent sources apiece.
 
 ### IDrawingDoc::CreateDrawViewFromModelView3
 
 - **Interface:** IDrawingDoc
 - **Method:** CreateDrawViewFromModelView3
-- **Minimum SW version:** unverified — help.solidworks.com blocked (403); a page for
-  this exact method exists in the archived 2012 API Help index, so the method is
-  available at least since SOLIDWORKS 2012 (possibly earlier; exact FCS not
-  confirmed).
+- **Minimum SW version:** SOLIDWORKS 2005 SP2, Revision Number 13.2 (the page's
+  Availability section).
 
 **Signature:**
 
@@ -110,9 +112,9 @@ method is called on; no `ISelectionMgr` selection needed.
 - https://www.rimptec.com/rsolidworks/net/lehal/sw/IDrawingDoc.html (type-library mirror, parameter count/order/type)
 - https://thecadcoder.com/solidworks-vba-macros/drawing-insert-modelview/ (working VBA example, unit confirmation)
 - https://forum.solidworks.com/thread/238877 (error behavior on misuse)
-- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IDrawingDoc~CreateDrawViewFromModelView3.html (403 — not retrieved)
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IDrawingDoc~CreateDrawViewFromModelView3.html (fetched with a browser User-Agent; signature transcribed from this page)
 
-**status:** unverified
+**status:** verified
 
 **Gotchas:**
 - **Empty `ModelName` for an already-open model — unconfirmed.** No accessible source
@@ -149,9 +151,8 @@ method is called on; no `ISelectionMgr` selection needed.
 
 - **Interface:** IDrawingDoc
 - **Method:** Create3rdAngleViews2
-- **Minimum SW version:** unverified — help.solidworks.com blocked (403); a page for
-  this exact method exists in the archived 2012 API Help index, so available at least
-  since SOLIDWORKS 2012.
+- **Minimum SW version:** SOLIDWORKS 99 SP01, datecode 1999229 (the page's
+  Availability section).
 
 **Signature:**
 
@@ -179,9 +180,9 @@ pre-selected.
 - https://www.rimptec.com/rsolidworks/net/lehal/sw/IDrawingDoc.html (type-library mirror; confirms 1-arg boolean-returning signature, and that the non-"2" `Create3rdAngleViews` predecessor also exists with the same shape)
 - https://thecadcoder.com/solidworks-vba-macros/drawing-3rdangle-standard3views/ (working VBA example)
 - https://www.eng-tips.com/threads/drawing-views-quot-use-sheet-scale-quot-api.314040/ (auto-scale/sheet-scale interaction)
-- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IDrawingDoc~Create3rdAngleViews2.html (403 — not retrieved)
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IDrawingDoc~Create3rdAngleViews2.html (fetched with a browser User-Agent; signature transcribed from this page)
 
-**status:** unverified
+**status:** verified
 
 **Gotchas:**
 - **`Create3rdAngleViews` (no "2") vs `Create3rdAngleViews2`** — both exist in the
@@ -202,9 +203,9 @@ pre-selected.
 
 - **Interface:** IDrawingDoc
 - **Method:** Create1stAngleViews2
-- **Minimum SW version:** unverified — help.solidworks.com blocked (403); a page for
-  this exact method exists in the archived 2019 API Help index, so available at least
-  by SOLIDWORKS 2019, plausibly earlier given `Create3rdAngleViews2`'s 2012 presence.
+- **Minimum SW version:** SOLIDWORKS 99 SP01, datecode 1999229 (the page's
+  Availability section) — same as `Create3rdAngleViews2`, as expected for a paired
+  first/third-angle method.
 
 **Signature:**
 
@@ -227,9 +228,9 @@ Function Create1stAngleViews2( _
 **Source URL(s):**
 - https://www.rimptec.com/rsolidworks/net/lehal/sw/IDrawingDoc.html (type-library mirror; confirms 1-arg boolean-returning signature and the `Create1stAngleViews` predecessor's identical shape)
 - https://thecadcoder.com/solidworks-vba-macros/drawing-1stangle-standard3views/ (working VBA example, including a `swDoc Is Nothing` guard and failure MsgBox on `False`)
-- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IDrawingDoc~Create1stAngleViews2.html (403 — not retrieved)
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IDrawingDoc~Create1stAngleViews2.html (fetched with a browser User-Agent; signature transcribed from this page)
 
-**status:** unverified
+**status:** verified
 
 **Gotchas:**
 - **Same predecessor pattern as `Create3rdAngleViews2`** — `Create1stAngleViews` (no
@@ -247,16 +248,17 @@ Function Create1stAngleViews2( _
 
 - **Interface:** ISldWorks
 - **Method:** GetUserPreferenceToggle
-- **Minimum SW version:** unverified — help.solidworks.com blocked (403); a
-  long-standing core preference-query method referenced across every indexed API-help
-  version back to 2012, so almost certainly present far earlier, but no exact FCS
-  could be confirmed.
+- **Minimum SW version:** unverified — the 2025 page carries no Availability section
+  at all (confirmed on the fetched page, so this is the page's own omission, not a
+  retrieval failure). A long-standing core preference-query method referenced across
+  every indexed API-help version back to 2012, so almost certainly present far
+  earlier, but no exact FCS is documented.
 
 **Signature:**
 
 ```vb
 Function GetUserPreferenceToggle( _
-   ByVal UserPreference As System.Integer _
+   ByVal UserPreferenceToggle As System.Integer _
 ) As System.Boolean
 ```
 
@@ -264,7 +266,7 @@ Function GetUserPreferenceToggle( _
 
 | Name | Type | Units | Required | Meaning | Enum ref |
 | --- | --- | --- | --- | --- | --- |
-| UserPreference | Integer | n/a | Yes | Identifies which toggle-type system option to read. For 3-view auto-scale, pass `swAutomaticScaling3ViewDrawings` | `swUserPreferenceToggle_e` |
+| UserPreferenceToggle | Integer | n/a | Yes | Identifies which toggle-type system option to read. For 3-view auto-scale, pass `swAutomaticScaling3ViewDrawings` | `swUserPreferenceToggle_e` |
 
 **Returns:** `Boolean` — `True` if the toggle is on, `False` if off. No documented
 failure mode beyond returning the toggle's actual state.
@@ -274,9 +276,9 @@ failure mode beyond returning the toggle's actual state.
 **Source URL(s):**
 - https://www.rimptec.com/rsolidworks/net/lehal/sw/ISldWorks.html (type-library mirror: confirms single-argument arity)
 - https://www.rimptec.com/rsolidworks/net/lehal/sw/swUserPreferenceToggle_e.html (confirms exact enum member name `swAutomaticScaling3ViewDrawings`)
-- https://help.solidworks.com/2024/english/api/sldworksapi/SOLIDWORKS.Interop.sldworks~SOLIDWORKS.Interop.sldworks.ISldWorks~GetUserPreferenceToggle.html (403 — not retrieved)
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.ISldWorks~GetUserPreferenceToggle.html (fetched with a browser User-Agent; signature transcribed from this page)
 
-**status:** unverified
+**status:** verified
 
 **Gotchas:**
 - **Do not confuse with `IModelDocExtension::GetUserPreferenceToggle`**, which takes
@@ -301,9 +303,8 @@ failure mode beyond returning the toggle's actual state.
 
 - **Interface:** IDrawingDoc
 - **Method:** InsertModelInPredefinedView
-- **Minimum SW version:** unverified — help.solidworks.com blocked (403); a page for
-  this exact method exists in the archived 2012 API Help index, so available at least
-  since SOLIDWORKS 2012.
+- **Minimum SW version:** SOLIDWORKS 2004 FCS, Revision Number 12.0 (the page's
+  Availability section).
 
 **Signature:**
 
@@ -334,9 +335,9 @@ this method, only those selected placeholders are filled; if nothing is selected
 - https://www.rimptec.com/rsolidworks/net/lehal/sw/IDrawingDoc.html (type-library mirror; confirms single-argument arity)
 - https://www.codestack.net/solidworks-api/document/drawing/insert-predefined-views/ (working VBA example; confirms "if no views are selected, all predefined views will be filled")
 - https://www.javelin-tech.com/blog/2022/09/create-template-with-solidworks-predefined-views/ and https://www.javelin-tech.com/blog/2017/05/solidworks-predefined-views-drawing-templates/ (how predefined views are authored on a template)
-- https://help.solidworks.com/2023/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IDrawingDoc~InsertModelInPredefinedView.html (403 — not retrieved)
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IDrawingDoc~InsertModelInPredefinedView.html (fetched with a browser User-Agent; signature transcribed from this page)
 
-**status:** unverified
+**status:** verified
 
 **Gotchas:**
 - **Selection state changes scope of effect**, not just a nicety: pre-select specific
