@@ -9,9 +9,7 @@ import logging
 import traceback
 from typing import Optional, Dict, List, Tuple
 
-import win32com.client
-import pythoncom
-
+from .. import com_backend
 from ..constants import SwErrors, SwPlanes
 
 logger = logging.getLogger(__name__)
@@ -46,7 +44,9 @@ class SketchOperations:
             plane_name = SwPlanes.get(plane)
             
             # Create empty variant for callout parameter
-            empty_callout = win32com.client.VARIANT(pythoncom.VT_DISPATCH, None)
+            win32com_client = com_backend.get_win32com()
+            pythoncom = com_backend.get_pythoncom()
+            empty_callout = win32com_client.VARIANT(pythoncom.VT_DISPATCH, None)
             
             # Select plane
             result = doc.Extension.SelectByID2(
@@ -95,7 +95,9 @@ class SketchOperations:
             doc.ClearSelection2(True)
             
             # Select face at the given coordinates
-            empty_callout = win32com.client.VARIANT(pythoncom.VT_DISPATCH, None)
+            win32com_client = com_backend.get_win32com()
+            pythoncom = com_backend.get_pythoncom()
+            empty_callout = win32com_client.VARIANT(pythoncom.VT_DISPATCH, None)
             selected = doc.Extension.SelectByID2(
                 "", "FACE", x_m, y_m, z_m, False, 0, empty_callout, 0
             )

@@ -11,10 +11,7 @@ import datetime
 import traceback
 from typing import Optional, Dict, Any, Tuple
 
-# COM imports
-import win32com.client
-import pythoncom
-
+from .. import com_backend
 from ..constants import SwErrors, SwPlanes, SwDocumentTypes, SwViews
 from ..config import get_config
 from ..utils import UnitConverter, find_solidworks, find_template
@@ -115,15 +112,18 @@ class SolidWorksAutomation:
         Returns:
             True if connection successful
         """
+        win32com_client = com_backend.get_win32com()
+        pythoncom = com_backend.get_pythoncom()
+
         methods = [
             # Method 1: GetObject (running instance)
-            lambda: win32com.client.GetObject(Class="SldWorks.Application"),
+            lambda: win32com_client.GetObject(Class="SldWorks.Application"),
             # Method 2: Dispatch (creates or gets existing)
-            lambda: win32com.client.Dispatch("SldWorks.Application"),
+            lambda: win32com_client.Dispatch("SldWorks.Application"),
             # Method 3: Dynamic Dispatch
-            lambda: win32com.client.dynamic.Dispatch("SldWorks.Application"),
+            lambda: win32com_client.dynamic.Dispatch("SldWorks.Application"),
             # Method 4: GetActiveObject
-            lambda: win32com.client.GetActiveObject("SldWorks.Application"),
+            lambda: win32com_client.GetActiveObject("SldWorks.Application"),
         ]
         
         for i, method in enumerate(methods):

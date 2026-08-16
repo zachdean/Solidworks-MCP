@@ -19,9 +19,7 @@ import logging
 import traceback
 from typing import Optional, Dict
 
-import win32com.client
-import pythoncom
-
+from .. import com_backend
 from ..constants import SwErrors, SwEndConditions
 
 logger = logging.getLogger(__name__)
@@ -138,7 +136,9 @@ class FeatureOperations:
                 return False, "", "No sketch found in feature tree"
             
             # Step 4: Select the sketch
-            empty_callout = win32com.client.VARIANT(pythoncom.VT_DISPATCH, None)
+            win32com_client = com_backend.get_win32com()
+            pythoncom = com_backend.get_pythoncom()
+            empty_callout = win32com_client.VARIANT(pythoncom.VT_DISPATCH, None)
             selected = doc.Extension.SelectByID2(
                 sketch_name, "SKETCH", 0, 0, 0, False, 0, empty_callout, 0
             )

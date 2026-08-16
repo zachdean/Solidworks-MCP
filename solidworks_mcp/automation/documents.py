@@ -9,9 +9,7 @@ import logging
 import traceback
 from typing import Optional, Dict
 
-import win32com.client
-import pythoncom
-
+from .. import com_backend
 from ..constants import SwErrors, SwDocumentTypes, SwFileTypes
 from ..utils import find_template
 
@@ -178,10 +176,12 @@ class DocumentOperations:
                 ".slddrw": SwDocumentTypes.swDocDRAWING,
             }
             doc_type = type_map.get(ext, SwDocumentTypes.swDocPART)
-            
+
             # Open document
-            errors = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-            warnings = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+            win32com_client = com_backend.get_win32com()
+            pythoncom = com_backend.get_pythoncom()
+            errors = win32com_client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+            warnings = win32com_client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
             
             doc = self._sw_app.OpenDoc6(filepath, int(doc_type), 0, "", errors, warnings)
             
@@ -215,7 +215,7 @@ class DocumentOperations:
             doc, err = self.get_active_doc()
             if err:
                 return err
-            
+
             if filepath:
                 # Ensure absolute path
                 filepath = os.path.abspath(filepath)
@@ -240,10 +240,12 @@ class DocumentOperations:
                 # Method 2: Extension.SaveAs with proper VARIANT null dispatch
                 if not saved:
                     try:
-                        empty_export = win32com.client.VARIANT(pythoncom.VT_DISPATCH, None)
-                        errors = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-                        warnings = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-                        
+                        win32com_client = com_backend.get_win32com()
+                        pythoncom = com_backend.get_pythoncom()
+                        empty_export = win32com_client.VARIANT(pythoncom.VT_DISPATCH, None)
+                        errors = win32com_client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+                        warnings = win32com_client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+
                         result = doc.Extension.SaveAs(
                             filepath, 0, 0, empty_export, errors, warnings
                         )
@@ -252,12 +254,14 @@ class DocumentOperations:
                             method_used = "Extension.SaveAs"
                     except Exception as e:
                         logger.debug(f"Extension.SaveAs failed: {e}")
-                
+
                 # Method 3: Extension.SaveAs2
                 if not saved:
                     try:
-                        errors = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-                        warnings = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+                        win32com_client = com_backend.get_win32com()
+                        pythoncom = com_backend.get_pythoncom()
+                        errors = win32com_client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+                        warnings = win32com_client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
                         
                         result = doc.Extension.SaveAs2(
                             filepath, 0, 0, None, "", False, errors, warnings
