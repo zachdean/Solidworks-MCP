@@ -8,19 +8,22 @@ from .base import SolidWorksAutomation as _BaseAutomation
 from .documents import DocumentOperations
 from .sketches import SketchOperations
 from .features import FeatureOperations
+from .drawings import DrawingOperations
 
 
-class SolidWorksAutomation(_BaseAutomation, DocumentOperations, 
-                           SketchOperations, FeatureOperations):
+class SolidWorksAutomation(_BaseAutomation, DocumentOperations,
+                           SketchOperations, FeatureOperations,
+                           DrawingOperations):
     """
     Complete SolidWorks automation class
-    
+
     Combines all operation mixins:
     - Base: Connection, document access, utilities
     - Documents: Create, open, save, close documents
     - Sketches: Create sketches, draw 2D geometry
     - Features: Extrude, cut, fillet, chamfer
-    
+    - Drawings: Access and operate on drawing documents
+
     Example:
         sw = SolidWorksAutomation()
         sw.connect()
@@ -36,6 +39,7 @@ class SolidWorksAutomation(_BaseAutomation, DocumentOperations,
 __all__ = [
     "SolidWorksAutomation",
     "DocumentOperations",
-    "SketchOperations", 
+    "SketchOperations",
     "FeatureOperations",
+    "DrawingOperations",
 ]
