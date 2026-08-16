@@ -9,11 +9,12 @@ from .documents import DocumentOperations
 from .sketches import SketchOperations
 from .features import FeatureOperations
 from .drawings import DrawingOperations
+from .selection import SelectionOperations
 
 
 class SolidWorksAutomation(_BaseAutomation, DocumentOperations,
                            SketchOperations, FeatureOperations,
-                           DrawingOperations):
+                           DrawingOperations, SelectionOperations):
     """
     Complete SolidWorks automation class
 
@@ -23,6 +24,7 @@ class SolidWorksAutomation(_BaseAutomation, DocumentOperations,
     - Sketches: Create sketches, draw 2D geometry
     - Features: Extrude, cut, fillet, chamfer
     - Drawings: Access and operate on drawing documents
+    - Selection: Atomic select-then-act primitives for annotation/view tools
 
     Example:
         sw = SolidWorksAutomation()
@@ -42,4 +44,5 @@ __all__ = [
     "SketchOperations",
     "FeatureOperations",
     "DrawingOperations",
+    "SelectionOperations",
 ]
