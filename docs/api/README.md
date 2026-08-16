@@ -60,5 +60,6 @@ records than its declared `min_methods`.
 | File | Interfaces covered | Status |
 | --- | --- | --- |
 | [`_TEMPLATE.md`](_TEMPLATE.md) | — (format example only, excluded from validation) | n/a |
+| [`01-documents-and-sheets.md`](01-documents-and-sheets.md) | ISldWorks, IModelDoc2, IModelDocExtension, IDrawingDoc, ICustomPropertyManager | complete |
 
 Rows are added here by each research issue as it lands its dossier under `docs/api/`.
