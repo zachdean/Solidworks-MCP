@@ -242,6 +242,7 @@ class _ScriptRegistry:
         self.returns: Dict[str, Any] = {}
         self.sequences: Dict[str, _ScriptedSequence] = {}
         self.raises: Dict[str, BaseException] = {}
+        self.byref_outputs: Dict[str, Dict[int, Any]] = {}
 
 
 # ============================================================================
@@ -352,6 +353,22 @@ class FakeComObject:
         self._scripts.raises[key] = exc
         return self
 
+    def set_byref(self, key: str, outputs: Dict[int, Any]) -> "FakeComObject":
+        """Script ByRef/out-parameter values to write into positional args at
+        call time -- the fake's stand-in for real COM's by-reference
+        semantics, which plain Python positional args can't otherwise
+        emulate. `outputs` maps positional arg index -> value to assign onto
+        that arg's `.value` (a VARIANT box from `com_backend.byref_int`/
+        `byref_str`/`byref_bool`) when `key` is invoked.
+
+        Keyed by explicit index rather than scanning args by type: a call
+        can carry more than one VARIANT-shaped argument at once (e.g.
+        `SaveAs3`'s `ExportData` VARIANT sits ahead of its `Errors` one), so
+        a type-based scan would write the wrong slot.
+        """
+        self._scripts.byref_outputs[key] = dict(outputs)
+        return self
+
     def new_object(self, path: str) -> "FakeComObject":
         """A standalone `FakeComObject` sharing this graph's script registry
         and call log, but not wired into any parent's children -- for use as
@@ -398,6 +415,13 @@ class FakeComObject:
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         self._log.record(self._owner_path, self._name, args, kwargs)
         keys = self._candidate_keys()
+        for key in keys:
+            outputs = self._scripts.byref_outputs.get(key)
+            if outputs is not None:
+                for index, value in outputs.items():
+                    if index < len(args) and hasattr(args[index], "value"):
+                        args[index].value = value
+                break
         for key in keys:
             if key in self._scripts.raises:
                 raise self._scripts.raises[key]

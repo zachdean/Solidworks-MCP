@@ -29,6 +29,7 @@ from .registry import (  # noqa: E402
 
 from . import connection  # noqa: E402,F401
 from . import documents  # noqa: E402,F401
+from . import drawing_documents  # noqa: E402,F401
 from . import sketches  # noqa: E402,F401
 from . import features  # noqa: E402,F401
 from . import utility  # noqa: E402,F401

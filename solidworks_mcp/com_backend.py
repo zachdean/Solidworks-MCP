@@ -91,6 +91,22 @@ def byref_int(initial: int = 0) -> Any:
     return get_win32com().VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, initial)
 
 
+def byref_str(initial: str = "") -> Any:
+    """A by-reference string VARIANT, for out-parameters like
+    `ICustomPropertyManager::Get6`'s `ValOut`/`ResolvedValOut`. Read the
+    result back off `.value` after the call."""
+    pythoncom = get_pythoncom()
+    return get_win32com().VARIANT(pythoncom.VT_BYREF | pythoncom.VT_BSTR, initial)
+
+
+def byref_bool(initial: bool = False) -> Any:
+    """A by-reference boolean VARIANT, for out-parameters like
+    `ICustomPropertyManager::Get6`'s `WasResolved`/`LinkToProperty`. Read the
+    result back off `.value` after the call."""
+    pythoncom = get_pythoncom()
+    return get_win32com().VARIANT(pythoncom.VT_BYREF | pythoncom.VT_BOOL, initial)
+
+
 def set_backend(win32com_stub: Any, pythoncom_stub: Any) -> Dict[str, Any]:
     """Inject fake win32com.client / pythoncom modules for testing.
 

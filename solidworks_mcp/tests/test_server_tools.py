@@ -41,6 +41,14 @@ EXPECTED_TOOL_NAMES = {
     "close_document",
     "get_document_info",
     "list_open_documents",
+    # Drawing Document & Session Tools
+    "new_drawing_from_template",
+    "get_document_type",
+    "open_or_activate_document",
+    "rebuild_document",
+    "save_drawing",
+    "get_custom_properties",
+    "set_custom_properties",
     # Sketch Tools
     "create_sketch",
     "create_sketch_on_face",
@@ -70,10 +78,10 @@ def listed_tools():
 
 
 class TestListToolsRegistry:
-    def test_list_tools_returns_the_same_25_tool_names(self, listed_tools):
+    def test_list_tools_returns_the_same_32_tool_names(self, listed_tools):
         names = {tool.name for tool in listed_tools}
         assert names == EXPECTED_TOOL_NAMES
-        assert len(listed_tools) == 25
+        assert len(listed_tools) == 32
 
     def test_list_tools_has_no_duplicate_names(self, listed_tools):
         names = [tool.name for tool in listed_tools]

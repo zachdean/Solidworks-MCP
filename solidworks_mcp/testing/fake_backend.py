@@ -78,6 +78,8 @@ class FakePythonCom:
 
     VT_BYREF = 0x4000
     VT_I4 = 3
+    VT_BOOL = 11
+    VT_BSTR = 8
     VT_DISPATCH = 9
     Nothing = None
 
