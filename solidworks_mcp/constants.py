@@ -36,11 +36,18 @@ class SwErrors(IntEnum):
 # ============================================================================
 
 class SwDocumentTypes(IntEnum):
-    """SolidWorks document types"""
+    """SolidWorks document types (swDocumentTypes_e).
+
+    Source: docs/api/01-documents-and-sheets.md (Enums section).
+    """
     swDocNONE = 0
     swDocPART = 1
     swDocASSEMBLY = 2
     swDocDRAWING = 3
+    swDocSDM = 4
+    swDocLAYOUT = 5
+    swDocIMPORTED_PART = 6
+    swDocIMPORTED_ASSEMBLY = 7
 
 
 # ============================================================================
