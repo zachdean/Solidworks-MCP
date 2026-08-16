@@ -63,5 +63,6 @@ records than its declared `min_methods`.
 | [`01-documents-and-sheets.md`](01-documents-and-sheets.md) | ISldWorks, IModelDoc2, IModelDocExtension, IDrawingDoc, ICustomPropertyManager | complete |
 | [`02-views.md`](02-views.md) | IDrawingDoc, IView, ISldWorks, IModelDocExtension | complete |
 | [`03-annotations.md`](03-annotations.md) | IModelDocExtension, ISelectionMgr, IModelDoc2, IDrawingDoc, IView, IDisplayDimension, IDimension, IGtol, IGtolFrame, IDatumTag, IWeldSymbol, IAnnotation | complete |
+| [`04-tables.md`](04-tables.md) | IModelDocExtension, IView, IBomTableAnnotation, IDrawingDoc, ISheet, IRevisionTableAnnotation, IWeldmentCutListAnnotation, IHoleTableAnnotation, ITableAnnotation, IAnnotation | complete |
 
 Rows are added here by each research issue as it lands its dossier under `docs/api/`.
