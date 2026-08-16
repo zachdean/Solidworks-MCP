@@ -28,7 +28,7 @@ The property-vs-method problem
 ===============================
 SolidWorks' COM type library is inconsistent about whether a given member
 is exposed as a property or a method across versions -- see
-`server.py::_list_features_fixed`, which has to try `feat.GetTypeName2` as
+`tools/features.py::_list_features_fixed`, which has to try `feat.GetTypeName2` as
 a property and fall back to `feat.GetTypeName2()` as a method. A fake
 attribute therefore has to work usable *both* ways: `x.Foo` on its own
 (compared, stringified, used as a value) and `x.Foo()` (called). Every

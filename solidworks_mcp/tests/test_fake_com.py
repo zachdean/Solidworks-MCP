@@ -282,7 +282,7 @@ class TestFakeSldWorksPart:
         assert app.ActiveDoc.FirstFeature == None  # noqa: E711
 
     def test_default_feature_walk_terminates_without_scripting(self):
-        """Mirrors server.py::_list_features_fixed's exact idiom: bare
+        """Mirrors tools/features.py::_list_features_fixed's exact idiom: bare
         FirstFeature access (no callable-check) followed by a
         callable-checked GetNextFeature walk. Must not infinite-loop even
         with zero scripting beyond FakeSldWorks()'s own defaults."""
@@ -352,7 +352,7 @@ class TestFakeSldWorksDrawing:
 
 
 # ============================================================================
-# Realistic tool-shaped scenario (mirrors sketches.py draw_circle / server.py
+# Realistic tool-shaped scenario (mirrors sketches.py draw_circle / tools/sketches.py
 # _list_features_fixed idioms)
 # ============================================================================
 
@@ -370,7 +370,7 @@ class TestToolShapedUsage:
         assert doc.call_log.arg_of("CreateCircle", 3) == pytest.approx(0.025)
 
     def test_property_or_method_get_type_name_idiom(self):
-        """Mirrors server.py::_list_features_fixed's
+        """Mirrors tools/features.py::_list_features_fixed's
         `feat_type = feat.GetTypeName2; if callable(feat_type): feat_type = feat_type()`."""
         app = FakeSldWorks("part")
         feat = app.new_object("feat")
