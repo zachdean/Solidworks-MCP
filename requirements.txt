@@ -3,7 +3,10 @@
 # Updated: 2026-01-22
 
 # MCP SDK
-mcp>=1.0.0
+# Pinned below 2.0: mcp 2.0 dropped the @server.list_tools()/@server.call_tool()
+# decorator API that server.py uses (Server.request_handlers-based registration
+# instead), which makes solidworks_mcp.server unimportable under 2.0.
+mcp>=1.0.0,<2.0.0
 
 # Async support is provided by the stdlib `asyncio` module (no package needed)
 
