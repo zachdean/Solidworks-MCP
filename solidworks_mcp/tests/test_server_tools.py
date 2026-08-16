@@ -18,6 +18,7 @@ import inspect
 import pytest
 
 from solidworks_mcp import com_backend, server
+from solidworks_mcp.testing import install_fake_backend
 from solidworks_mcp.utils import units as units_module
 
 
@@ -80,35 +81,30 @@ class TestListToolsCallToolParity:
         via `arguments.get(key, default)`, so `{}` is always a valid (if
         sometimes business-logic-failing) call.
 
-        Deliberately does NOT install a `fake_sw` backend here: `server.py`
-        uses a module-level `sw_automation` singleton shared by every test in
-        the process, and several handlers (`extrude_sketch`, `cut_extrude`)
-        walk `doc.FirstFeature`/`GetNextFeature` with bare, uncalled
-        attribute access (`_find_last_sketch`) -- against a live
-        `FakeSldWorks` that never resolves to real `None` without an
-        explicit `()` call, so it free-spins forever (see
-        testing/fake_com.py's module docstring). With no backend installed,
-        `connect()` fails fast with `ComUnavailableError` for every
-        connection-requiring tool, so this test only proves dispatch, not
-        business-logic success.
+        Runs against an installed fake backend rather than whatever COM the
+        host happens to have, so the result is identical on macOS/Linux and
+        on the Windows machines this product actually ships to. None of the
+        handlers' zero-argument defaults touch the filesystem or a real
+        SolidWorks: `open_document("")` fails its `os.path.exists` check and
+        `save_document(None)` takes the save-in-place branch onto the fake.
 
-        `set_units` mutates process-global state
-        (`utils.units._default_converter`) independent of any connection, so
-        that alone still needs restoring afterwards.
+        `server.py` keeps a module-level `sw_automation` singleton shared by
+        every test in the process, so the connection it makes to this
+        (torn-down) fake has to be dropped afterwards; likewise `set_units`
+        mutates process-global `utils.units._default_converter` state.
         """
-        assert not com_backend.is_com_available(), (
-            "a fake (or real) COM backend is installed -- extrude_sketch/cut_extrude's "
-            "bare FirstFeature/GetNextFeature walk would free-spin against a live one"
-        )
         original_default_unit = units_module.get_converter().default_unit
         original_sw_units_default = server.sw_automation._units.default_unit
         try:
-            for tool in listed_tools:
-                contents = asyncio.run(server.call_tool(tool.name, {}))
-                text = contents[0].text
-                assert f"Unknown tool: {tool.name}" not in text, (
-                    f"{tool.name!r} is listed but call_tool() dispatched it to the fallback branch: {text}"
-                )
+            with install_fake_backend("part"):
+                assert com_backend.is_com_available()
+                for tool in listed_tools:
+                    contents = asyncio.run(server.call_tool(tool.name, {}))
+                    text = contents[0].text
+                    assert f"Unknown tool: {tool.name}" not in text, (
+                        f"{tool.name!r} is listed but call_tool() dispatched it to the fallback branch: {text}"
+                    )
         finally:
+            server.sw_automation.disconnect()
             units_module.set_default_unit(original_default_unit)
             server.sw_automation._units.default_unit = original_sw_units_default

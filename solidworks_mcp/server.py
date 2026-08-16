@@ -552,6 +552,12 @@ def _execute_python_fixed(code: str) -> Dict:
         # honours an injected test backend and raises ComUnavailableError
         # (not ModuleNotFoundError) off Windows. Executed snippets reach COM
         # as `win32com.client.<...>`, so keep that shape.
+        #
+        # NARROWING: the exposed `win32com` is a stand-in exposing `.client`
+        # only, not the real package -- a snippet reaching for another
+        # submodule (`win32com.storagecon`, `win32com.server.util`) now gets
+        # an AttributeError and must `import` it itself. Widening this would
+        # mean importing pywin32 directly here and losing the seam.
         win32com_client = com_backend.get_win32com()
         pythoncom = com_backend.get_pythoncom()
 

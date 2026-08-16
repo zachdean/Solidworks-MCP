@@ -5,8 +5,10 @@ Tests for the recording fake-COM harness (`solidworks_mcp.testing.fake_com`).
 import pytest
 
 from solidworks_mcp.testing.fake_com import (
+    _MAX_CHAIN_DEPTH,
     Call,
     CallLog,
+    FakeComHarnessError,
     FakeComObject,
     FakeSldWorks,
     _ScriptRegistry,
@@ -55,6 +57,53 @@ class TestAutoVivify:
         assert bool(feat) is True
         assert feat is not None
 
+    def test_explicitly_assigned_child_is_never_depth_capped(self):
+        """The cap guards auto-vivification only -- a hand-assigned value is
+        deliberate scripting, however deep it sits."""
+        node = root_object()
+        for _ in range(_MAX_CHAIN_DEPTH):
+            node = node.Next  # now sitting exactly at the cap
+        node.Terminator = None
+        assert node.Terminator is None
+        with pytest.raises(FakeComHarnessError):
+            node.SomethingUnscripted
+
+
+class TestRunawayChainCap:
+    """`automation/features.py` walks `while feat is not None: feat =
+    feat.GetNextFeature` with bare, uncalled access. No scripted value can
+    make that terminate (`is None` is an identity check), so auto-vivify
+    depth is capped instead of spinning until the process is killed."""
+
+    def test_unguarded_walk_terminates_instead_of_hanging(self):
+        obj = root_object()
+
+        feat = obj.FirstFeature
+        seen = 0
+        while feat is not None:
+            seen += 1
+            assert seen <= _MAX_CHAIN_DEPTH + 2, "depth cap failed to bound the walk"
+            try:
+                feat = feat.GetNextFeature
+            except FakeComHarnessError:
+                break
+
+        assert seen <= _MAX_CHAIN_DEPTH + 1
+
+    def test_bare_except_at_the_call_site_still_catches_the_cap(self):
+        """Production's walks break out via a bare `except:`, which catches
+        `BaseException` -- that is what turns the cap into a clean loop exit
+        rather than a crash escaping through the tool handler."""
+        obj = root_object()
+        node = obj
+        for _ in range(_MAX_CHAIN_DEPTH + 1):
+            try:
+                node = node.GetNextFeature
+            except:  # mirrors automation/features.py's walk exactly
+                break
+        else:
+            pytest.fail("chain never hit the depth cap")
+
 
 # ============================================================================
 # set_return / set_sequence / set_raises
@@ -98,12 +147,25 @@ class TestSetSequence:
         assert obj.GetNextFeature() is feat2
         assert obj.GetNextFeature() is None
 
-    def test_sequence_exhaustion_raises_assertion_error(self):
+    def test_sequence_exhaustion_raises_harness_error(self):
         obj = root_object()
         obj.set_sequence("Foo", [1])
         obj.Foo()
-        with pytest.raises(AssertionError):
+        with pytest.raises(FakeComHarnessError):
             obj.Foo()
+
+    def test_sequence_exhaustion_survives_an_except_exception_call_site(self):
+        """The whole point of `FakeComHarnessError` being a `BaseException`:
+        `automation/` wraps every COM call in `except Exception`, which would
+        otherwise turn an exhausted script into a plausible error-path result
+        and a test that passes for the wrong reason."""
+        obj = root_object()
+        obj.set_sequence("Foo", [])
+        with pytest.raises(FakeComHarnessError):
+            try:
+                obj.Foo()
+            except Exception:  # mirrors the automation layer's call sites
+                pytest.fail("harness error was swallowed by `except Exception`")
 
     def test_property_style_peek_does_not_consume_sequence(self):
         obj = root_object()

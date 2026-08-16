@@ -11,17 +11,18 @@ be installed via raw property assignment (`doc.FirstFeature = feat1`, which
 stores the literal value rather than a wrapper) -- not `set_return`, which
 only resolves for explicit `()` calls or `==`/`bool()` comparisons.
 
-# KNOWN: `_find_last_sketch`/`_get_sketch_info` (this module) and
-# `list_features` (also this module) walk `FirstFeature`/`GetNextFeature`
-# with bare, uncalled attribute access and no `callable(...)` guard, whereas
+# KNOWN (production, not the harness): `_find_last_sketch`/`_get_sketch_info`
+# and `list_features` walk `FirstFeature`/`GetNextFeature` with bare,
+# uncalled attribute access and no `callable(...)` guard, whereas
 # `server.py::_list_features_fixed` guards the same walk with
 # `feat = feat.GetNextFeature; if callable(feat): feat = feat()`. This
 # module's own v4.0 header notes FirstFeature/GetNextFeature are a property
 # in some SolidWorks versions and a method in others -- on a version where
 # they're method-like, these unguarded walks would get back a bound method
-# (never `None`) and never terminate. Not fixed here per this task's scope;
-# `_install_profile_sketch` below exists only to keep this file's own tests
-# from tripping over it.
+# (never `None`) and never terminate. Not fixed here per this task's scope.
+# Against the fake, the same walk is bounded by `_MAX_CHAIN_DEPTH` (it exits
+# via the walk's bare `except:`), so it fails fast instead of hanging;
+# `_install_profile_sketch` below scripts a real, terminating one-sketch tree.
 """
 
 import pytest

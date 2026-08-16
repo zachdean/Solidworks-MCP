@@ -103,8 +103,8 @@ def install_fake_backend(
     """
     if app is None:
         app = FakeSldWorks(doc_type, **kwargs)
-    com_backend.set_backend(FakeWin32ComClient(app), FakePythonCom())
+    previous = com_backend.set_backend(FakeWin32ComClient(app), FakePythonCom())
     try:
         yield app
     finally:
-        com_backend.reset_backend()
+        com_backend.reset_backend(previous)

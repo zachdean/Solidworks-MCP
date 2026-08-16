@@ -23,7 +23,7 @@ exactly one place.
 """
 
 import importlib
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 _WIN32COM = "win32com.client"
 _PYTHONCOM = "pythoncom"
@@ -91,12 +91,25 @@ def byref_int(initial: int = 0) -> Any:
     return get_win32com().VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, initial)
 
 
-def set_backend(win32com_stub: Any, pythoncom_stub: Any) -> None:
-    """Inject fake win32com.client / pythoncom modules for testing."""
+def set_backend(win32com_stub: Any, pythoncom_stub: Any) -> Dict[str, Any]:
+    """Inject fake win32com.client / pythoncom modules for testing.
+
+    Returns the overrides that were in effect beforehand; hand that token to
+    `reset_backend()` to restore them, so installs can nest.
+    """
+    previous = dict(_overrides)
     _overrides[_WIN32COM] = win32com_stub
     _overrides[_PYTHONCOM] = pythoncom_stub
+    return previous
 
 
-def reset_backend() -> None:
-    """Remove any injected test backend, reverting to real pywin32 imports."""
+def reset_backend(previous: Optional[Dict[str, Any]] = None) -> None:
+    """Remove the injected test backend, reverting to real pywin32 imports.
+
+    Pass the token `set_backend()` returned to restore the backend that was
+    installed before it instead of clearing outright -- otherwise unwinding
+    an inner install silently kills the outer one too.
+    """
     _overrides.clear()
+    if previous:
+        _overrides.update(previous)

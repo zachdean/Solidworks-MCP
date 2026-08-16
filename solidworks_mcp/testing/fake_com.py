@@ -88,6 +88,17 @@ scripted value directly. If a value needs to be a genuine Python primitive
 `FirstFeature`/`GetNextFeature` walk that uses the callable-check idiom
 (`feat = feat.GetNextFeature; if callable(feat): feat = feat()`) is bounded
 to at most one iteration by default instead of looping forever.
+
+The *unguarded* form of that walk -- `while feat is not None: feat =
+feat.GetNextFeature`, which `automation/features.py` uses -- can't be
+terminated by any scripted value, because each bare access hands back a new
+truthy wrapper. Auto-vivification is therefore capped at
+`_MAX_CHAIN_DEPTH` levels, past which the chain raises
+`FakeComHarnessError` instead of growing forever; production's bare
+`except:` around those walks turns that into a clean loop exit. To exercise
+such a walk deliberately, assign the raw terminator
+(`feat.GetNextFeature = None`), which stores the literal value rather than
+a wrapper -- see `tests/test_features.py::_install_profile_sketch`.
 """
 
 from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple
@@ -95,9 +106,25 @@ from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple
 __all__ = [
     "Call",
     "CallLog",
+    "FakeComHarnessError",
     "FakeComObject",
     "FakeSldWorks",
 ]
+
+
+class FakeComHarnessError(BaseException):
+    """The harness itself was driven past what it can honestly answer -- a
+    `set_sequence` ran out of scripted values, or an unscripted attribute
+    chain auto-vivified past `_MAX_CHAIN_DEPTH`.
+
+    Deliberately a `BaseException` rather than an `Exception`: every COM call
+    site in `automation/` is wrapped in `except Exception` (or a bare
+    `except:`), so an `Exception` here would be swallowed and re-emerge as a
+    plausible-looking `swFeatureError` result -- a test asserting on the
+    error path would then pass for entirely the wrong reason. Production's
+    *bare* `except:` clauses still catch this, which is what bounds the
+    runaway walks described in the module docstring's Limitations section.
+    """
 
 
 # ============================================================================
@@ -201,7 +228,7 @@ class _ScriptedSequence:
 
     def advance(self, key: str) -> Any:
         if self._index >= len(self._values):
-            raise AssertionError(f"scripted sequence for {key!r} is exhausted")
+            raise FakeComHarnessError(f"scripted sequence for {key!r} is exhausted")
         value = self._values[self._index]
         self._index += 1
         return value
@@ -223,8 +250,17 @@ class _ScriptRegistry:
 
 _INTERNAL_ATTRS = frozenset({
     "_scripts", "_log", "_path", "_owner_path", "_name", "_owner_com_type",
-    "_com_type", "_children",
+    "_com_type", "_children", "_depth",
 })
+
+# How deep an *unscripted* attribute/call chain may auto-vivify before the
+# harness calls it a runaway. Real SolidWorks chains are a handful of levels
+# (`app.ActiveDoc.SketchManager.InsertSketch`), so this only ever trips on a
+# loop -- the `while feat is not None: feat = feat.GetNextFeature` walks in
+# `automation/features.py`, which no fake can terminate (see the module
+# docstring's Limitations section: bare access cannot satisfy `is None`).
+# Without the cap those loops spin until the process is killed.
+_MAX_CHAIN_DEPTH = 64
 
 
 class FakeComObject:
@@ -248,7 +284,9 @@ class FakeComObject:
         owner_path: str = "",
         owner_com_type: Optional[str] = None,
         com_type: Optional[str] = None,
+        depth: int = 0,
     ) -> None:
+        object.__setattr__(self, "_depth", depth)
         object.__setattr__(self, "_scripts", scripts)
         object.__setattr__(self, "_log", log)
         object.__setattr__(self, "_path", path)
@@ -265,6 +303,15 @@ class FakeComObject:
             raise AttributeError(name)
         children = self._children
         if name not in children:
+            # Only the auto-vivify path is capped -- an explicitly assigned or
+            # already-cached child is a deliberate, finite piece of scripting.
+            if self._depth >= _MAX_CHAIN_DEPTH:
+                raise FakeComHarnessError(
+                    f"unscripted attribute chain ran past {_MAX_CHAIN_DEPTH} levels at "
+                    f"{self._path}.{name} -- a caller is almost certainly looping over "
+                    f"an auto-vivified chain that can never compare `is None`. Script "
+                    f"the terminator explicitly, e.g. `obj.{name} = None`."
+                )
             children[name] = FakeComObject(
                 self._scripts,
                 self._log,
@@ -272,6 +319,7 @@ class FakeComObject:
                 name=name,
                 owner_path=self._path,
                 owner_com_type=self._com_type,
+                depth=self._depth + 1,
             )
         self._log.record(self._path, name, None, None)
         return children[name]
@@ -363,7 +411,10 @@ class FakeComObject:
         # Nothing scripted: auto-vivify a fresh chainable result so callers
         # that keep chaining (`doc.SketchManager.InsertSketch(True).Foo`)
         # don't crash, and `is None` / truthiness checks see a real object.
-        return FakeComObject(self._scripts, self._log, f"{self._path}()", name=self._name)
+        return FakeComObject(
+            self._scripts, self._log, f"{self._path}()",
+            name=self._name, depth=self._depth + 1,
+        )
 
     def __eq__(self, other: Any) -> bool:
         value = self._peek()
@@ -372,6 +423,16 @@ class FakeComObject:
         return self is other
 
     def __hash__(self) -> int:
+        # Must agree with `__eq__`: a wrapper scripted to "ProfileFeature"
+        # compares equal to that string, so it has to hash like it too, or
+        # production code doing `value in {...}` / `dict[value]` silently
+        # misses against the fake while working against real COM.
+        value = self._peek()
+        if value is not _UNSET:
+            try:
+                return hash(value)
+            except TypeError:  # scripted to an unhashable value (list, dict)
+                return id(self)
         return id(self)
 
     def __bool__(self) -> bool:
@@ -397,11 +458,12 @@ class FakeComObject:
 # FakeSldWorks factory
 # ============================================================================
 
-# (swDocPART, swDocASSEMBLY, swDocDRAWING) and their COM interface names.
+# (swDocPART, swDocASSEMBLY, swDocDRAWING), COM interface name, and the
+# untitled-document name SolidWorks itself would use.
 _DOC_TYPES = {
-    "part": (1, "IPartDoc"),
-    "assembly": (2, "IAssemblyDoc"),
-    "drawing": (3, "IDrawingDoc"),
+    "part": (1, "IPartDoc", "Part1"),
+    "assembly": (2, "IAssemblyDoc", "Assem1"),
+    "drawing": (3, "IDrawingDoc", "Draw1"),
 }
 
 
@@ -416,15 +478,21 @@ def FakeSldWorks(doc_type: str = "part", *, sheet_names: Optional[List[str]] = N
         sheet_names: for `doc_type="drawing"`, the names `GetSheetNames()`
             returns (default `["Sheet1"]`).
 
-    `ActiveDoc.FirstFeature` and `.GetNextFeature` are pre-scripted to
-    `None` so naive `FirstFeature` / `GetNextFeature` walks terminate (in at
-    most one iteration -- see the module docstring's Limitations section)
-    instead of looping forever on auto-vivified objects -- `set_sequence`
-    on `GetNextFeature` to exercise a real, multi-feature list.
+    `ActiveDoc.FirstFeature`, `.GetNextFeature` and `GetFirstDocument` are
+    pre-scripted to `None` so naive walks over them terminate (in at most one
+    iteration -- see the module docstring's Limitations section) instead of
+    looping over auto-vivified objects -- `set_sequence` on `GetNextFeature`
+    to exercise a real, multi-feature list.
+
+    `ActiveDoc.GetTitle`/`GetPathName` are pre-scripted to a real `str` (an
+    unsaved document named the way SolidWorks would name it), since tool
+    results carrying them get JSON-serialized and a wrapper would not
+    survive that. Override either with `set_return` for a saved-document
+    scenario.
     """
     if doc_type not in _DOC_TYPES:
         raise ValueError(f"doc_type must be one of {sorted(_DOC_TYPES)}, got {doc_type!r}")
-    sw_doc_type, com_type = _DOC_TYPES[doc_type]
+    sw_doc_type, com_type, doc_title = _DOC_TYPES[doc_type]
 
     scripts = _ScriptRegistry()
     log = CallLog()
@@ -433,11 +501,20 @@ def FakeSldWorks(doc_type: str = "part", *, sheet_names: Optional[List[str]] = N
     app.tag("ISldWorks")
     app.Visible = True
 
+    # An open-documents walk (`GetFirstDocument`/`GetNext`) terminates
+    # immediately unless a test scripts one, same as the feature walk below.
+    app.set_return("GetFirstDocument", None)
+
     doc = app.ActiveDoc
     doc.tag(com_type)
     doc.set_return("GetType", sw_doc_type)
     doc.set_return("FirstFeature", None)
     doc.set_return("GetNextFeature", None)
+    # Real strings, not auto-vivified wrappers: tool results carrying the
+    # title/path get `json.dumps`-ed by `server.py::format_result`, which a
+    # `FakeComObject` cannot survive.
+    doc.set_return("GetTitle", doc_title)
+    doc.set_return("GetPathName", "")
 
     doc.Extension.tag("IModelDocExtension")
     doc.SelectionManager.tag("ISelectionMgr")
