@@ -40,8 +40,8 @@ explicit note in Gotchas — never invent a signature.
 
 ## Dossier file format
 
-Every dossier file (anything under `docs/api/` other than this README and
-`_TEMPLATE.md`) must:
+Every dossier file (anything under `docs/api/` other than this README and files whose
+name starts with `_`, which are scaffolding such as `_TEMPLATE.md`) must:
 
 1. Start with YAML front matter. `min_methods` (the number of H3 method records the
    file must contain) is required and machine-checked; `interface` (the primary
@@ -50,10 +50,11 @@ Every dossier file (anything under `docs/api/` other than this README and
 2. Document each method as an H3 (`### `) record following the format in
    [`_TEMPLATE.md`](_TEMPLATE.md).
 
-`scripts/check_api_docs.py` (wired into `scripts/check.sh`) enforces this shape — it fails
-the build if a dossier is missing required sections, a method record is missing its
-Signature / Parameter table / Source URL(s) / status line, or a file has fewer method
-records than its declared `min_methods`.
+`scripts/check_api_docs.py` (wired into `scripts/check.sh`, and covered by the pytest
+suite) enforces this shape — it fails the build if a dossier is missing required
+sections, a method record is missing its Signature / Parameter table / Returns / Prior
+selection required / Source URL(s) / status line, or a file has fewer method records
+than its declared `min_methods`.
 
 ## Index
 

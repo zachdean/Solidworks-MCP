@@ -1,6 +1,5 @@
 """Tests for scripts/check_api_docs.py."""
 import importlib.util
-import sys
 from pathlib import Path
 
 import pytest
@@ -9,25 +8,28 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "check_api_docs.py"
 
 
-def _load_module():
+@pytest.fixture
+def check_api_docs():
+    """The validator, loaded by path — it lives in scripts/, not an importable package."""
     spec = importlib.util.spec_from_file_location("check_api_docs", SCRIPT_PATH)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-@pytest.fixture
-def check_api_docs():
-    return _load_module()
-
-
-GOOD_DOSSIER = """---
+# A minimal record in the shape docs/api/_TEMPLATE.md defines canonically. Kept
+# inline (rather than read from the template) so the mutation tests below can
+# point at exactly one field each; test_real_template_file_would_pass guards the
+# two from drifting apart.
+FRONT_MATTER = """---
 interface: IDrawingDoc
 min_methods: 1
 status: in-progress
 ---
 
-# Example dossier
+"""
+
+GOOD_DOSSIER = FRONT_MATTER + """# Example dossier
 
 ### IDrawingDoc::NewSheet4
 
@@ -61,61 +63,63 @@ Function NewSheet4(ByVal Name As String) As Boolean
 """
 
 
-def test_valid_dossier_passes(tmp_path, check_api_docs, monkeypatch):
-    monkeypatch.setattr(check_api_docs, "DOCS_DIR", tmp_path)
+def test_valid_dossier_passes(tmp_path, check_api_docs):
     (tmp_path / "drawing.md").write_text(GOOD_DOSSIER)
-    assert check_api_docs.main() == 0
+    assert check_api_docs.main(tmp_path) == 0
 
 
-def test_readme_and_template_are_excluded(tmp_path, check_api_docs, monkeypatch):
-    monkeypatch.setattr(check_api_docs, "DOCS_DIR", tmp_path)
-    (tmp_path / "README.md").write_text("not a dossier, no front matter")
-    (tmp_path / "_TEMPLATE.md").write_text("not a dossier, no front matter")
-    assert check_api_docs.main() == 0
+def test_readme_and_underscore_files_are_excluded(tmp_path, check_api_docs):
+    """README.md and `_`-prefixed scaffolding are skipped, not validated."""
+    for name in ("README.md", "_TEMPLATE.md", "_scratch.md"):
+        (tmp_path / name).write_text("not a dossier, no front matter")
+    assert check_api_docs.main(tmp_path) == 0
 
 
 @pytest.mark.parametrize(
-    "marker",
+    "old,new,expected",
     [
-        "**Signature:**",
-        "**Source URL(s):**",
-        "**status:** verified",
+        ("**Signature:**", "Signature: (removed)", "Signature"),
+        ("| --- | --- | --- | --- | --- | --- |\n", "", "Parameter table"),
+        ("**Returns:**", "Returns: (removed)", "Returns:"),
+        ("**Prior selection required:**", "Prior selection required: (removed)", "Prior selection required"),
+        ("**Source URL(s):**", "Source URL(s): (removed)", "Source URL"),
+        ("**status:** verified", "status: verified (removed)", "status:"),
+        ("min_methods: 1", "min_methods: 2", "min_methods=2"),
+        ("min_methods: 1", "min_methods: many", "not an integer"),
+        (FRONT_MATTER, "", "front matter"),
+    ],
+    ids=[
+        "signature",
+        "parameter-table",
+        "returns",
+        "prior-selection",
+        "source-url",
+        "status",
+        "too-few-methods",
+        "min-methods-not-an-int",
+        "no-front-matter",
     ],
 )
-def test_missing_required_section_fails(tmp_path, check_api_docs, monkeypatch, marker, capsys):
-    monkeypatch.setattr(check_api_docs, "DOCS_DIR", tmp_path)
-    broken = GOOD_DOSSIER.replace(marker, marker.replace("*", "") + " (removed)")
-    assert broken != GOOD_DOSSIER, f"marker {marker!r} not found in fixture"
+def test_invalid_dossier_fails(tmp_path, check_api_docs, capsys, old, new, expected):
+    broken = GOOD_DOSSIER.replace(old, new)
+    assert broken != GOOD_DOSSIER, f"fixture does not contain {old!r}"
     (tmp_path / "drawing.md").write_text(broken)
-    assert check_api_docs.main() == 1
-    assert "error:" in capsys.readouterr().err
+    assert check_api_docs.main(tmp_path) == 1
+    assert expected in capsys.readouterr().err
 
 
-def test_missing_parameter_table_separator_fails(tmp_path, check_api_docs, monkeypatch, capsys):
-    monkeypatch.setattr(check_api_docs, "DOCS_DIR", tmp_path)
-    broken = GOOD_DOSSIER.replace("| --- | --- | --- | --- | --- | --- |\n", "")
-    assert broken != GOOD_DOSSIER
-    (tmp_path / "drawing.md").write_text(broken)
-    assert check_api_docs.main() == 1
-    assert "Parameter table" in capsys.readouterr().err
+def test_real_dossiers_are_valid(check_api_docs):
+    """The gate that matters: the shipped docs/api/ dossiers pass their own validator.
+
+    Without this, `pytest` stays green on a corrupted dossier and only
+    scripts/check.sh catches it.
+    """
+    assert check_api_docs.main() == 0
 
 
-def test_missing_front_matter_fails(tmp_path, check_api_docs, monkeypatch):
-    monkeypatch.setattr(check_api_docs, "DOCS_DIR", tmp_path)
-    (tmp_path / "drawing.md").write_text(GOOD_DOSSIER.split("---\n\n", 1)[1])
-    assert check_api_docs.main() == 1
-
-
-def test_too_few_methods_for_declared_min_methods_fails(tmp_path, check_api_docs, monkeypatch):
-    monkeypatch.setattr(check_api_docs, "DOCS_DIR", tmp_path)
-    (tmp_path / "drawing.md").write_text(GOOD_DOSSIER.replace("min_methods: 1", "min_methods: 2"))
-    assert check_api_docs.main() == 1
-
-
-def test_real_template_file_would_pass_if_not_excluded(check_api_docs, tmp_path, monkeypatch):
+def test_real_template_file_would_pass_if_not_excluded(check_api_docs, tmp_path):
     """The shipped _TEMPLATE.md content is a valid dossier in its own right —
     prove the record it demonstrates satisfies the validator's own rules."""
-    monkeypatch.setattr(check_api_docs, "DOCS_DIR", tmp_path)
-    template_text = (REPO_ROOT / "docs" / "api" / "_TEMPLATE.md").read_text(encoding="utf-8")
+    template_text = (check_api_docs.DOCS_DIR / "_TEMPLATE.md").read_text(encoding="utf-8")
     (tmp_path / "not_excluded.md").write_text(template_text)
-    assert check_api_docs.main() == 0
+    assert check_api_docs.main(tmp_path) == 0

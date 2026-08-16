@@ -2,9 +2,9 @@
 """Validate docs/api/*.md dossiers against the format in docs/api/README.md.
 
 Fails (exit 1) if a dossier is missing required front matter, a method record
-(H3 heading) is missing its Signature / Parameter table / Source URL(s) /
-status line, or a file documents fewer method records than the `min_methods`
-count declared in its own front matter.
+(H3 heading) is missing one of the RECORD_CHECKS fields below, or a file
+documents fewer method records than the `min_methods` count declared in its own
+front matter.
 """
 from __future__ import annotations
 
@@ -13,15 +13,54 @@ import sys
 from pathlib import Path
 
 DOCS_DIR = Path(__file__).resolve().parent.parent / "docs" / "api"
-EXCLUDED_FILES = {"README.md", "_TEMPLATE.md"}
 
 FRONT_MATTER_RE = re.compile(r"\A---\r?\n(.*?)\r?\n---\r?\n", re.S)
 RECORD_HEADING_RE = re.compile(r"^### +(.+?)\s*$", re.M)
-SIGNATURE_RE = re.compile(r"\*\*Signature:?\*\*\s*\n```")
-PARAM_TABLE_RE = re.compile(r"^\|.*\|\s*\n\|[ \t]*:?-{2,}.*\|\s*$", re.M)
-SOURCE_URL_RE = re.compile(r"\*\*Source URL\(s\):?\*\*(.*?)(?=\n\*\*|\Z)", re.S)
-URL_RE = re.compile(r"https?://\S+")
-STATUS_RE = re.compile(r"\*\*status:?\*\*\s*(verified|unverified)\b")
+
+# Every per-record rule lives here as data, so adding or relaxing a required
+# field is a row edit rather than a new regex + branch + message string. Order
+# is the order the fields appear in a record (see docs/api/_TEMPLATE.md).
+# **Gotchas:** is deliberately absent: the format asks for it, but a record with
+# genuinely nothing to warn about is legitimate, so it stays reviewer-enforced.
+RECORD_CHECKS: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(r"\*\*Signature:?\*\*\s*\n```"),
+        "missing **Signature:** fenced code block",
+    ),
+    (
+        re.compile(r"^\|.*\|\s*\n\|[ \t]*:?-{2,}.*\|\s*$", re.M),
+        "missing Parameter table (markdown table with header separator)",
+    ),
+    (
+        re.compile(r"^\*\*Returns:?\*\*", re.M),
+        "missing **Returns:** line",
+    ),
+    (
+        re.compile(r"^\*\*Prior selection required:?\*\*", re.M),
+        "missing **Prior selection required:** line",
+    ),
+    (
+        # The URL has to sit inside the Source URL(s) section, i.e. before the
+        # next bold field label.
+        re.compile(r"\*\*Source URL\(s\):?\*\*(?:(?!\n\*\*).)*?https?://\S+", re.S),
+        "missing **Source URL(s):** with at least one http(s) URL",
+    ),
+    (
+        re.compile(r"\*\*status:?\*\*\s*(verified|unverified)\b"),
+        "missing **status:** verified|unverified line",
+    ),
+]
+
+
+def is_dossier(path: Path) -> bool:
+    """True for files the validator should check.
+
+    `README.md` is prose about the format and `_`-prefixed files are scaffolding
+    (`_TEMPLATE.md` today) — the underscore prefix is the general opt-out, so a
+    second scaffold file needs no change here. Keep in sync with the prose in
+    docs/api/README.md.
+    """
+    return path.name != "README.md" and not path.name.startswith("_")
 
 
 def parse_front_matter(text: str) -> dict[str, str] | None:
@@ -49,56 +88,41 @@ def split_records(text: str) -> list[tuple[str, str]]:
     return records
 
 
-def check_record(heading: str, body: str) -> list[str]:
-    errors = []
-    if not SIGNATURE_RE.search(body):
-        errors.append(f"record '{heading}': missing **Signature:** fenced code block")
-    if not PARAM_TABLE_RE.search(body):
-        errors.append(f"record '{heading}': missing Parameter table (markdown table with header separator)")
-    source_match = SOURCE_URL_RE.search(body)
-    if not source_match or not URL_RE.search(source_match.group(1)):
-        errors.append(f"record '{heading}': missing **Source URL(s):** with at least one http(s) URL")
-    if not STATUS_RE.search(body):
-        errors.append(f"record '{heading}': missing **status:** verified|unverified line")
-    return errors
+def check_record(body: str) -> list[str]:
+    return [message for pattern, message in RECORD_CHECKS if not pattern.search(body)]
 
 
 def check_file(path: Path) -> list[str]:
     text = path.read_text(encoding="utf-8")
-    errors = []
 
     front_matter = parse_front_matter(text)
     if front_matter is None:
         return [f"{path}: missing required YAML front matter (--- ... ---) with 'min_methods'"]
-    if "min_methods" not in front_matter:
-        errors.append(f"{path}: front matter missing required 'min_methods' key")
 
+    errors = []
     records = split_records(text)
     for heading, body in records:
-        errors.extend(f"{path}: {e}" for e in check_record(heading, body))
+        errors.extend(f"{path}: record '{heading}': {e}" for e in check_record(body))
 
-    if "min_methods" in front_matter:
-        try:
-            min_methods = int(front_matter["min_methods"])
-        except ValueError:
-            errors.append(f"{path}: front matter 'min_methods' is not an integer: {front_matter['min_methods']!r}")
-        else:
-            if len(records) < min_methods:
-                errors.append(
-                    f"{path}: has {len(records)} method record(s), fewer than declared min_methods={min_methods}"
-                )
+    min_methods = front_matter.get("min_methods")
+    if min_methods is None:
+        errors.append(f"{path}: front matter missing required 'min_methods' key")
+    elif not min_methods.isdigit():
+        errors.append(f"{path}: front matter 'min_methods' is not an integer: {min_methods!r}")
+    elif len(records) < int(min_methods):
+        errors.append(
+            f"{path}: has {len(records)} method record(s), fewer than declared min_methods={min_methods}"
+        )
 
     return errors
 
 
-def main() -> int:
-    if not DOCS_DIR.is_dir():
-        print(f"error: {DOCS_DIR} does not exist", file=sys.stderr)
+def main(docs_dir: Path = DOCS_DIR) -> int:
+    if not docs_dir.is_dir():
+        print(f"error: {docs_dir} does not exist", file=sys.stderr)
         return 1
 
-    doc_files = sorted(
-        p for p in DOCS_DIR.glob("*.md") if p.name not in EXCLUDED_FILES
-    )
+    doc_files = sorted(p for p in docs_dir.glob("*.md") if is_dossier(p))
 
     all_errors: list[str] = []
     for path in doc_files:

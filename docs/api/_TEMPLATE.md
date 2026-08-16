@@ -6,10 +6,10 @@ status: template
 
 # Dossier format template
 
-This file is excluded from `scripts/check_api_docs.py` validation (along with
-`README.md`) — it exists to demonstrate the required record format with one fully
-worked, fetched example. Copy the front matter and record shape below into new
-dossiers under `docs/api/`.
+This file is excluded from `scripts/check_api_docs.py` validation by its `_` prefix
+(along with `README.md`) — it exists to demonstrate the required record format with
+one fully worked, fetched example. Copy the front matter and record shape below into
+new dossiers under `docs/api/`.
 
 ## Front matter
 
@@ -27,14 +27,15 @@ status: <in-progress | complete>
 ## Method record format
 
 Each documented method gets its own H3 heading (`### Interface::Method`) and the
-fields below, in order. `scripts/check_api_docs.py` machine-checks exactly four of
-these per record — **Signature** (must be a fenced code block), **Parameters** (must
-be a markdown table with a header-separator row), **Source URL(s)** (must contain at
-least one `http(s)://` URL), and the **status:** line (must be `verified` or
-`unverified`). The rest (Interface, Method, Minimum SW version, Returns, Prior
-selection required, Gotchas) are required by this format as a matter of research
+fields below, in order. `scripts/check_api_docs.py` machine-checks six of these per
+record — **Signature** (must be a fenced code block), **Parameters** (must be a
+markdown table with a header-separator row), **Returns**, **Prior selection
+required**, **Source URL(s)** (must contain at least one `http(s)://` URL), and the
+**status:** line (must be `verified` or `unverified`). The rest (Interface, Method,
+Minimum SW version, Gotchas) are required by this format as a matter of research
 discipline but are not machine-checked — a reviewer, not the validator, catches a
-missing one.
+missing one. Gotchas is deliberately left unchecked: a record with genuinely nothing
+to warn about is legitimate.
 
 - **Interface**, **Method**, **Minimum SW version**
 - **Signature** — full ordered parameter list with COM types, in a fenced code block
