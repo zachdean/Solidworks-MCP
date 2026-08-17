@@ -245,6 +245,13 @@ _BATCH_EXPORT_FORMAT_EXTENSIONS = {
 # activation failure only to the formats it actually blocks.
 _BATCH_EXPORT_NEEDS_ACTIVE_SHEET = frozenset({"dxf", "dwg", "edrawings"})
 
+# `batch_export_pack`'s "does this pattern discriminate between sheets?"
+# check. Matched as a `str.format` replacement field rather than as the bare
+# literals `"{sheet}"`/`"{index}"`, so a pattern carrying a conversion or
+# format spec -- `{index:02d}`, `{sheet!s}` -- is recognized as the
+# per-sheet token it is instead of being rejected as if it had none.
+_PER_SHEET_TOKEN_RE = re.compile(r"\{(sheet|index)\b[^{}]*\}")
+
 # Characters illegal in a Windows file/directory name, plus C0 control
 # characters -- `batch_export_pack`'s filename_pattern tokens (a sheet name
 # in particular) are caller/model-controlled data, not a path this project
@@ -270,6 +277,27 @@ def _sanitize_filename_component(value: Any) -> str:
     return text.strip(" .")
 
 
+def _com_bool(value: Any) -> Optional[bool]:
+    """Coerce a COM-returned Boolean-ish value to a real `bool`, or `None`
+    when it carries no usable Boolean.
+
+    A `VARIANT_BOOL` reaches Python as a genuine `bool` through some interop
+    layers and as a plain `int` (`0`/`-1`) through others -- the same
+    numeric/Boolean duality `_count_sheet_views` guards against for
+    `IView::Type`. An identity test (`is False`) silently misses the `int`
+    form, so `ILayer::Visible == 0` would read as "not hidden" and the whole
+    show-hidden-layers pass would become a no-op. Anything that is neither
+    (`None` from a failed `_read_prop`, or the fake-COM harness's
+    auto-vivified wrapper for an unscripted member) yields `None`, so callers
+    can tell "no answer" apart from a definite `False`.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return None
+
+
 def _looks_like_missing_addin(message: str) -> bool:
     """Best-effort heuristic for `export_edrawings`: does a raised COM
     exception's message look like a missing/unavailable eDrawings add-in,
@@ -279,9 +307,17 @@ def _looks_like_missing_addin(message: str) -> bool:
     string-matching convention, not a verified API contract -- callers
     should treat a `False` result as "inconclusive", not "definitely not an
     add-in problem".
+
+    Deliberately does *not* key on a bare `"edrawings"`: every target of this
+    export ends in `.edrw` and operators routinely export into a directory
+    like `C:\\Exports\\eDrawings\\`, so any unrelated COM failure whose
+    message quotes the path (permission denied, path too long) would
+    otherwise be reported as a missing add-in and send the operator to load
+    one that is already there. Only wording that names an add-in as such
+    counts.
     """
     lowered = message.lower()
-    return any(keyword in lowered for keyword in ("add-in", "addin", "edrawings"))
+    return any(keyword in lowered for keyword in ("add-in", "addin"))
 
 
 # `IModelDocExtension::SaveAs3`'s positional signature, in the exact order
@@ -328,13 +364,20 @@ class _PreferenceError(Exception):
 # re-coercion -- an unscripted preference read against the fake-COM harness
 # hands back a wrapper object with no `__int__`, while a real COM read already
 # hands back a genuine `int`/`bool`/list.
+#
+# The 4th element is whether the setter reports success: per
+# docs/api/05-export-and-layers.md, `SetUserPreferenceIntegerValue` and
+# `SetUserPreferenceStringListValue` are `Function ... As Boolean` ("True if
+# the value was set, false if not"), while `SetUserPreferenceToggle` is a
+# `Sub` with no return at all -- so only the first two have a status worth
+# checking, and truth-testing the toggle's `None` would fail every call.
 _PREFERENCE_ACCESSORS = {
     SwUserPreferenceToggle: (
-        "GetUserPreferenceToggle", "SetUserPreferenceToggle", bool),
+        "GetUserPreferenceToggle", "SetUserPreferenceToggle", bool, False),
     SwUserPreferenceIntegerValue: (
-        "GetUserPreferenceIntegerValue", "SetUserPreferenceIntegerValue", int),
+        "GetUserPreferenceIntegerValue", "SetUserPreferenceIntegerValue", int, True),
     SwUserPreferenceStringListValue: (
-        "GetUserPreferenceStringListValue", "SetUserPreferenceStringListValue", list),
+        "GetUserPreferenceStringListValue", "SetUserPreferenceStringListValue", list, True),
 }
 
 
@@ -1280,17 +1323,23 @@ class DrawingOperations:
         unwind last-in-first-out.
 
         Raises:
-            _PreferenceError: if reading or writing the preference raises.
-                A tool that can't establish the setting it needs must fail
-                rather than export under whatever the session happened to
-                hold -- an inherited setting is exactly the kind of silent
-                output change these tools exist to rule out.
+            _PreferenceError: if reading or writing the preference raises, or
+                if the setter reports failure through its documented `Boolean`
+                return (`SetUserPreferenceIntegerValue`/
+                `SetUserPreferenceStringListValue` -- see
+                `_PREFERENCE_ACCESSORS`; `SetUserPreferenceToggle` is a `Sub`
+                and has no status to check). A refused write raises nothing on
+                its own, so without this check a tool would export under
+                whatever setting the session happened to hold and still report
+                success. A tool that can't establish the setting it needs must
+                fail rather than export under an inherited one -- exactly the
+                kind of silent output change these tools exist to rule out.
         """
         accessors = _PREFERENCE_ACCESSORS.get(type(pref))
         if accessors is None:
             raise _PreferenceError(
                 f"No user-preference accessor is declared for {type(pref).__name__}")
-        getter_name, setter_name, coerce = accessors
+        getter_name, setter_name, coerce, setter_reports_status = accessors
         pref_id = int(pref)
 
         try:
@@ -1300,10 +1349,14 @@ class DrawingOperations:
             raise _PreferenceError(f"Read preference error: {e}")
 
         try:
-            getattr(self._sw_app, setter_name)(pref_id, coerce(value))
+            set_ok = getattr(self._sw_app, setter_name)(pref_id, coerce(value))
         except Exception as e:
             logger.error(f"set preference {pref!r} error: {e}")
             raise _PreferenceError(f"Set preference error: {e}")
+        if setter_reports_status and not set_ok:
+            logger.error(f"set preference {pref!r} refused by {setter_name}")
+            raise _PreferenceError(
+                f"{setter_name} refused to set {pref!r} to {value!r}")
 
         try:
             yield
@@ -1353,8 +1406,12 @@ class DrawingOperations:
                 continue
             if layer is None:
                 continue
-            if self._read_prop(layer, "Visible") is False:
-                prior_printable = self._read_prop(layer, "Printable")
+            # `_com_bool`, not `is False`: an interop layer that hands back
+            # `VARIANT_BOOL` as `0` rather than `False` would otherwise make
+            # this whole pass -- and `export_pdf(keep_invisible_layers=True)`
+            # with it -- a silent no-op.
+            if _com_bool(self._read_prop(layer, "Visible")) is False:
+                prior_printable = _com_bool(self._read_prop(layer, "Printable"))
                 try:
                     layer.Visible = True
                     restore_layers.append((layer, prior_printable))
@@ -1367,10 +1424,50 @@ class DrawingOperations:
             for layer, prior_printable in restore_layers:
                 try:
                     layer.Visible = False
-                    if prior_printable is True or prior_printable is False:
+                    # `prior_printable` is already `_com_bool`-normalized, so
+                    # `None` here means "the snapshot read gave no usable
+                    # value" -- the only case where re-asserting would write a
+                    # guess over whatever `Visible` did to it.
+                    if prior_printable is not None:
                         layer.Printable = prior_printable
                 except Exception as e:
                     logger.error(f"restore layer visibility error: {e}")
+
+    @contextmanager
+    def _active_sheet_restored(self, doc: Any):
+        """Re-activate whichever sheet was current on entry when the block
+        exits -- normally, by exception, or by an early `return`.
+
+        Any export that walks sheets one at a time has to call
+        `IDrawingDoc::ActivateSheet`, which leaves the *last* sheet visited
+        active. Every other session mutation in this file is
+        snapshot-and-restored (user preferences via `_user_preference`, layer
+        visibility via `_shown_hidden_layers`), and the active sheet is no
+        different: without this, a caller that does `activate_sheet("Sheet1")`
+        then a per-sheet export then `export_pdf(sheets="current")` gets a PDF
+        of whatever sheet the export happened to stop on.
+
+        Best-effort by design: if the sheet name can't be read on entry, or
+        re-activating it fails on exit, that is logged rather than raised --
+        failing an otherwise-successful export over a cosmetic UI state would
+        be the worse trade.
+        """
+        original_name = None
+        try:
+            current_sheet = doc.GetCurrentSheet()
+            if current_sheet is not None:
+                original_name = self._read_prop(current_sheet, "Name")
+        except Exception as e:
+            logger.error(f"read active sheet for restore error: {e}")
+
+        try:
+            yield
+        finally:
+            if isinstance(original_name, str) and original_name:
+                try:
+                    doc.ActivateSheet(original_name)
+                except Exception as e:
+                    logger.error(f"restore active sheet {original_name!r} error: {e}")
 
     def _save_as3(
         self, doc: Any, path: str, *, label: str,
@@ -1381,10 +1478,14 @@ class DrawingOperations:
         """Drive `IModelDocExtension::SaveAs3` at `path` and turn its result
         into this project's standard result dict.
 
-        The one place this package calls `SaveAs3`, so the byref
+        The one place every *export* path calls `SaveAs3`, so the byref
         `Errors`/`Warnings` decoding, the "a nonzero `Errors` bitmask fails
         even if the boolean return claimed success" rule, and the on-disk
-        existence check are defined once rather than per format. A `SaveAs3`
+        existence check are defined once rather than per format.
+        `save_drawing` is the only other call site in this module -- it binds
+        through the same `SAVE_AS3` signature, but keeps its own call because
+        it has to choose between `Save3` and `SaveAs3` and reports "Saved:"
+        rather than an export label. A `SaveAs3`
         call that returns `True` with `Errors == 0` but writes no file is a
         real, distinct failure mode from either of the other two, so it's
         checked explicitly rather than trusted.
@@ -1474,13 +1575,13 @@ class DrawingOperations:
                 if dir_path and not os.path.exists(dir_path):
                     os.makedirs(dir_path)
 
-                export_data = com_backend.null_dispatch()
-                advanced_options = com_backend.null_dispatch()
-                saved = doc.Extension.SaveAs3(
-                    filepath, int(SwSaveAsVersion.swSaveAsCurrentVersion),
-                    int(SwSaveAsOptions.swSaveAsOptions_Silent),
-                    export_data, advanced_options, errors, warnings,
-                )
+                # Bound through `SAVE_AS3` rather than hand-transcribed: this
+                # is the same 7-positional call the `ComSignature` exists for,
+                # and a transposed `version`/`options` pair here would be a
+                # silently wrong save. `export_data`/`advanced_options` default
+                # to a null `VT_DISPATCH` via `to_optional_object`.
+                args = SAVE_AS3.bind(path=filepath, errors=errors, warnings=warnings)
+                saved = doc.Extension.SaveAs3(*args)
                 saved_path = filepath
             else:
                 saved = doc.Save3(int(SwSaveAsOptions.swSaveAsOptions_Silent), errors, warnings)
@@ -1552,9 +1653,10 @@ class DrawingOperations:
             names actually exported), `size_bytes`, `errors`, `warnings`,
             and `decoded_errors`. Fails (with the same `data` where
             available) if: the drawing can't be read, an explicit sheet name
-            isn't found, the output path can't be written to, or `SaveAs3`
-            reports a nonzero `Errors` bitmask, a false return, or wrote no
-            file (see `_save_as3`).
+            isn't found, the output path can't be written to,
+            `IExportPdfData::SetSheets` refuses the sheet selection, or
+            `SaveAs3` reports a nonzero `Errors` bitmask, a false return, or
+            wrote no file (see `_save_as3`).
         """
         doc, err = self.get_drawing_doc()
         if err:
@@ -1582,7 +1684,19 @@ class DrawingOperations:
 
                 export_data = self._sw_app.GetExportFileData(
                     int(SwExportDataFileType.swExportPdfData))
-                export_data.SetSheets(which, list(export_sheet_names))
+                # `SetSheets` returns False when the selection was not applied
+                # (docs/api/05-export-and-layers.md). Unchecked, a refused call
+                # exports whatever page set the `IExportPdfData` defaults to --
+                # a PDF with the wrong sheets that `_save_as3` still reports as
+                # a clean success, since the file exists and `Errors == 0`.
+                if not export_data.SetSheets(which, list(export_sheet_names)):
+                    return self._result(
+                        False,
+                        f"IExportPdfData::SetSheets refused the sheet selection "
+                        f"{export_sheet_names!r} ({mode} mode)",
+                        SwErrors.swExportError,
+                        {"path": output_path, "sheets": export_sheet_names},
+                    )
                 export_data.ViewPdfAfterSaving = bool(open_after)
 
                 return self._save_as3(
@@ -1650,7 +1764,12 @@ class DrawingOperations:
                 alongside it -- deterministic and collision-free across
                 sheets, unlike relying on whatever undocumented file-naming
                 SolidWorks' own `swDxfSeparateSheets` multi-file mode might
-                use internally (not stated on any fetched page).
+                use internally (not stated on any fetched page). The sheet
+                name is run through `_sanitize_filename_component` first
+                (a sheet name is free text, not a filename), and a name that
+                sanitizes onto one already used in this call gets a `_2`,
+                `_3`, ... suffix so the collision-free guarantee survives
+                sanitization.
             format: `"dxf"` (default) or `"dwg"` -- both are driven by the
                 exact same `SaveAs3` + preference mechanism, differing only
                 in `output_path`'s extension (dossier: "the file extension
@@ -1781,6 +1900,12 @@ class DrawingOperations:
 
         base, _ = os.path.splitext(output_path)
         written_files: List[Dict[str, Any]] = []
+        # Sanitizing a sheet name can map two distinct names onto one
+        # ("1/2" and "1_2" both become "1_2"), so per-sheet paths are also
+        # deduped -- the docs below promise collision-free per-sheet files,
+        # and silently overwriting one sheet's export with another's is the
+        # exact failure that promise exists to rule out.
+        used_sheet_paths: Dict[str, int] = {}
         try:
             with ExitStack() as restore:
                 def apply(pref, value):
@@ -1811,6 +1936,10 @@ class DrawingOperations:
                         "size_bytes": result["data"]["size_bytes"],
                     })
                 else:  # per_sheet
+                    # The loop below activates each sheet in turn; put the
+                    # caller's own active sheet back afterward, the same way
+                    # every preference this method touches is restored.
+                    restore.enter_context(self._active_sheet_restored(doc))
                     for sheet_name in target_sheets:
                         try:
                             activated = doc.ActivateSheet(sheet_name)
@@ -1825,7 +1954,20 @@ class DrawingOperations:
                                 SwErrors.swInvalidInput,
                                 {"sheet_name": sheet_name, "files": written_files})
 
-                        sheet_path = f"{base}_{sheet_name}{ext}"
+                        # Sheet names are free text in the drawing tree, not
+                        # filenames: `1/2 SCALE` or `REV:A` would otherwise
+                        # become a path segment (into a directory nobody
+                        # created -- `_prepare_output_path` ran on the
+                        # caller's `output_path` only) and a name containing
+                        # `..` would escape the output directory entirely.
+                        # Same sanitizer `batch_export_pack` puts on its own
+                        # `{sheet}` token.
+                        safe_sheet = _sanitize_filename_component(sheet_name) or "sheet"
+                        seen = used_sheet_paths.get(safe_sheet, 0)
+                        used_sheet_paths[safe_sheet] = seen + 1
+                        if seen:
+                            safe_sheet = f"{safe_sheet}_{seen + 1}"
+                        sheet_path = f"{base}_{safe_sheet}{ext}"
                         result = self._save_as3(
                             doc, sheet_path,
                             label=f"DXF/DWG export for sheet {sheet_name!r}",
@@ -1904,6 +2046,7 @@ class DrawingOperations:
                 "swEdrawingSaveAsOption_e has no 'specified sheets' mode "
                 f"(got {sheets!r})",
                 SwErrors.swInvalidInput,
+                {"addin_available": True},
             )
         selection_value = (
             SwEdrawingSaveAsOption.swEdrawingSaveAll if sheets == "all"
@@ -1911,6 +2054,10 @@ class DrawingOperations:
 
         output_path, err = self._prepare_output_path(output_path, expected_ext=".edrw")
         if err:
+            # Every failure of this tool carries `addin_available` (see the
+            # Returns docs); a bad extension or an uncreatable directory is an
+            # ordinary input failure, not evidence about the add-in.
+            err.setdefault("data", {})["addin_available"] = True
             return err
 
         try:
@@ -1922,7 +2069,13 @@ class DrawingOperations:
                     doc, output_path, label="eDrawings export",
                     extra_data={"sheets": sheets}, raise_com_errors=True)
         except _PreferenceError as e:
-            return self._result(False, str(e), SwErrors.swUnknownError)
+            # `addin_available` is documented as present on *every* failure of
+            # this tool, and `_result` drops the whole `data` key when it is
+            # falsy -- so this branch has to carry it explicitly or a caller
+            # reading `result["data"]["addin_available"]` gets a `KeyError`.
+            # A refused preference write says nothing about the add-in.
+            return self._result(
+                False, str(e), SwErrors.swUnknownError, {"addin_available": True})
         except Exception as e:
             logger.error(f"export_edrawings error: {e}")
             addin_unavailable = _looks_like_missing_addin(str(e))
@@ -2238,7 +2391,11 @@ class DrawingOperations:
 
         Returns:
             Result dict. `data` has `output_dir`, `manifest_path` (the
-            written `manifest.json`, or `None` if it could not be written),
+            written `manifest.json`, or `None` if it could not be written --
+            including when `overwrite=False` and one is already there, since
+            the manifest is an output of this tool like any other and
+            truncating the previous run's record is exactly what
+            `overwrite=False` was asked to prevent),
             `files` (one entry per attempted output: `path`, `format`
             (`"pdf"`/`"dxf"`/`"dwg"`/`"edrawings"`/`"native"`), `sheet`
             (`None` for a combined/native file), `success`, `size_bytes`,
@@ -2275,7 +2432,10 @@ class DrawingOperations:
             return self._result(
                 False, "filename_pattern must be a non-empty string", SwErrors.swInvalidInput)
 
-        if per_sheet and "{sheet}" not in filename_pattern and "{index}" not in filename_pattern:
+        # A token match, not a substring match: `"{index:02d}"` is a perfectly
+        # good per-sheet discriminator that `str.format` handles, and a plain
+        # `"{index}" not in pattern` test would reject it.
+        if per_sheet and not _PER_SHEET_TOKEN_RE.search(filename_pattern):
             return self._result(
                 False,
                 "per_sheet=True requires filename_pattern to contain {sheet} and/or "
@@ -2366,11 +2526,20 @@ class DrawingOperations:
                 entry["error"] = result.get("message")
             manifest_entries.append(entry)
 
-        # The base name for anything not tied to one sheet: a combined
-        # per-format file, and the native archive copy in either mode.
-        combined_base = self._resolve_batch_export_filename(
-            filename_pattern, drawing=drawing_name, sheet="all", index=0,
-            date=date_str, rev=rev)
+        # Resolved with the *real* token values, so unlike the placeholder
+        # pre-flight above this can still fail here: a pattern whose
+        # formatting depends on a value -- `"{rev[0]}"` against a drawing with
+        # no Revision property, where `rev` is `""` -- passes pre-flight and
+        # raises only now. A tool must return a result dict rather than let
+        # that escape.
+        try:
+            # The base name for anything not tied to one sheet: a combined
+            # per-format file, and the native archive copy in either mode.
+            combined_base = self._resolve_batch_export_filename(
+                filename_pattern, drawing=drawing_name, sheet="all", index=0,
+                date=date_str, rev=rev)
+        except ValueError as e:
+            return self._result(False, str(e), SwErrors.swInvalidInput)
 
         if per_sheet:
             # Only the formats with no "these specific sheets" mode of their
@@ -2381,29 +2550,38 @@ class DrawingOperations:
             # call in this loop.
             needs_active_sheet = any(
                 f in _BATCH_EXPORT_NEEDS_ACTIVE_SHEET for f in fmt_list)
-            for index, sheet_name in enumerate(available_sheets, start=1):
-                activate_result = (
-                    self.activate_sheet(sheet_name) if needs_active_sheet else None)
-                activate_ok = activate_result is None or bool(activate_result["success"])
-                filename_base = self._resolve_batch_export_filename(
-                    filename_pattern, drawing=drawing_name, sheet=sheet_name,
-                    index=index, date=date_str, rev=rev)
-                for fmt in fmt_list:
-                    path = os.path.join(
-                        output_dir, filename_base + _BATCH_EXPORT_FORMAT_EXTENSIONS[fmt])
-                    if not activate_ok and fmt in _BATCH_EXPORT_NEEDS_ACTIVE_SHEET:
-                        # Routed through `_attempt` with a pre-failed result
-                        # so the manifest entry is built in exactly one place.
-                        message = (
-                            f"Could not activate sheet {sheet_name!r}: "
-                            f"{activate_result.get('message')}")
+            # Only entered when the loop will actually switch sheets: with the
+            # default `formats=["pdf"]` nothing below touches the active sheet,
+            # so there is nothing to put back.
+            with ExitStack() as sheet_restore:
+                if needs_active_sheet:
+                    sheet_restore.enter_context(self._active_sheet_restored(doc))
+                for index, sheet_name in enumerate(available_sheets, start=1):
+                    activate_result = (
+                        self.activate_sheet(sheet_name) if needs_active_sheet else None)
+                    activate_ok = activate_result is None or bool(activate_result["success"])
+                    try:
+                        filename_base = self._resolve_batch_export_filename(
+                            filename_pattern, drawing=drawing_name, sheet=sheet_name,
+                            index=index, date=date_str, rev=rev)
+                    except ValueError as e:
+                        return self._result(False, str(e), SwErrors.swInvalidInput)
+                    for fmt in fmt_list:
+                        path = os.path.join(
+                            output_dir, filename_base + _BATCH_EXPORT_FORMAT_EXTENSIONS[fmt])
+                        if not activate_ok and fmt in _BATCH_EXPORT_NEEDS_ACTIVE_SHEET:
+                            # Routed through `_attempt` with a pre-failed result
+                            # so the manifest entry is built in exactly one place.
+                            message = (
+                                f"Could not activate sheet {sheet_name!r}: "
+                                f"{activate_result.get('message')}")
+                            _attempt(
+                                path, fmt, sheet_name,
+                                lambda m=message: {"success": False, "message": m})
+                            continue
                         _attempt(
                             path, fmt, sheet_name,
-                            lambda m=message: {"success": False, "message": m})
-                        continue
-                    _attempt(
-                        path, fmt, sheet_name,
-                        self._batch_export_call(fmt, path, sheet_name))
+                            self._batch_export_call(fmt, path, sheet_name))
         else:
             for fmt in fmt_list:
                 path = os.path.join(
@@ -2424,7 +2602,13 @@ class DrawingOperations:
             "files": manifest_entries,
         }
         try:
-            with open(manifest_path, "w") as f:
+            # `"x"` under `overwrite=False`: the manifest is an output of this
+            # tool like any other, and `manifest.json` is the file most likely
+            # to already be there from a prior export into the same folder.
+            # Truncating it while refusing to touch every *other* existing
+            # path would destroy the previous run's record -- exactly what
+            # `overwrite=False` was asked to prevent.
+            with open(manifest_path, "w" if overwrite else "x") as f:
                 json.dump(manifest_document, f, indent=2)
         except OSError as e:
             logger.error(f"batch_export_pack manifest write error: {e}")
