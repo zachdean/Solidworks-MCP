@@ -50,6 +50,18 @@ def _circular_edge(fake_sw, obj_id, is_circle, point=(0.01, 0.02, 0.0)):
     return edge
 
 
+class _RejectingMark:
+    """An `ICenterMark` whose display-property assignments all fail.
+
+    `FakeComObject.__setattr__` stores property sets rather than routing them
+    through `set_raises` (which only covers invocations), so a hand-rolled
+    stub is the only way to exercise a SolidWorks that rejects
+    `Size`/`ShowLines`/`ConnectionLines` on an otherwise-created mark."""
+
+    def __setattr__(self, name, value):
+        raise RuntimeError("read-only on this mark")
+
+
 class TestAddCenterMarksAllHoles:
     def test_one_com_call_per_circular_edge(self, tool_sw):
         """5 circular + 2 non-circular edges -> exactly 5 InsertCenterMark3
@@ -108,6 +120,64 @@ class TestAddCenterMarksAllHoles:
         assert result["success"] is True, result
         assert result["data"]["count"] == 0
         assert not fake_sw.call_log.calls_to("InsertCenterMark3")
+
+    def test_failed_enumeration_is_an_error_not_a_zero_count_success(self, tool_sw):
+        """"This view has no holes" and "this view was never read" are
+        opposite answers -- a `GetVisibleEntities2` failure must not come back
+        as the same warned success an genuinely empty view gets."""
+        fake_sw = tool_sw("drawing")
+        sw_automation._units.default_unit = "mm"
+        _prep_view(fake_sw)
+        view = fake_sw.ActiveDoc.ActiveDrawingView
+        view.set_raises("GetVisibleEntities2", RuntimeError("view not tessellated"))
+
+        result = dispatch("add_center_marks", {"view_name": "Drawing View1"})
+
+        assert result["success"] is False, result
+        assert result["error_name"] == "swSelectionError"
+        assert "view not tessellated" in result["message"]
+        assert not fake_sw.call_log.calls_to("InsertCenterMark3")
+
+    def test_rejected_display_settings_are_surfaced_not_only_logged(self, tool_sw):
+        """The mark exists, so this is not a creation failure -- but the
+        result echoes size/extended_lines/connection_lines, so a caller has to
+        be told when those never reached SolidWorks."""
+        fake_sw = tool_sw("drawing")
+        sw_automation._units.default_unit = "mm"
+        _prep_view(fake_sw)
+        view = fake_sw.ActiveDoc.ActiveDrawingView
+        view.set_return("GetVisibleEntities2", [_circular_edge(fake_sw, "hole1", True)])
+
+        fake_sw.ActiveDoc.set_return("InsertCenterMark3", _RejectingMark())
+
+        result = dispatch("add_center_marks", {"view_name": "Drawing View1", "size": 2.5})
+
+        assert result["success"] is True, result
+        assert result["data"]["count"] == 1
+        assert result["data"]["unstyled"] == 1
+        assert "default size/lines" in result["message"]
+
+    def test_group_styles_say_they_do_not_group_across_the_pattern(self, tool_sw):
+        """InsertCenterMark3 groups whatever is selected, and this batch
+        selects one edge per call -- so the success message must not let
+        "Created N center mark(s)" imply a bolt circle got grouped."""
+        fake_sw = tool_sw("drawing")
+        sw_automation._units.default_unit = "mm"
+        _prep_view(fake_sw)
+        view = fake_sw.ActiveDoc.ActiveDrawingView
+        view.set_return("GetVisibleEntities2", [
+            _circular_edge(fake_sw, f"hole{i}", True, point=(0.001 * (i + 1), 0.002, 0.0))
+            for i in range(3)
+        ])
+        fake_sw.ActiveDoc.set_return("InsertCenterMark3", fake_sw.new_object("mark1"))
+
+        result = dispatch("add_center_marks", {
+            "view_name": "Drawing View1", "style": "circular_group", "connection_lines": True,
+        })
+
+        assert result["success"] is True, result
+        assert result["data"]["count"] == 3
+        assert "not across the pattern" in result["message"]
 
 
 class TestAddCenterMarksExplicitTarget:
@@ -351,6 +421,45 @@ class TestRemoveCenterMarks:
         assert result["data"]["count"] == 3
         assert result["data"]["removed"] == 3
         assert len(fake_sw.call_log.calls_to("DeleteSelection2")) == 3
+
+    def test_the_whole_chain_is_walked_before_the_first_delete(self, tool_sw):
+        """Per the `ICenterMark::GetNext` record in docs/api/03-annotations.md,
+        a deleted COM object's own `GetNext` is not guaranteed to still answer
+        -- so every `GetNext` must be issued before any `DeleteSelection2`. The
+        fake COM harness keeps answering a deleted mark's `GetNext`, so only
+        the call *order* can catch a lazy walk that would silently stop after
+        the first delete against real SolidWorks."""
+        fake_sw = tool_sw("drawing")
+        sw_automation._units.default_unit = "mm"
+        fake_sw.ActiveDoc.set_return("ActivateView", True)
+        view = fake_sw.ActiveDoc.ActiveDrawingView
+        self._chain(fake_sw, view, ["mark1", "mark2", "mark3"])
+        fake_sw.ActiveDoc.Extension.set_return("DeleteSelection2", True)
+
+        dispatch("remove_center_marks", {"view_name": "Drawing View1"})
+
+        order = fake_sw.call_log.ordered_names()
+        first_delete = order.index("DeleteSelection2")
+        assert order.count("GetNext") == 3
+        assert all(i < first_delete for i, name in enumerate(order) if name == "GetNext"), order
+
+    def test_unavailable_getfirstcentermark2_is_an_error_not_zero_removed(self, tool_sw):
+        """`IView::GetFirstCenterMark2` is SOLIDWORKS 2025 SP01+. Swallowing
+        its "member not found" would report "no center marks found -- 0
+        removed", telling the caller the view is clean while every mark is
+        still on it."""
+        fake_sw = tool_sw("drawing")
+        sw_automation._units.default_unit = "mm"
+        fake_sw.ActiveDoc.set_return("ActivateView", True)
+        view = fake_sw.ActiveDoc.ActiveDrawingView
+        view.set_raises("GetFirstCenterMark2", AttributeError("GetFirstCenterMark2"))
+
+        result = dispatch("remove_center_marks", {"view_name": "Drawing View1"})
+
+        assert result["success"] is False, result
+        assert result["error_name"] == "swUnknownError"
+        assert "2025 SP01" in result["message"]
+        assert not fake_sw.call_log.calls_to("DeleteSelection2")
 
     def test_no_center_marks_is_a_success_with_zero_count(self, tool_sw):
         fake_sw = tool_sw("drawing")

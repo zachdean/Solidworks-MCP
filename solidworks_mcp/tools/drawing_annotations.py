@@ -19,14 +19,23 @@ from .registry import tool
 # Every entity-taking tool below resolves its reference through the same
 # `_parse_entity_ref`, which accepts the same four kinds regardless of which
 # tool asked -- so they all advertise one schema rather than drifting copies.
+# The description names 'dimension' separately on purpose: list_view_entities
+# only ever emits edge/vertex/face, and 'dimension' is only a meaningful
+# attach point for the GD&T tools (add_datum_feature/add_gtol). Advertising it
+# as something list_view_entities returns -- as this shared schema did when it
+# was merged from the per-tool copies -- invites a caller to send it to
+# add_center_marks/add_centerlines, where it parses fine and then selects
+# nothing at the COM boundary.
 _ENTITY_REF_SCHEMA = {
     "type": "object",
     "properties": {
         "kind": {
             "type": "string",
             "description": (
-                "Entity kind: 'edge', 'vertex', 'face', or 'dimension' "
-                "(as returned by list_view_entities)."
+                "Entity kind: 'edge', 'vertex', or 'face' (as returned by "
+                "list_view_entities), or 'dimension' -- a dimension is only "
+                "an attach point for add_datum_feature/add_gtol, and is not "
+                "something list_view_entities returns."
             ),
         },
         "x": {"type": "number", "description": "Caller's default unit."},

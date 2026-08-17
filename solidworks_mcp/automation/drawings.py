@@ -8213,11 +8213,34 @@ class DrawingOperations:
                 `"GetNextView"`.
             context: Caller name, used only in the warning messages.
         """
+        head, _head_err = DrawingOperations._com_chain_head(owner, first_method, context)
+        return DrawingOperations._iter_com_chain_from(head, next_method, context)
+
+    @staticmethod
+    def _com_chain_head(owner: Any, first_method: str, context: str) -> Tuple[Any, Optional[Exception]]:
+        """`GetFirstX()` on its own, returning `(head, error)` with the COM
+        failure handed back instead of swallowed.
+
+        `_iter_com_chain`'s best-effort walk deliberately conflates "the chain
+        is empty" with "that member blew up", which is right for a listing.
+        It is wrong for a caller whose answer changes between the two --
+        `remove_center_marks`, because `IView::GetFirstCenterMark2` is
+        SOLIDWORKS 2025 SP01+ (see `_iter_view_center_marks`), and a swallowed
+        "member not found" there reads back to the user as "the view is
+        already clean" while every center mark is still on the sheet.
+        """
         try:
-            item = getattr(owner, first_method)()
+            return getattr(owner, first_method)(), None
         except Exception as e:
             logger.warning(f"{context}: {first_method} failed: {e}")
-            item = None
+            return None, e
+
+    @staticmethod
+    def _iter_com_chain_from(head: Any, next_method: str, context: str):
+        """Walk on from an already-fetched chain head -- the tail shared by
+        `_iter_com_chain` and any caller that probed the head itself via
+        `_com_chain_head`."""
+        item = head
         while item is not None:
             yield item
             try:
@@ -8581,12 +8604,22 @@ class DrawingOperations:
         return parsed, None
 
     def _validate_gtol_datum_requirement(self, symbol_key: str, datum_entries: List[Tuple[str, str]],
-                                          label: str) -> Optional[Dict]:
+                                          label: str, require_datum: bool = True) -> Optional[Dict]:
         """Enforce ASME Y14.5's datum-reference rules for `symbol_key`: form
         tolerances (`_GTOL_FORM_SYMBOLS`) must NOT reference a datum;
         orientation/location/runout tolerances (`_GTOL_DATUM_REQUIRED_SYMBOLS`)
         must reference at least one. `label` names the field in the error
-        message (`"symbol"` or `"composite"`)."""
+        message (`"symbol"` or `"composite"`).
+
+        `require_datum=False` keeps the form-tolerance prohibition but drops
+        the at-least-one requirement -- what a composite frame's *lower*
+        segment needs. In a composite FCF the upper segment is the
+        pattern-locating control (PLTZF) and carries the datum references;
+        the lower feature-relating segment (FRTZF) legally carries fewer, or
+        none at all, when it controls only the pattern-internal relationship.
+        Applying the upper segment's rule to it rejects a standard composite
+        positional callout before any COM call is made.
+        """
         if symbol_key in _GTOL_FORM_SYMBOLS and datum_entries:
             return self._result(
                 False,
@@ -8594,7 +8627,7 @@ class DrawingOperations:
                 f"({label})",
                 SwErrors.swInvalidInput, {"symbol": symbol_key, "datums": datum_entries},
             )
-        if symbol_key in _GTOL_DATUM_REQUIRED_SYMBOLS and not datum_entries:
+        if require_datum and symbol_key in _GTOL_DATUM_REQUIRED_SYMBOLS and not datum_entries:
             return self._result(
                 False,
                 f"{symbol_key!r} requires at least one datum reference ({label})",
@@ -8991,7 +9024,11 @@ class DrawingOperations:
             composite_entries, err = self._parse_gtol_datums(composite.get("datums"), "composite.datums")
             if err:
                 return err
-            req_err = self._validate_gtol_datum_requirement(symbol_key, composite_entries, "composite")
+            # The lower (feature-relating) segment of a composite frame may
+            # legally carry no datum references at all -- see
+            # `_validate_gtol_datum_requirement`'s own docstring.
+            req_err = self._validate_gtol_datum_requirement(
+                symbol_key, composite_entries, "composite", require_datum=False)
             if req_err:
                 return req_err
 
@@ -9287,7 +9324,16 @@ class DrawingOperations:
                 `IAnnotation::SetLeader3` -- see the sw-1xx.5 dossier
                 addendum's "all-around" discrepancy note for why this uses
                 `SetLeader3` rather than a dedicated setter (unlike
-                `add_weld_symbol`, which has one).
+                `add_weld_symbol`, which has one). Two side effects worth
+                knowing: `SetLeader3` rewrites the *whole* leader, so the
+                symbol's leader changes from the straight one bound at
+                creation to `swBENT`; and it is passed
+                `_LEADER_SIDE_DEFAULT`, whose `swLeaderSide_e` mapping this
+                module documents as an unverified guess -- a build where `0`
+                is not a valid side answers `-2` and fails the call *after*
+                the symbol is already committed to the sheet (this module
+                does not roll back post-creation setter failures anywhere;
+                re-calling stacks a duplicate symbol rather than replacing).
 
         Returns:
             Result dict. `data["name"]` is `IAnnotation::GetName`'s value,
@@ -9686,36 +9732,69 @@ class DrawingOperations:
     # Center mark / centerline tools (sw-1xx.6)
     # ========================================================================
 
-    def _iter_view_center_marks(self, view: Any):
-        """Walk every center mark in `view` via `IView::GetFirstCenterMark2` /
+    def _view_center_marks(self, view: Any) -> Tuple[Optional[List[Any]], Optional[Exception]]:
+        """Every center mark in `view` via `IView::GetFirstCenterMark2` /
         `ICenterMark::GetNext` -- the center-mark analog of `_iter_view_notes`'s
         `GetFirstNote`/`GetNext` walk (sw-1xx.3) and `_iter_view_datum_tags`'s
         `GetFirstDatumTag`/`GetNext` walk (sw-1xx.4), per the sw-1xx.6 dossier
-        addendum. `GetFirstCenterMark2` is SOLIDWORKS 2025 SP01+ -- see that
-        addendum record's Gotchas for the obsolete pre-2025-SP01 predecessor."""
-        return self._iter_com_chain(view, "GetFirstCenterMark2", "GetNext",
-                                    "_iter_view_center_marks")
+        addendum.
 
-    def _find_circular_edges(self, view: Any) -> List[Tuple[str, float, float, float]]:
+        Unlike those two this is *eager* and returns `(marks, error)` rather
+        than a lazy generator, for two reasons its caller
+        (`remove_center_marks`) can't do without:
+
+        - The whole chain must be walked before the first `DeleteSelection2`,
+          since a deleted COM object's own `GetNext` is not guaranteed to
+          still answer (see the `ICenterMark::GetNext` dossier record).
+        - `GetFirstCenterMark2` is SOLIDWORKS 2025 SP01+ (see that addendum
+          record's Gotchas for the obsolete pre-2025-SP01 predecessor), so a
+          failure on that member has to be distinguishable from an empty
+          view instead of being swallowed into "0 removed".
+        """
+        head, head_err = self._com_chain_head(view, "GetFirstCenterMark2", "_view_center_marks")
+        if head_err is not None:
+            return None, head_err
+        return list(self._iter_com_chain_from(head, "GetNext", "_view_center_marks")), None
+
+    def _find_circular_edges(
+        self, view: Any,
+    ) -> Tuple[Optional[List[Tuple[str, float, float, float]]], Optional[str]]:
         """`add_center_marks`' `target="all_holes"` discovery: every visible
         edge in `view` (`IView::GetVisibleEntities2`, entity type `1` -- edges,
         the same convention `list_view_entities`'s `_VIEW_ENTITY_TYPES` uses)
         whose underlying curve is a circle (`IEdge::GetCurve().IsCircle()`,
         sw-1xx.6 dossier addendum).
 
-        Returns `("EDGE", x, y, z)` tuples in the caller's default unit --
-        exactly the shape `_parse_entity_ref` produces for an explicit entity
-        reference, so both `target` modes feed the same creation loop. An
-        edge whose curve or point can't be read is skipped (logged), not
-        fatal to the whole enumeration -- same best-effort convention
-        `list_view_entities`'s `_entity_point` already uses.
+        Returns `(edges, None)` where `edges` is a list of `("EDGE", x, y, z)`
+        tuples in the caller's default unit -- exactly the shape
+        `_parse_entity_ref` produces for an explicit entity reference, so both
+        `target` modes feed the same creation loop. An edge whose curve or
+        point can't be read is skipped (logged), not fatal to the whole
+        enumeration -- same best-effort convention `list_view_entities`'s
+        `_entity_point` already uses.
+
+        A failure of the *enumeration itself* returns `(None, message)`
+        instead: "this view has no holes" and "this view was never
+        successfully read" are opposite answers, and collapsing the second
+        into an empty list would report the silent-success the issue's own
+        Requirements call out ("a view with no circular geometry returns
+        success with count=0" is only true when the view really was read).
+
+        Caveat, inherited from `list_view_entities`: `_entity_point` reports
+        the *model's* coordinates, while a drawing's `select_by_id` resolves
+        an empty `name` against *sheet* space. On a view whose position/scale
+        makes those differ, the points returned here will not select -- see
+        `list_view_entities`' own docstring; a model-to-sheet transform
+        helper is still missing. `add_center_marks` fails loudly
+        (`swFeatureError`, "could not create any") rather than silently when
+        that happens.
         """
         try:
             component = view.RootDrawingComponent
             edges = view.GetVisibleEntities2(component, _VIEW_ENTITY_TYPES["edge"]) or []
         except Exception as e:
             logger.warning(f"_find_circular_edges: GetVisibleEntities2 failed: {e}")
-            return []
+            return None, str(e)
 
         found: List[Tuple[str, float, float, float]] = []
         for edge in edges:
@@ -9738,7 +9817,7 @@ class DrawingOperations:
                 self._units.from_meters(point[1]),
                 self._units.from_meters(point[2]),
             ))
-        return found
+        return found, None
 
     def add_center_marks(self, view_name: str, target: Any = "all_holes",
                           style: str = "single", size: Optional[float] = None,
@@ -9838,7 +9917,16 @@ class DrawingOperations:
                 return self._result(
                     False, f"Add center marks error: {e}", SwErrors.swSelectionError, data,
                 )
-            candidates = self._find_circular_edges(view)
+            candidates, find_err = self._find_circular_edges(view)
+            if find_err is not None:
+                # Not an empty view -- the enumeration itself failed, so
+                # reporting the "0 circular edges, warned success" below would
+                # tell the caller the view has no holes when it was never read.
+                return self._result(
+                    False,
+                    f"Could not enumerate geometry in view {view_name!r}: {find_err}",
+                    SwErrors.swSelectionError, data,
+                )
         elif isinstance(target, (list, tuple)):
             candidates = []
             for i, entity in enumerate(target):
@@ -9864,6 +9952,7 @@ class DrawingOperations:
             )
 
         created_count = 0
+        unstyled_count = 0
         for type_str, ex, ey, ez in candidates:
             with self.selected("", type_str, ex, ey, ez, doc=doc) as sel:
                 if not sel["success"]:
@@ -9884,9 +9973,16 @@ class DrawingOperations:
                     logger.warning(
                         f"add_center_marks({view_name!r}) center mark display-setting error: {e}"
                     )
+                    # The mark itself exists, so this is not a creation
+                    # failure -- but `data["size"]`/`["extended_lines"]`/
+                    # `["connection_lines"]` would otherwise echo settings
+                    # that never reached SolidWorks, so it is counted and
+                    # surfaced rather than only logged.
+                    unstyled_count += 1
                 created_count += 1
 
         data["count"] = created_count
+        data["unstyled"] = unstyled_count
 
         if created_count == 0:
             return self._result(
@@ -9900,6 +9996,22 @@ class DrawingOperations:
         message = f"Created {created_count} center mark(s) in view {view_name!r}"
         if skipped:
             message += f" ({skipped} candidate(s) skipped)"
+        if unstyled_count:
+            message += (
+                f"; {unstyled_count} kept SolidWorks' default size/lines "
+                "(display settings were rejected)"
+            )
+        if style_key in ("linear_group", "circular_group") or connection_key:
+            # `InsertCenterMark3` builds a group out of everything selected at
+            # the time of the call, and this batch selects exactly one edge per
+            # call so each mark is placed atomically. The group styles and the
+            # connection line therefore apply per mark, never across the hole
+            # pattern -- said plainly here rather than letting an unqualified
+            # "Created N center mark(s)" imply a bolt circle got grouped.
+            message += (
+                "; note: marks are created one edge at a time, so group styles "
+                "and connection lines apply per mark, not across the pattern"
+            )
         return self._result(True, message, SwErrors.swSuccess, data)
 
     def add_centerlines(self, view_name: str, target: Any = "all", select_view: bool = True) -> Dict:
@@ -10032,7 +10144,10 @@ class DrawingOperations:
             feature-style center marks and can under-report the current
             annotation-style kind this project creates -- see the sw-1xx.6
             dossier addendum's Gotchas). A view with no center marks is a
-            warned success with `count: 0`.
+            warned success with `count: 0`; a view whose center marks could
+            not be *enumerated* (`GetFirstCenterMark2` is SOLIDWORKS 2025
+            SP01+) is a `swUnknownError` failure instead, so "the view is
+            clean" and "this build cannot see center marks" never read alike.
         """
         doc, err = self.get_drawing_doc()
         if err:
@@ -10053,11 +10168,14 @@ class DrawingOperations:
 
         data = {"view_name": view_name}
 
-        # Both of these are loop invariants and each read is a COM
-        # round-trip, so they are fetched once rather than per mark.
-        sel_mgr = doc.SelectionManager
+        # All three of these are loop invariants and each read is a COM
+        # round-trip, so they are fetched once rather than per mark. The
+        # `SelectionManager` property access is inside the `try` with the
+        # rest: on a dead COM pointer it raises like any other member, and
+        # letting that escape would hand the tool layer a bare traceback
+        # instead of the result dict every other path here returns.
         try:
-            sel_data = sel_mgr.CreateSelectData()
+            sel_data = doc.SelectionManager.CreateSelectData()
             extension = doc.Extension
         except Exception as e:
             logger.error(f"remove_center_marks({view_name!r}) error: {e}")
@@ -10065,10 +10183,28 @@ class DrawingOperations:
                 False, f"Remove center marks error: {e}", SwErrors.swSelectionError, data,
             )
 
+        # `_view_center_marks` is eager: the whole chain is walked to
+        # exhaustion *before* the first delete, because per the
+        # `ICenterMark::GetNext` record in docs/api/03-annotations.md "a
+        # deleted COM object's own `GetNext` is not guaranteed to still
+        # answer". A lazy walk would end the batch after the first successful
+        # `DeleteSelection2` and still report success, leaving the rest behind.
+        marks, walk_err = self._view_center_marks(view)
+        if walk_err is not None:
+            # `GetFirstCenterMark2` itself failed -- most likely a
+            # pre-2025-SP01 SolidWorks that has no such member. Swallowing it
+            # would report "no center marks found -- 0 removed", telling the
+            # caller the view is clean while every mark is still on it.
+            return self._result(
+                False,
+                f"Could not enumerate center marks in view {view_name!r}: {walk_err} "
+                "(IView::GetFirstCenterMark2 requires SOLIDWORKS 2025 SP01 or later)",
+                SwErrors.swUnknownError, data,
+            )
+        candidates = len(marks)
+
         removed = 0
-        candidates = 0
-        for mark in self._iter_view_center_marks(view):
-            candidates += 1
+        for mark in marks:
             try:
                 selected_ok = mark.Select(False, sel_data)
             except Exception as e:

@@ -401,6 +401,45 @@ class TestAddGtolFrameContent:
             "SetFrameValues2", 1, "5", "", "", "", "",
         )
 
+    def test_composite_lower_segment_may_carry_no_datums(self, tool_sw):
+        """In a composite FCF the upper segment is the pattern-locating
+        control (PLTZF) and carries the datum references; the lower
+        feature-relating segment (FRTZF) legally carries none when it controls
+        only the pattern-internal relationship. Applying the upper segment's
+        at-least-one-datum rule to it rejects a standard ASME Y14.5 callout."""
+        fake_sw = tool_sw("drawing")
+        _prep_view(fake_sw)
+        tag_a, _ = _datum_tag(fake_sw, "da", label="A")
+        view1 = _view(fake_sw, "v1", "Sheet1", first_datum_tag=tag_a)
+        fake_sw.ActiveDoc.set_return("GetFirstView", view1)
+        gtol, _ann = _gtol(fake_sw, "g1")
+        fake_sw.ActiveDoc.set_return("InsertGtol", gtol)
+
+        result = dispatch("add_gtol", {
+            "view_name": "Drawing View1", "entity": _entity(), "symbol": "position",
+            "tolerance": 0.4, "datums": ["A"],
+            "composite": {"tolerance": 0.1},
+        })
+
+        assert result["success"] is True, result
+        values_calls = fake_sw.call_log.calls_to("SetFrameValues2")
+        assert values_calls[1].args == (2, "0.1", "", "", "", "")
+
+    def test_composite_lower_segment_still_rejects_datums_on_a_form_tolerance(self, tool_sw):
+        """The form-tolerance prohibition is not relaxed alongside it: a
+        flatness callout can never reference a datum, in either segment."""
+        fake_sw = tool_sw("drawing")
+        _prep_view(fake_sw)
+
+        result = dispatch("add_gtol", {
+            "view_name": "Drawing View1", "entity": _entity(), "symbol": "flatness",
+            "tolerance": 0.4, "composite": {"tolerance": 0.1, "datums": ["A"]},
+        })
+
+        assert result["success"] is False
+        assert result["error_name"] == "swInvalidInput"
+        assert not fake_sw.call_log.calls_to("InsertGtol")
+
     def test_composite_frame_writes_two_stacked_rows(self, tool_sw):
         fake_sw = tool_sw("drawing")
         _prep_view(fake_sw)
