@@ -337,6 +337,24 @@ class TestApplyDraftingStandard:
         assert set(result["data"]["results"]) == set(spec)
         assert all(r["success"] for r in result["data"]["results"].values())
 
+    def test_entity_class_keys_are_matched_case_insensitively(self, tool_sw, tmp_path):
+        """`set_line_format(target=...)` resolves through `_enum_key`, which
+        strips and case-folds -- a standard file's own keys are held to the
+        same rule so `"Visible"` isn't rejected by one tool and accepted by
+        its direct equivalent."""
+        fake_sw = tool_sw("drawing")
+        standard = tmp_path / "standard.json"
+        standard.write_text(json.dumps({"Visible": {"weight": "thin"}}))
+
+        result = dispatch("apply_drafting_standard", {"standard_file": str(standard)})
+
+        assert result["success"] is True, result
+        # `results` stays keyed by the file's own spelling, so a caller can
+        # match each outcome back to the entry it wrote.
+        assert set(result["data"]["results"]) == {"Visible"}
+        calls = fake_sw.call_log.calls_to("SetUserPreferenceInteger")
+        assert calls[0].args == (0x35, 0, int(SwLineWeights.swLW_THIN))
+
     def test_unknown_entity_class_key_names_the_bad_key(self, tool_sw, tmp_path):
         fake_sw = tool_sw("drawing")
         standard = tmp_path / "bad.json"

@@ -40,6 +40,43 @@ def _layer(fake_sw, obj_id, visible=True, printable=True, color=0,
     return layer
 
 
+class _RefusesPrintableOnHiddenLayer:
+    """A hand-written `ILayer` stand-in that enforces the two behaviours
+    `ILayer::Visible`/`ILayer::Printable`'s dossier records document but the
+    fake harness cannot express (its property writes are plain stores, so
+    `set_raises` -- which hooks call time -- can't reach them): hiding a
+    layer clears `Printable` as a side effect, and writing `Printable =
+    True` onto a hidden layer throws instead of taking."""
+
+    def __init__(self):
+        self.Description = ""
+        self.Color = 0
+        self.Style = int(SwLineStyles.swLineCONTINUOUS)
+        self.Width = int(SwLineWeights.swLW_NORMAL)
+        self._visible = True
+        self._printable = True
+
+    @property
+    def Visible(self):
+        return self._visible
+
+    @Visible.setter
+    def Visible(self, value):
+        self._visible = bool(value)
+        if not self._visible:
+            self._printable = False
+
+    @property
+    def Printable(self):
+        return self._printable
+
+    @Printable.setter
+    def Printable(self, value):
+        if value and not self._visible:
+            raise RuntimeError("cannot make a hidden layer printable")
+        self._printable = bool(value)
+
+
 def _annotation_owner(fake_sw, obj_id, next_method="GetNext"):
     """A fake `INote`/`IDatumTag`/`ITableAnnotation`-shaped wrapper: `.
     GetAnnotation()` -> a fresh `IAnnotation` fake (whose `.Layer` a test
@@ -106,13 +143,14 @@ class TestCreateLayer:
         assert result["data"]["visible"] is True
         assert result["data"]["printable"] is False
 
-    def test_getlayer_failure_falls_back_to_requested_visible_printable(self, tool_sw):
+    def test_getlayer_failure_reports_visible_printable_as_unknown(self, tool_sw):
         """`ILayer::Printable`'s dossier record documents that SolidWorks
         can silently refuse `Printable == True` on a layer that isn't
         `Visible` -- so the response reads the layer back after writing it
-        rather than echoing the request. When that read-back itself can't
-        happen (`GetLayer` returns nothing here), the response has nothing
-        better to report than what was asked for."""
+        rather than echoing the request. When the layer can't be re-resolved
+        (`GetLayer` returns nothing here) those two writes never happen at
+        all, so the response reports them as unknown rather than echoing a
+        state the layer provably isn't in."""
         fake_sw = tool_sw("drawing")
         layer_mgr = _layer_mgr(fake_sw, [])
         layer_mgr.set_return("AddLayer", 1)
@@ -123,8 +161,8 @@ class TestCreateLayer:
         })
 
         assert result["success"] is True, result
-        assert result["data"]["visible"] is False
-        assert result["data"]["printable"] is True
+        assert result["data"]["visible"] is None
+        assert result["data"]["printable"] is None
 
     def test_hex_color_converts_to_bgr_packed_colorref(self, tool_sw):
         fake_sw = tool_sw("drawing")
@@ -366,6 +404,39 @@ class TestSetLayerProperties:
         assert result["error_name"] == "swInvalidInput"
         assert not fake_sw.call_log.calls_to("GetLayer")
 
+    def test_signed_hex_color_rejected(self, tool_sw):
+        """`"#-1-2-3"` is six characters, so a length check alone lets it
+        through and `int(..., 16)` happily parses signed channels into a
+        negative COLORREF. The hex branch is as strict about 0-255 as the
+        `(r, g, b)` branch."""
+        fake_sw = tool_sw("drawing")
+        _layer_mgr(fake_sw, ["Dims"])
+
+        result = dispatch("set_layer_properties", {"name": "Dims", "color": "#-1-2-3"})
+
+        assert result["success"] is False
+        assert result["error_name"] == "swInvalidInput"
+        assert not fake_sw.call_log.calls_to("GetLayer")
+
+    def test_impossible_printable_restore_is_logged_not_fatal(self, tool_sw):
+        """Hiding a layer whose `printable` the caller never mentioned makes
+        the tool try to re-assert `Printable == True` on a now-hidden layer
+        -- exactly the write `ILayer::Printable`'s dossier record documents
+        as impossible. A real SolidWorks that throws there must not turn a
+        successful hide into a failed call; `data` reports what actually
+        stuck."""
+        fake_sw = tool_sw("drawing")
+        layer_mgr = _layer_mgr(fake_sw, ["Dims"])
+        layer_mgr.set_return("GetLayer", _RefusesPrintableOnHiddenLayer())
+
+        result = dispatch("set_layer_properties", {"name": "Dims", "visible": False})
+
+        assert result["success"] is True, result
+        assert result["data"]["visible"] is False
+        # Not True: the restore was refused, and the response says so rather
+        # than echoing the value the tool tried to preserve.
+        assert result["data"]["printable"] is False
+
 
 class TestMoveAnnotationsToLayer:
     def test_moves_notes_datum_tags_tables_and_dimensions_by_default(self, tool_sw):
@@ -458,6 +529,25 @@ class TestMoveAnnotationsToLayer:
         assert note1_ann.Layer == "Reviewed"
         assert tag1_ann.Layer != "Reviewed"
         assert result["data"]["moved"] == {"note": 1}
+
+    def test_repeated_annotation_type_is_not_counted_twice(self, tool_sw):
+        """A repeated key must not walk the same family twice -- the `Layer`
+        writes are idempotent, but the counts would double and over-report
+        how much of the pack was actually reassigned."""
+        fake_sw = tool_sw("drawing")
+        _layer_mgr(fake_sw, ["Reviewed"])
+        note1, note1_ann = _annotation_owner(fake_sw, "note1")
+        view = _move_view(fake_sw, "v1", first_note=note1)
+        fake_sw.ActiveDoc.set_return("GetFirstView", view)
+
+        result = dispatch("move_annotations_to_layer", {
+            "layer_name": "Reviewed", "annotation_types": ["note", "note"],
+        })
+
+        assert result["success"] is True, result
+        assert note1_ann.Layer == "Reviewed"
+        assert result["data"]["moved"] == {"note": 1}
+        assert result["data"]["total"] == 1
 
     def test_unknown_annotation_type_rejected(self, tool_sw):
         fake_sw = tool_sw("drawing")

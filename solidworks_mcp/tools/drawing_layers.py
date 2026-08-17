@@ -79,7 +79,9 @@ _WIDTH_SCHEMA = line_weight_schema("Line width/weight (swLineWeights_e).")
         "independently. Fails with a clear error if name already exists "
         "(checked before any mutating call). visible/printable are applied "
         "after creation, visible first (setting Visible can change "
-        "Printable as a side effect, so printable is re-applied second)."
+        "Printable as a side effect, so printable is re-applied second), "
+        "then read back -- they come back null if the new layer could not "
+        "be re-resolved, meaning those two writes never happened."
     ),
     schema={
         "type": "object",
@@ -200,6 +202,7 @@ def set_layer_properties(arguments: dict) -> Dict:
             "annotation_types": {
                 "type": "array",
                 "items": {"type": "string", "enum": ["note", "datum_tag", "table", "dimension"]},
+                "uniqueItems": True,
                 "description": "Subset of annotation families to move. Omitted: all four.",
             },
         },

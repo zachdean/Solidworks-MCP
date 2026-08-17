@@ -66,7 +66,10 @@ _TARGET_SCHEMA = {
         "references (via IDrawingDoc::SetLineWidth/SetLineStyle/"
         "SetLineColor -- all three supported). view_name only applies to "
         "the entity-list form: it activates that view first. At least one "
-        "of weight/style/color must be given."
+        "of weight/style/color must be given. For the entity-list form, "
+        "data.applied counts entities the calls were sent to, not entities "
+        "SolidWorks confirmed it restyled -- those three methods return no "
+        "status, so an unrecognized style name is silently ignored."
     ),
     schema={
         "type": "object",

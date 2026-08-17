@@ -502,10 +502,15 @@ def _parse_layer_color(color: Any) -> Tuple[Optional[int], Optional[str]]:
             text = text[1:]
         if len(text) != 6:
             return None, f"color hex string must be 6 hex digits (RRGGBB), got {color!r}"
-        try:
-            r, g, b = (int(text[i:i + 2], 16) for i in (0, 2, 4))
-        except ValueError:
+        # Character-class check rather than a bare `int(..., 16)`: `int` also
+        # accepts signs and surrounding whitespace, so a 6-character string
+        # like `"#-1-2-3"` or `"# 1 2 3"` would otherwise parse to negative
+        # channels and pack into a negative COLORREF that `AddLayer`/
+        # `ILayer::Color` receive as-is. This keeps the hex branch as strict
+        # about its 0-255 range as the `(r, g, b)` branch below already is.
+        if not all(c in "0123456789abcdefABCDEF" for c in text):
             return None, f"color hex string {color!r} is not valid hexadecimal"
+        r, g, b = (int(text[i:i + 2], 16) for i in (0, 2, 4))
     elif isinstance(color, (list, tuple)) and len(color) == 3:
         try:
             r, g, b = (int(channel) for channel in color)
@@ -13226,6 +13231,10 @@ class DrawingOperations:
             if `name` is blank, `color` doesn't parse, `style`/`width` aren't
             recognized keys, or a layer named `name` already exists. Fails
             with `swFeatureError` if `AddLayer` itself returns falsy.
+            `data["visible"]`/`data["printable"]` are read back off the
+            created layer, and are `None` when the layer was created but
+            couldn't be resolved afterwards (so those two writes never
+            happened and their real state is unknown).
         """
         if not name or not name.strip():
             return self._result(False, "name must not be blank", SwErrors.swInvalidInput)
@@ -13279,7 +13288,12 @@ class DrawingOperations:
         # `style`/`width` have no such side effect (they went in through
         # `AddLayer` itself, not a follow-up property write), so those stay
         # the caller's own resolved values.
-        actual_visible, actual_printable = visible, printable
+        # `None` -- not the requested values -- when the layer can't be
+        # resolved: the writes below never happened, so echoing `visible`/
+        # `printable` back would report a state the layer provably isn't in
+        # (a caller reading `"visible": false` would believe a still-visible
+        # layer is hidden). `None` says "asked for, could not confirm".
+        actual_visible = actual_printable = None
         if layer is not None:
             try:
                 layer.Visible = bool(visible)
@@ -13393,7 +13407,10 @@ class DrawingOperations:
             `style`/`width` aren't recognized keys. `data` is the layer's
             full state (`_describe_layer`) read back *after* every requested
             change, so a caller can confirm both what changed and what was
-            preserved.
+            preserved -- including the case where preserving an omitted
+            `printable` across a `visible` change turned out to be impossible
+            (that restore is best-effort and logged, never fatal; see the
+            body).
         """
         colorref: Optional[int] = None
         if color is not None:
@@ -13449,12 +13466,18 @@ class DrawingOperations:
                     try:
                         layer.Printable = prior_printable
                     except Exception as e:
-                        logger.error(
+                        # Logged, not fatal -- the same best-effort restore
+                        # `_shown_hidden_layers` does. Restoring
+                        # `Printable == True` onto a layer this call just
+                        # *hid* is precisely the write `ILayer::Printable`'s
+                        # dossier record documents as impossible ("it is not
+                        # possible to make a layer printable if it is not
+                        # visible", with silently-ignored-vs-throws
+                        # unverified), so failing the whole call here would
+                        # report the successful `Visible` change as an error.
+                        # `_describe_layer` below reports what actually stuck.
+                        logger.warning(
                             f"set_layer_properties({name!r}) restore Printable error: {e}")
-                        return self._result(
-                            False, f"Restore printable error: {e}", SwErrors.swFeatureError,
-                            {"name": name},
-                        )
         # The remaining properties are plain writes with no documented
         # side effect on each other, so they share one body -- ordered
         # `Printable` first to keep the explicit-printable-wins guarantee
@@ -13496,9 +13519,10 @@ class DrawingOperations:
                 behavior).
             annotation_types: Subset of `_MOVE_ANNOTATION_TYPE_ITERATORS`'s
                 keys (`"note"`, `"datum_tag"`, `"table"`, `"dimension"`) to
-                move. Omitted: all four. An unrecognized key fails with
-                `swInvalidInput` (before any COM call) listing the valid
-                keys. GTols and weld symbols are not movable by this tool --
+                move; repeats are collapsed. Omitted: all four. An
+                unrecognized key fails with `swInvalidInput` (before any COM
+                call) listing the valid keys. GTols and weld symbols are not
+                movable by this tool --
                 see `_MOVE_ANNOTATION_TYPE_ITERATORS`'s own comment for why.
 
         Returns:
@@ -13518,7 +13542,11 @@ class DrawingOperations:
                     f"{sorted(_MOVE_ANNOTATION_TYPE_ITERATORS)!r}",
                     SwErrors.swInvalidInput, {"annotation_types": annotation_types},
                 )
-            types = list(annotation_types)
+            # De-duplicated, order preserved: a repeated key would otherwise
+            # walk that family once per occurrence and count each annotation
+            # again, so `moved`/`total` would over-report what was actually
+            # reassigned (the `Layer` writes themselves are idempotent).
+            types = list(dict.fromkeys(annotation_types))
         else:
             types = list(_MOVE_ANNOTATION_TYPE_ITERATORS)
 
@@ -13636,7 +13664,20 @@ class DrawingOperations:
         failure needs to know weight already took effect rather than
         re-applying it blind.
         """
-        extension = doc.Extension
+        # The `IModelDoc2::Extension` read is itself a COM call, so it is
+        # guarded like every other one in this file -- letting it escape
+        # would hand the tool layer a bare traceback instead of a result
+        # dict, and would lose `apply_drafting_standard`'s per-entry
+        # `results` for the entity classes that already landed.
+        try:
+            extension = doc.Extension
+        except Exception as e:
+            logger.error(f"set_line_format({class_key!r}) Extension error: {e}")
+            return self._result(
+                False, f"Set line format error: {e}", SwErrors.swFeatureError,
+                {"target": class_key},
+            )
+
         applied: Dict[str, str] = {}
         for field, pref, value, key in writes:
             try:
@@ -13705,7 +13746,18 @@ class DrawingOperations:
             `data["entities"]` reports per-entity success (a selection or
             COM-call failure on one entity is skipped, logged, and counted --
             it does not fail the whole call); overall `success` is True only
-            if at least one entity was actually updated.
+            if at least one entity was reached.
+
+            "Reached", not "verified": `IDrawingDoc::SetLineWidth`/
+            `SetLineStyle`/`SetLineColor` are all `Sub`s with no return value
+            (see their dossier records), so `data["applied"]` counts the
+            entities that selected cleanly and whose three calls raised
+            nothing -- not entities SolidWorks confirmed it restyled. That
+            matters most for `style`, whose `StyleName` is an undocumented
+            display-name *string* (`_LINE_STYLE_DISPLAY_NAMES`): an
+            unrecognized name is silently ignored rather than rejected. The
+            read side (`GetLineFontCount2`/`GetLineFontName2`) is not wired
+            up in this tool layer, so there is no confirmation to report.
         """
         if weight is None and style is None and color is None:
             return self._result(
@@ -13933,7 +13985,13 @@ class DrawingOperations:
         # (persistent) document preferences first.
         resolved: List[Tuple[str, str, List[Tuple]]] = []
         for entity_class, entry in spec.items():
-            if entity_class not in _LINE_FORMAT_ENTITY_CLASSES:
+            # Membership tested the same way `_enum_key` (and so
+            # `set_line_format`'s own `target`) tests it -- strip and
+            # case-fold -- so a file saying `"Visible"` isn't rejected as an
+            # unknown entity class by a tool whose direct equivalent,
+            # `set_line_format(target="Visible")`, accepts it.
+            normalized = entity_class.strip().lower() if isinstance(entity_class, str) else ""
+            if normalized not in _LINE_FORMAT_ENTITY_CLASSES:
                 return self._result(
                     False,
                     f"Unknown entity class {entity_class!r} in {standard_file!r}; expected one of "
