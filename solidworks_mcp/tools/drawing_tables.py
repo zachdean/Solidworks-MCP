@@ -2,7 +2,8 @@
 Drawing Table Tools
 --------------------
 insert_bom_table, list_tables, get_bom_contents, auto_balloon_view,
-add_balloon, renumber_balloons, remove_balloons.
+add_balloon, renumber_balloons, remove_balloons, insert_hole_table,
+insert_revision_table, add_revision, insert_weldment_cutlist.
 
 Backed by `DrawingOperations` (solidworks_mcp/automation/drawings.py), per
 docs/api/04-tables.md.
@@ -32,6 +33,20 @@ _BALLOON_ENTITY_REF_SCHEMA = {
                 "ballooning an assembly component instance, which "
                 "list_view_entities does not itself emit."
             ),
+        },
+        "x": {"type": "number", "description": "Caller's default unit."},
+        "y": {"type": "number", "description": "Caller's default unit."},
+        "z": {"type": "number", "description": "Caller's default unit. Defaults to 0."},
+    },
+    "required": ["kind", "x", "y"],
+}
+
+_DATUM_ENTITY_REF_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "kind": {
+            "type": "string",
+            "description": "Entity kind: 'vertex' or 'edge' (as returned by list_view_entities). No other kind is a valid hole-table datum origin.",
         },
         "x": {"type": "number", "description": "Caller's default unit."},
         "y": {"type": "number", "description": "Caller's default unit."},
@@ -364,4 +379,181 @@ def renumber_balloons(arguments: dict) -> Dict:
 def remove_balloons(arguments: dict) -> Dict:
     return sw_automation.remove_balloons(
         arguments.get("view_name"),
+    )
+
+
+@tool(
+    name="insert_hole_table",
+    description=(
+        "Insert a hole table onto a drawing view via IView::"
+        "InsertHoleTable3, after atomically selecting datum_entity "
+        "(Mark=1) -- a hole table's X/Y columns are relative to a "
+        "pre-selected datum origin vertex or edge. tag_style: "
+        "'alphanumeric' (default) or 'numeric'. combine_same_size: True "
+        "(default) merges cells of same-size holes via IHoleTable::"
+        "CombineSameSize. template_path falls back to the SolidWorks "
+        "default .sldholtbt template when omitted, erroring with "
+        "swTemplateNotFound if none can be found. Returns the created "
+        "table's name, row_count, and column_count."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "view_name": {"type": "string", "description": "Drawing view to attach the table to and select the datum entity in."},
+            "datum_entity": {**_DATUM_ENTITY_REF_SCHEMA, "description": "Origin/datum vertex or edge, selected with Mark=1 before insertion."},
+            "x": {"type": "number", "description": "Placement, caller's default unit."},
+            "y": {"type": "number", "description": "Placement, caller's default unit."},
+            "template_path": {
+                "type": "string",
+                "description": "Path to a .sldholtbt template. Omitted: auto-discovered default.",
+            },
+            "tag_style": {
+                "type": "string", "default": "alphanumeric",
+                "description": "'alphanumeric' (default) or 'numeric'.",
+            },
+            "combine_same_size": {
+                "type": "boolean", "default": True,
+                "description": "True to merge cells of the same-size holes.",
+            },
+        },
+        "required": ["view_name", "datum_entity", "x", "y"],
+    },
+)
+def insert_hole_table(arguments: dict) -> Dict:
+    return sw_automation.insert_hole_table(
+        arguments.get("view_name"),
+        arguments.get("datum_entity"),
+        arguments.get("x"),
+        arguments.get("y"),
+        arguments.get("template_path"),
+        arguments.get("tag_style"),
+        arguments.get("combine_same_size", True),
+    )
+
+
+@tool(
+    name="insert_revision_table",
+    description=(
+        "Insert a revision table onto the active sheet via ISheet::"
+        "InsertRevisionTable2 (requested as IDrawingDoc::"
+        "InsertRevisionTable2, which does not exist). anchor=True "
+        "(default) inserts at the sheet's existing revision-table anchor "
+        "point and x/y must be omitted; anchor=False requires x/y. "
+        "alpha_numeric is accepted and echoed for forward compatibility -- "
+        "SolidWorks has no per-table alpha/numeric COM property; "
+        "add_revision infers the numbering scheme from the table's "
+        "existing rows instead. symbol_shape: 'circle' (default), "
+        "'square', 'triangle', or 'hexagon'. template_path falls back to "
+        "the SolidWorks default .sldrevtbt template when omitted, "
+        "erroring with swTemplateNotFound if none can be found, and with "
+        "swFeatureError if the sheet already has a revision table (only "
+        "one is allowed per sheet). Returns the created table's name, "
+        "row_count, and column_count."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "x": {"type": "number", "description": "Placement, caller's default unit. Must be omitted when anchor=True; required when anchor=False."},
+            "y": {"type": "number", "description": "Placement, caller's default unit. Must be omitted when anchor=True; required when anchor=False."},
+            "template_path": {
+                "type": "string",
+                "description": "Path to a .sldrevtbt template. Omitted: auto-discovered default.",
+            },
+            "anchor": {
+                "type": "boolean", "default": True,
+                "description": "True to insert at the sheet's existing revision-table anchor point instead of x/y.",
+            },
+            "alpha_numeric": {
+                "type": "boolean", "default": True,
+                "description": "Echoed in the result; see description for why this isn't a real COM setting.",
+            },
+            "symbol_shape": {
+                "type": "string", "default": "circle",
+                "description": "'circle' (default), 'square', 'triangle', or 'hexagon'.",
+            },
+        },
+        "required": [],
+    },
+)
+def insert_revision_table(arguments: dict) -> Dict:
+    return sw_automation.insert_revision_table(
+        arguments.get("x"),
+        arguments.get("y"),
+        arguments.get("template_path"),
+        arguments.get("anchor", True),
+        arguments.get("alpha_numeric", True),
+        arguments.get("symbol_shape", "circle"),
+    )
+
+
+@tool(
+    name="add_revision",
+    description=(
+        "Append a row to the document's revision table via "
+        "IRevisionTableAnnotation::AddRevision. revision omitted: "
+        "auto-incremented from the table's last row (A -> B, 1 -> 2; a "
+        "brand-new table with no rows starts at 'A'). date omitted: "
+        "defaults to today, formatted MM/DD/YY. approved_by/zone are "
+        "written only if the table's template has a matching column "
+        "(silently skipped otherwise, reported in data.skipped_fields). "
+        "Fails with swInvalidInput if no revision table exists yet -- call "
+        "insert_revision_table first."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "description": {"type": "string", "description": "The \"what changed\" text for this revision."},
+            "revision": {"type": "string", "description": "Explicit revision designation, e.g. 'B'. Omitted: auto-incremented."},
+            "date": {"type": "string", "description": "Omitted: defaults to today (MM/DD/YY)."},
+            "approved_by": {"type": "string", "description": "Optional approver name/initials."},
+            "zone": {"type": "string", "description": "Optional drawing zone reference."},
+        },
+        "required": ["description"],
+    },
+)
+def add_revision(arguments: dict) -> Dict:
+    return sw_automation.add_revision(
+        arguments.get("description"),
+        arguments.get("revision"),
+        arguments.get("date"),
+        arguments.get("approved_by"),
+        arguments.get("zone"),
+    )
+
+
+@tool(
+    name="insert_weldment_cutlist",
+    description=(
+        "Insert a weldment cut list table onto a drawing view via IView::"
+        "InsertWeldmentTable (requested as IModelDocExtension::"
+        "InsertWeldmentCutlist, which does not exist under that name or "
+        "any variant spelling). template_path falls back to the "
+        "SolidWorks default .sldwldtbt template when omitted, erroring "
+        "with swTemplateNotFound if none can be found. Fails with "
+        "swFeatureError, distinctly from an empty table, when the view's "
+        "referenced model has no weldment cut list feature (detected via "
+        "IWeldmentCutListAnnotation::WeldmentCutListFeature reading back "
+        "empty). Returns the created table's name, row_count, and "
+        "column_count."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "view_name": {"type": "string", "description": "Drawing view to attach the table to."},
+            "x": {"type": "number", "description": "Placement, caller's default unit."},
+            "y": {"type": "number", "description": "Placement, caller's default unit."},
+            "template_path": {
+                "type": "string",
+                "description": "Path to a .sldwldtbt template. Omitted: auto-discovered default.",
+            },
+        },
+        "required": ["view_name", "x", "y"],
+    },
+)
+def insert_weldment_cutlist(arguments: dict) -> Dict:
+    return sw_automation.insert_weldment_cutlist(
+        arguments.get("view_name"),
+        arguments.get("x"),
+        arguments.get("y"),
+        arguments.get("template_path"),
     )

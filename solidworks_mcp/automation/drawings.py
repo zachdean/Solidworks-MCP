@@ -61,6 +61,8 @@ from ..constants_drawing import (
     SwExportDataFileType,
     SwExportDataSheetsToExport,
     SwFileSaveError,
+    SwHoleTableTagOrder,
+    SwHoleTableTagStyle,
     SwImportModelItemsSource,
     SwInConfigurationOpts,
     SwInsertAnnotation,
@@ -68,6 +70,7 @@ from ..constants_drawing import (
     SwLeaderStyle,
     SwNumberingType,
     SwRenameOptions,
+    SwRevisionTableSymbolShape,
     SwSaveAsOptions,
     SwSaveAsVersion,
     SwSetValueInConfiguration,
@@ -1327,6 +1330,72 @@ INSERT_BOM_BALLOON = ComSignature("InsertBOMBalloon", [
     Param("show_quantity", False, to_bool),
     Param("quantity_placement", 0, enum_to_int),
     Param("quantity_denotation_text", ""),
+])
+
+# `insert_hole_table`'s `tag_style` -> `IView::InsertHoleTable3`'s `TagType`
+# (`swHoleTableTagStyle_e`). `swHoleTable_ManualTags` is deliberately
+# excluded -- it requires a populated `ManualTags` array, and this tool
+# exposes no `manual_tags` parameter (not in this task's Requirements) to
+# supply one.
+_HOLE_TABLE_TAG_STYLES = {
+    "alphanumeric": int(SwHoleTableTagStyle.swHoleTable_AlphaNumericTags),
+    "numeric": int(SwHoleTableTagStyle.swHoleTable_NumericTags),
+}
+
+# `insert_hole_table`'s per-`tag_style` default `StartValue` -- "a letter A-Z
+# if the template uses letter tags, a positive integer if it uses number
+# tags" per docs/api/04-tables.md's `InsertHoleTable2` Gotchas. Not exposed
+# as its own tool parameter (not in this task's Requirements).
+_HOLE_TABLE_START_VALUES = {"alphanumeric": "A", "numeric": "1"}
+
+# `IView::InsertHoleTable3`'s positional signature, in the exact order
+# documented in docs/api/04-tables.md: UseAnchorPoint, X, Y, AnchorType,
+# StartValue, Template, TagOrder, TagType, ManualTags. 9 positional
+# parameters -- ComSignature per this issue's working agreement (>6 params).
+# `AnchorType` always binds the shared table-anchor default (top-left) --
+# `insert_hole_table` exposes no `anchor`/`attach_to_anchor` parameters (not
+# in this task's Requirements: it always places by `x`/`y`), so
+# `UseAnchorPoint` always binds `False` too. `TagOrder` always binds
+# `swHoleTableTagOrder_XY` -- this tool's own convention (not exposed as a
+# parameter either); `ManualTags` always binds the null `VT_DISPATCH`
+# (`to_optional_object(None, ...)`) since `swHoleTable_ManualTags` is never
+# reachable through `_HOLE_TABLE_TAG_STYLES` above.
+INSERT_HOLE_TABLE3 = ComSignature("InsertHoleTable3", [
+    Param("use_anchor_point", False, to_bool),
+    Param("x", 0.0, to_meters),
+    Param("y", 0.0, to_meters),
+    Param("anchor_type", int(SwBOMConfigurationAnchorType.swBOMConfigurationAnchor_TopLeft), enum_to_int),
+    Param("start_value", REQUIRED),
+    Param("template", REQUIRED),
+    Param("tag_order", int(SwHoleTableTagOrder.swHoleTableTagOrder_XY), enum_to_int),
+    Param("tag_type", REQUIRED, enum_to_int),
+    Param("manual_tags", None, to_optional_object),
+])
+
+# `insert_revision_table`'s `symbol_shape` -> `ISheet::InsertRevisionTable2`'s
+# `Shape` (`swRevisionTableSymbolShape_e`).
+_REVISION_SYMBOL_SHAPES = {
+    "circle": int(SwRevisionTableSymbolShape.swRevisionTable_CircleSymbol),
+    "square": int(SwRevisionTableSymbolShape.swRevisionTable_SquareSymbol),
+    "triangle": int(SwRevisionTableSymbolShape.swRevisionTable_TriangleSymbol),
+    "hexagon": int(SwRevisionTableSymbolShape.swRevisionTable_HexagonSymbol),
+}
+
+# `ISheet::InsertRevisionTable2`'s positional signature, in the exact order
+# documented in docs/api/04-tables.md: UseAnchorPoint, X, Y, AnchorType,
+# TableTemplate, Shape, AutoUpdateZoomCells. 7 positional parameters --
+# ComSignature per this issue's working agreement (>6 params). `AnchorType`
+# always binds the shared table-anchor default (top-left) -- this tool
+# exposes no anchor-corner parameter (not in this task's Requirements: its
+# own `anchor` parameter is the `UseAnchorPoint` bool itself).
+INSERT_REVISION_TABLE2 = ComSignature("InsertRevisionTable2", [
+    Param("use_anchor_point", REQUIRED, to_bool),
+    Param("x", 0.0, to_meters),
+    Param("y", 0.0, to_meters),
+    Param("anchor_type", int(SwBOMConfigurationAnchorType.swBOMConfigurationAnchor_TopLeft), enum_to_int),
+    Param("table_template", REQUIRED),
+    Param("shape", REQUIRED, enum_to_int),
+    Param("auto_update_zone_cells", True, to_bool),
 ])
 
 
@@ -11476,5 +11545,690 @@ class DrawingOperations:
             True,
             f"Renumbered {len(renumbered)} balloon(s) starting at {start}"
             + (f" in view {view_name!r}" if view_name else ""),
+            SwErrors.swSuccess, data,
+        )
+
+    # ========================================================================
+    # Hole table, revision table, and weldment cut list tools
+    # ========================================================================
+
+    def insert_hole_table(
+        self, view_name: str, datum_entity: Dict[str, Any], x: float, y: float,
+        template_path: Optional[str] = None, tag_style: Optional[str] = None,
+        combine_same_size: bool = True,
+    ) -> Dict:
+        """
+        Insert a hole table onto a drawing view via `IView::InsertHoleTable3`,
+        after atomically selecting the datum origin (`Mark=1`) via
+        `selected(...)` -- per docs/api/04-tables.md's `InsertHoleTable2`/`3`
+        Remarks, a hole table's X/Y columns are relative to a pre-selected
+        datum origin vertex or edge.
+
+        Args:
+            view_name: Drawing view to attach the table to, and to activate
+                (`select_view_by_name`) before selecting `datum_entity` so
+                the selection point resolves against the right view.
+            datum_entity: Origin/datum entity reference in the shape
+                `list_view_entities` returns (`{"kind": "vertex"/"edge",
+                "x", "y", "z"}`). `"face"`/`"component"`/`"dimension"`
+                kinds are rejected with `swInvalidInput` before any COM
+                call -- the dossier's own Remarks name only a vertex or edge
+                as a valid datum origin.
+            x, y: Table placement, caller's default unit -- converted to
+                meters.
+            template_path: Path to a `.sldholtbt` template. Omitted: falls
+                back to `utils.sw_finder.find_template("hole")` (globs the
+                SolidWorks install's `lang/<language>/` folders for the
+                first `.sldholtbt` file, same convention as
+                `insert_bom_table`'s `.sldbomtbt` lookup); if that also
+                finds nothing, fails with `swTemplateNotFound`.
+            tag_style: `"alphanumeric"` (default) or `"numeric"` --
+                `swHoleTableTagStyle_e`'s `TagType`. `swHoleTable_ManualTags`
+                is not offered -- it requires a populated `ManualTags`
+                array, and this tool has no `manual_tags` parameter (not in
+                this task's Requirements) to supply one. `StartValue` binds
+                this tool's own per-style default (`"A"`/`"1"`) -- not its
+                own parameter either.
+            combine_same_size: `True` (default) to merge cells of same-size
+                holes, set via `IHoleTable::CombineSameSize` on the table's
+                `IHoleTableAnnotation::HoleTable` after creation -- **not**
+                an `InsertHoleTable3` parameter itself (confirmed absent
+                from `IHoleTableAnnotation`'s own member index; the real
+                property lives one level down, on the `IHoleTable` feature
+                object -- see docs/api/04-tables.md's sw-mio.3 addendum).
+
+        Returns:
+            Result dict. `data["name"]` is the table's `IAnnotation::GetName`
+            value; `data["row_count"]`/`data["column_count"]` are read back
+            via `ITableAnnotation::RowCount`/`ColumnCount`.
+
+        Gotcha: this tool pre-selects only the datum origin (`Mark=1`) --
+        never hole edges/faces (`Mark=2`), since it has no `holes` parameter
+        (not in this task's Requirements). Per `InsertHoleTable2`'s own
+        Remarks, datum tags "only appear next to holes that were
+        pre-selected with Mark=2" -- so `data["row_count"]` reflects
+        whatever SolidWorks populates on its own with no holes explicitly
+        marked, which may be an empty table on a real install. Adding a
+        `holes` entity-list parameter (mirroring `datum_entity`, each
+        selected `append=True` with `mark=2`) is the natural follow-up if
+        that turns out to matter in practice.
+        """
+        tag_key = (tag_style if tag_style is not None else "alphanumeric")
+        tag_key = tag_key.strip().lower() if isinstance(tag_key, str) else ""
+        tag_enum = _HOLE_TABLE_TAG_STYLES.get(tag_key)
+        if tag_enum is None:
+            return self._result(
+                False,
+                f"Unknown tag_style {tag_style!r}; expected one of "
+                f"{sorted(_HOLE_TABLE_TAG_STYLES)!r}",
+                SwErrors.swInvalidInput, {"tag_style": tag_style},
+            )
+
+        parsed_entity, entity_err = _parse_entity_ref(datum_entity)
+        if entity_err:
+            return self._result(
+                False, entity_err, SwErrors.swInvalidInput, {"datum_entity": datum_entity},
+            )
+        type_str, ex, ey, ez = parsed_entity
+        if type_str not in ("VERTEX", "EDGE"):
+            kind = datum_entity.get("kind", datum_entity.get("type")) if isinstance(datum_entity, dict) else None
+            return self._result(
+                False,
+                f"datum_entity must be a vertex or edge, got kind {kind!r}",
+                SwErrors.swInvalidInput, {"datum_entity": datum_entity},
+            )
+
+        xy_err = self._validate_xy(x, y)
+        if xy_err:
+            return xy_err
+
+        resolved_template = template_path or find_template("hole")
+        if not resolved_template:
+            return self._result(
+                False,
+                "No hole table template found. Pass template_path explicitly, or "
+                "install a default .sldholtbt template.",
+                SwErrors.swTemplateNotFound, {"tag_style": tag_key},
+            )
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        view, err = self._require_view(doc, view_name, None)
+        if err:
+            return err
+
+        activated = self.select_view_by_name(view_name, doc=doc)
+        if not activated["success"]:
+            return activated
+
+        data: Dict[str, Any] = {
+            "view_name": view_name, "datum_entity": datum_entity, "x": x, "y": y,
+            "template_path": resolved_template, "tag_style": tag_key,
+            "combine_same_size": bool(combine_same_size),
+        }
+
+        with self.selected("", type_str, ex, ey, ez, mark=1, doc=doc) as sel:
+            if not sel["success"]:
+                return sel
+
+            try:
+                args = INSERT_HOLE_TABLE3.bind(
+                    units=self._units,
+                    x=x, y=y, start_value=_HOLE_TABLE_START_VALUES[tag_key],
+                    template=resolved_template, tag_type=tag_enum,
+                )
+                table = view.InsertHoleTable3(*args)
+            except Exception as e:
+                logger.error(f"insert_hole_table({view_name!r}) InsertHoleTable3 error: {e}")
+                return self._result(
+                    False, f"Insert hole table error: {e}", SwErrors.swFeatureError, data,
+                )
+
+            if table is None:
+                return self._result(
+                    False,
+                    "InsertHoleTable3 returned nothing -- hole table not created "
+                    "(datum_entity not resolving to a valid vertex/edge is the "
+                    "most likely cause)",
+                    SwErrors.swFeatureError, data,
+                )
+
+        try:
+            hole_table_obj = table.HoleTable
+            hole_table_obj.CombineSameSize = bool(combine_same_size)
+        except Exception as e:
+            logger.error(f"insert_hole_table({view_name!r}) CombineSameSize error: {e}")
+            return self._result(
+                False, f"Set CombineSameSize error: {e}", SwErrors.swFeatureError, data,
+            )
+
+        annotation = self._table_annotation(table)
+        name, tx, ty = self._annotation_name_position(annotation)
+        data["name"] = name
+        data["x"] = tx if tx is not None else x
+        data["y"] = ty if ty is not None else y
+        data["row_count"] = _com_int(self._read_prop(table, "RowCount"))
+        data["column_count"] = _com_int(self._read_prop(table, "ColumnCount"))
+
+        return self._result(
+            True,
+            "Inserted hole table" + (f" {name!r}" if name else "") + f" in view {view_name!r}",
+            SwErrors.swSuccess, data,
+        )
+
+    def insert_revision_table(
+        self, x: Optional[float] = None, y: Optional[float] = None,
+        template_path: Optional[str] = None, anchor: bool = True,
+        alpha_numeric: bool = True, symbol_shape: str = "circle",
+    ) -> Dict:
+        """
+        Insert a revision table onto the active sheet via `ISheet::
+        InsertRevisionTable2` -- requested as `IDrawingDoc::
+        InsertRevisionTable2`, which does not exist (see
+        docs/api/04-tables.md's intro discrepancy list).
+
+        Args:
+            x, y: Table placement, caller's default unit -- converted to
+                meters. Must be omitted (`None`, the default) when
+                `anchor=True`; both required when `anchor=False` --
+                mutually exclusive, the same convention `insert_bom_table`'s
+                `x`/`y` vs. `attach_to_anchor` uses.
+            template_path: Path to a `.sldrevtbt` template. Omitted: falls
+                back to `utils.sw_finder.find_template("revision")`; if that
+                also finds nothing, fails with `swTemplateNotFound`.
+            anchor: `True` (default) to insert at the sheet's existing
+                revision-table anchor point (`UseAnchorPoint`); `False` to
+                place at `x`/`y` instead. The table-corner half of the
+                shared `swBOMConfigurationAnchorType_e` (`AnchorType`) is
+                not its own parameter here (not in this task's
+                Requirements) -- always binds top-left.
+            alpha_numeric: Accepted and echoed in `data` for forward
+                compatibility. SolidWorks documents no per-table alpha/
+                numeric COM property independent of the whole-document
+                `swRevisionTableTagStyle` system option (listed in
+                `swUserPreferenceIntegerValue_e`'s member index with no
+                documented numeric value or `InsertRevisionTable2`
+                parameter binding it -- unverified, and document-global
+                rather than per-table even if it were wired up; see
+                docs/api/04-tables.md's sw-mio.3 addendum). `add_revision`'s
+                own auto-increment infers the scheme (letters vs. numbers)
+                from the table's existing rows instead of consulting this
+                flag -- a brand-new table's first automatic revision always
+                defaults to `"A"`; pass an explicit `revision="1"` on the
+                first `add_revision` call for a numeric-first table.
+            symbol_shape: `"circle"` (default), `"square"`, `"triangle"`,
+                or `"hexagon"` -- `swRevisionTableSymbolShape_e`'s `Shape`.
+
+        Returns:
+            Result dict. `data["name"]` is the table's `IAnnotation::GetName`
+            value; `data["row_count"]`/`data["column_count"]` are read back
+            via `ITableAnnotation::RowCount`/`ColumnCount`. Fails with
+            `swFeatureError` if `InsertRevisionTable2` returns `None` -- its
+            own documented failure mode when the sheet already has a
+            revision table (only one is allowed per sheet, per
+            docs/api/04-tables.md's Gotchas).
+        """
+        shape_key = symbol_shape.strip().lower() if isinstance(symbol_shape, str) else ""
+        shape_enum = _REVISION_SYMBOL_SHAPES.get(shape_key)
+        if shape_enum is None:
+            return self._result(
+                False,
+                f"Unknown symbol_shape {symbol_shape!r}; expected one of "
+                f"{sorted(_REVISION_SYMBOL_SHAPES)!r}",
+                SwErrors.swInvalidInput, {"symbol_shape": symbol_shape},
+            )
+
+        if not isinstance(alpha_numeric, bool):
+            return self._result(
+                False, f"alpha_numeric must be a boolean, got {alpha_numeric!r}",
+                SwErrors.swInvalidInput, {"alpha_numeric": alpha_numeric},
+            )
+
+        if not isinstance(anchor, bool):
+            return self._result(
+                False, f"anchor must be a boolean, got {anchor!r}",
+                SwErrors.swInvalidInput, {"anchor": anchor},
+            )
+
+        if anchor:
+            if x is not None or y is not None:
+                return self._result(
+                    False,
+                    "x/y must be omitted when anchor=True -- pass anchor=False "
+                    "to place at x/y instead",
+                    SwErrors.swInvalidInput, {"x": x, "y": y, "anchor": anchor},
+                )
+            x_val, y_val = 0, 0
+        else:
+            if x is None or y is None:
+                return self._result(
+                    False, "x and y are required when anchor=False",
+                    SwErrors.swInvalidInput, {"x": x, "y": y, "anchor": anchor},
+                )
+            xy_err = self._validate_xy(x, y)
+            if xy_err:
+                return xy_err
+            x_val, y_val = x, y
+
+        resolved_template = template_path or find_template("revision")
+        if not resolved_template:
+            return self._result(
+                False,
+                "No revision table template found. Pass template_path explicitly, "
+                "or install a default .sldrevtbt template.",
+                SwErrors.swTemplateNotFound,
+            )
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        sheet, err = self._resolve_sheet(doc, None)
+        if err:
+            return err
+
+        data: Dict[str, Any] = {
+            "x": x, "y": y, "template_path": resolved_template, "anchor": anchor,
+            "alpha_numeric": bool(alpha_numeric), "symbol_shape": shape_key,
+        }
+
+        try:
+            args = INSERT_REVISION_TABLE2.bind(
+                units=self._units,
+                use_anchor_point=anchor, x=x_val, y=y_val,
+                table_template=resolved_template, shape=shape_enum,
+            )
+            table = sheet.InsertRevisionTable2(*args)
+        except Exception as e:
+            logger.error(f"insert_revision_table InsertRevisionTable2 error: {e}")
+            return self._result(
+                False, f"Insert revision table error: {e}", SwErrors.swFeatureError, data,
+            )
+
+        if table is None:
+            return self._result(
+                False,
+                "InsertRevisionTable2 returned nothing -- revision table not "
+                "created (a revision table already existing on this sheet is the "
+                "most likely cause; only one is allowed per sheet)",
+                SwErrors.swFeatureError, data,
+            )
+
+        annotation = self._table_annotation(table)
+        name, tx, ty = self._annotation_name_position(annotation)
+        data["name"] = name
+        data["x"] = tx if tx is not None else (x if x is not None else 0)
+        data["y"] = ty if ty is not None else (y if y is not None else 0)
+        data["row_count"] = _com_int(self._read_prop(table, "RowCount"))
+        data["column_count"] = _com_int(self._read_prop(table, "ColumnCount"))
+
+        return self._result(
+            True, "Inserted revision table" + (f" {name!r}" if name else ""),
+            SwErrors.swSuccess, data,
+        )
+
+    @staticmethod
+    def _next_revision(current: Optional[str]) -> Optional[str]:
+        """`add_revision`'s `revision=None` auto-increment: `"A"` -> `"B"`
+        (Excel-column-style wrap at `"Z"` -> `"AA"`), `"1"` -> `"2"`, and
+        `None`/empty (a brand-new table with no rows yet) -> `"A"`.
+
+        Returns `None` for any `current` that is neither empty, all-digits,
+        nor all-uppercase-letters (e.g. a mixed designation like `"A1"`) --
+        the caller then requires an explicit `revision`, since there is no
+        single well-defined "next" value for that shape.
+        """
+        if not current:
+            return "A"
+        if current.isdigit():
+            return str(int(current) + 1)
+        if current.isalpha() and current.isupper():
+            chars = list(current)
+            i = len(chars) - 1
+            while i >= 0:
+                if chars[i] != "Z":
+                    chars[i] = chr(ord(chars[i]) + 1)
+                    return "".join(chars)
+                chars[i] = "A"
+                i -= 1
+            return "A" + "".join(chars)
+        return None
+
+    def _find_revision_table(self, doc) -> Tuple[Any, Optional[str], Optional[Dict]]:
+        """Find the document's revision table
+        (`swTableAnnotation_RevisionBlock`) -- `add_revision`'s lookup,
+        walking every view the same way `_find_table_by_name` does. Only one
+        revision table is allowed per sheet (`InsertRevisionTable2`'s own
+        documented `null`-if-exists failure mode); per CodeStack's own
+        writeup (flagged unverified in docs/api/04-tables.md's
+        `InsertRevisionTable2` Gotchas) "only revision tables on the first
+        sheet are supported" -- so the first one found while walking the
+        document is returned, without trying to disambiguate multiple.
+
+        Returns:
+            `(table, view_name, None)` on a hit; `(None, None, None)` on a
+            clean miss (no revision table anywhere in the document);
+            `(None, None, error_dict)` if the walk itself failed.
+        """
+        scoped, err = self._scoped_views(doc, None, "add_revision", "Add revision")
+        if err:
+            return None, None, err
+
+        revision_type = int(SwTableAnnotationType.swTableAnnotation_RevisionBlock)
+        for view, v_name in scoped:
+            for table in self._iter_view_tables(view):
+                type_code = _com_int(self._read_prop(table, "Type"))
+                if type_code == revision_type:
+                    return table, v_name, None
+
+        return None, None, None
+
+    def add_revision(
+        self, description: str, revision: Optional[str] = None,
+        date: Optional[str] = None, approved_by: Optional[str] = None,
+        zone: Optional[str] = None,
+    ) -> Dict:
+        """
+        Append a row to the document's revision table via
+        `IRevisionTableAnnotation::AddRevision`, auto-incrementing the
+        revision designation from the table's existing rows when `revision`
+        is omitted.
+
+        Args:
+            description: The "what changed" text -- written to the
+                table's DESCRIPTION column (matched by
+                `ITableAnnotation::GetColumnTitle2`, case-insensitive
+                substring) via `Text`. Required, non-empty.
+            revision: Explicit revision designation (e.g. `"B"`). Omitted:
+                auto-incremented from `IRevisionTableAnnotation::
+                CurrentRevision` via `_next_revision` -- `"A"`->`"B"`,
+                `"1"`->`"2"`, and `"A"` for a brand-new table with no rows
+                yet. Fails with `swInvalidInput` if `CurrentRevision` is
+                some other shape (e.g. `"A1"`) auto-increment can't handle.
+            date: Defaults to today, formatted `MM/DD/YY` (this wrapper's
+                own convention -- the DATE column is a free-text cell via
+                `Text`/`Text2`, not a COM-typed date; no confirmed "document
+                date format" property was found for revision tables).
+            approved_by: Optional -- written to the APPROVED (BY) column if
+                the template has one; silently skipped (recorded in
+                `data["skipped_fields"]`) otherwise.
+            zone: Optional -- written to the ZONE column if the template has
+                one; same skip behavior as `approved_by`.
+
+        Returns:
+            Result dict. `data["revision"]` is the designation actually
+            used; `data["row_id"]` is `AddRevision`'s own opaque row ID;
+            `data["row_number"]` is that ID's display row index (via
+            `GetRowNumberForId`), the index `Text`/`Text2` was called with.
+            Fails with `swInvalidInput` if no revision table exists yet in
+            this document (call `insert_revision_table` first).
+
+        Gotcha: cells are written via the predecessor `ITableAnnotation::
+        Text` (`table.Text(row_number, col, value)`), not `Text2` -- and
+        neither the `Text`-vs-`Text2` choice nor this three-positional-arg
+        setter shape is confirmed against a real SolidWorks install (same
+        unverified-setter-call-shape convention as `insert_bom_table`'s
+        `ColumnHidden`; see docs/api/04-tables.md's `ITableAnnotation::Text`
+        Gotchas, sw-mio.3 addendum). Also unverified: that `row_number`
+        (from `GetRowNumberForId`) shares `Text`'s 0-based row indexing --
+        no page cross-references the two.
+        """
+        if not isinstance(description, str) or not description:
+            return self._result(
+                False, f"description must be a non-empty string, got {description!r}",
+                SwErrors.swInvalidInput, {"description": description},
+            )
+        if revision is not None and (not isinstance(revision, str) or not revision):
+            return self._result(
+                False, f"revision must be a non-empty string when given, got {revision!r}",
+                SwErrors.swInvalidInput, {"revision": revision},
+            )
+        for label, value in (("date", date), ("approved_by", approved_by), ("zone", zone)):
+            if value is not None and not isinstance(value, str):
+                return self._result(
+                    False, f"{label} must be a string when given, got {value!r}",
+                    SwErrors.swInvalidInput, {label: value},
+                )
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        table, view_name, err = self._find_revision_table(doc)
+        if err:
+            return err
+        if table is None:
+            return self._result(
+                False,
+                "No revision table found in this document -- call "
+                "insert_revision_table first",
+                SwErrors.swInvalidInput,
+            )
+
+        current = self._read_prop(table, "CurrentRevision")
+        current = current.strip() if isinstance(current, str) else None
+
+        if revision is not None:
+            revision_value = revision
+        else:
+            revision_value = self._next_revision(current)
+            if revision_value is None:
+                return self._result(
+                    False,
+                    f"Could not auto-increment revision from current value "
+                    f"{current!r} -- pass revision explicitly",
+                    SwErrors.swInvalidInput, {"current_revision": current},
+                )
+
+        date_value = date if date is not None else datetime.date.today().strftime("%m/%d/%y")
+
+        table_name = self._read_prop(self._table_annotation(table), "GetName")
+        data: Dict[str, Any] = {
+            "table_name": table_name, "view_name": view_name, "revision": revision_value,
+            "description": description, "date": date_value, "approved_by": approved_by,
+            "zone": zone,
+        }
+
+        try:
+            row_id = table.AddRevision(revision_value)
+        except Exception as e:
+            logger.error(f"add_revision AddRevision error: {e}")
+            return self._result(False, f"Add revision error: {e}", SwErrors.swFeatureError, data)
+
+        if row_id is None:
+            return self._result(
+                False, "AddRevision returned nothing -- revision row not added",
+                SwErrors.swFeatureError, data,
+            )
+        data["row_id"] = _com_int(row_id)
+
+        try:
+            row_number = table.GetRowNumberForId(row_id)
+        except Exception as e:
+            logger.error(f"add_revision GetRowNumberForId error: {e}")
+            return self._result(
+                False, f"Resolve row number error: {e}", SwErrors.swFeatureError, data,
+            )
+        row_number = _com_int(row_number)
+        if row_number is None:
+            return self._result(
+                False,
+                f"Could not resolve row number for new revision (row id {row_id!r})",
+                SwErrors.swFeatureError, data,
+            )
+        data["row_number"] = row_number
+
+        column_count = _com_int(self._read_prop(table, "TotalColumnCount"))
+        if column_count is None:
+            column_count = _com_int(self._read_prop(table, "ColumnCount")) or 0
+
+        columns: Dict[str, int] = {}
+        for i in range(column_count):
+            try:
+                title = table.GetColumnTitle2(i, True)
+            except Exception:
+                title = None
+            if isinstance(title, str) and title.strip():
+                columns[title.strip().upper()] = i
+
+        def _find_column(*keywords: str) -> Optional[int]:
+            for title_upper, idx in columns.items():
+                if any(k in title_upper for k in keywords):
+                    return idx
+            return None
+
+        desc_col = _find_column("DESCRIPTION")
+        date_col = _find_column("DATE")
+        approved_col = _find_column("APPROV")
+        zone_col = _find_column("ZONE")
+
+        if desc_col is None:
+            return self._result(
+                False,
+                "Could not find a DESCRIPTION column on the revision table -- "
+                "description was not written (the revision row was already added)",
+                SwErrors.swFeatureError, data,
+            )
+
+        fields: List[Tuple[str, Optional[int], str]] = [
+            ("description", desc_col, description), ("date", date_col, date_value),
+        ]
+        if approved_by is not None:
+            fields.append(("approved_by", approved_col, approved_by))
+        if zone is not None:
+            fields.append(("zone", zone_col, zone))
+
+        skipped: List[str] = []
+        for label, col, value in fields:
+            if col is None:
+                skipped.append(label)
+                continue
+            try:
+                table.Text(row_number, col, value)
+            except Exception as e:
+                logger.error(f"add_revision Text({label}) error: {e}")
+                return self._result(False, f"Write {label} error: {e}", SwErrors.swFeatureError, data)
+
+        if skipped:
+            data["skipped_fields"] = skipped
+
+        return self._result(
+            True, f"Added revision {revision_value!r} to table {table_name!r}",
+            SwErrors.swSuccess, data,
+        )
+
+    def insert_weldment_cutlist(
+        self, view_name: str, x: float, y: float, template_path: Optional[str] = None,
+    ) -> Dict:
+        """
+        Insert a weldment cut list table onto a drawing view via `IView::
+        InsertWeldmentTable` -- requested as `IModelDocExtension::
+        InsertWeldmentCutlist`, which does not exist under that name or any
+        variant spelling (see docs/api/04-tables.md's intro discrepancy
+        list).
+
+        Args:
+            view_name: Drawing view to attach the table to. The view's
+                referenced model must be a multibody "As Welded" weldment
+                part with a cut list feature -- see the no-cut-list
+                detection in Returns below.
+            x, y: Table placement, caller's default unit -- converted to
+                meters.
+            template_path: Path to a `.sldwldtbt` template. Omitted: falls
+                back to `utils.sw_finder.find_template("weldment")` (the
+                installed default is `<install_dir>\\lang\\<language>\\cut
+                list.sldwldtbt`, per the dossier's own confirmed Gotchas);
+                if that also finds nothing, fails with `swTemplateNotFound`.
+
+        Returns:
+            Result dict. `data["name"]` is the table's `IAnnotation::GetName`
+            value; `data["row_count"]`/`data["column_count"]` are read back
+            via `ITableAnnotation::RowCount`/`ColumnCount`.
+
+            Fails with `swFeatureError`, distinctly from succeeding with an
+            empty table, when the view's referenced model has no weldment
+            cut list feature at all -- detected by
+            `IWeldmentCutListAnnotation::WeldmentCutListFeature` reading
+            back empty right after creation. This is this wrapper's own
+            convention, not a documented `InsertWeldmentTable` failure mode
+            (the dossier found none) -- flagged per this project's honesty
+            convention in docs/api/04-tables.md's sw-mio.3 addendum.
+        """
+        xy_err = self._validate_xy(x, y)
+        if xy_err:
+            return xy_err
+
+        resolved_template = template_path or find_template("weldment")
+        if not resolved_template:
+            return self._result(
+                False,
+                "No weldment cut list table template found. Pass template_path "
+                "explicitly, or install a default .sldwldtbt template.",
+                SwErrors.swTemplateNotFound,
+            )
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        view, err = self._require_view(doc, view_name, None)
+        if err:
+            return err
+
+        data: Dict[str, Any] = {
+            "view_name": view_name, "x": x, "y": y, "template_path": resolved_template,
+        }
+
+        try:
+            x_m, y_m = self._units.to_meters(x), self._units.to_meters(y)
+            anchor_type = int(SwBOMConfigurationAnchorType.swBOMConfigurationAnchor_TopLeft)
+            table = view.InsertWeldmentTable(False, x_m, y_m, anchor_type, "", resolved_template)
+        except Exception as e:
+            logger.error(f"insert_weldment_cutlist({view_name!r}) InsertWeldmentTable error: {e}")
+            return self._result(
+                False, f"Insert weldment cut list table error: {e}", SwErrors.swFeatureError, data,
+            )
+
+        if table is None:
+            return self._result(
+                False,
+                "InsertWeldmentTable returned nothing -- weldment cut list table "
+                "not created (the view's referenced model most likely has no "
+                "weldment cut list feature)",
+                SwErrors.swFeatureError, data,
+            )
+
+        try:
+            cutlist_feature = table.WeldmentCutListFeature
+        except Exception as e:
+            logger.warning(
+                f"insert_weldment_cutlist({view_name!r}) WeldmentCutListFeature error: {e}"
+            )
+            cutlist_feature = None
+
+        if not cutlist_feature:
+            return self._result(
+                False,
+                f"View {view_name!r}'s referenced model has no weldment cut list "
+                "feature (WeldmentCutListFeature is empty) -- insert a cut list "
+                "feature on the model first (a multibody weldment part gets one "
+                "automatically once cut with Insert > Weldments > Cut List)",
+                SwErrors.swFeatureError, data,
+            )
+
+        annotation = self._table_annotation(table)
+        name, tx, ty = self._annotation_name_position(annotation)
+        data["name"] = name
+        data["x"] = tx if tx is not None else x
+        data["y"] = ty if ty is not None else y
+        data["row_count"] = _com_int(self._read_prop(table, "RowCount"))
+        data["column_count"] = _com_int(self._read_prop(table, "ColumnCount"))
+
+        return self._result(
+            True,
+            "Inserted weldment cut list table" + (f" {name!r}" if name else "")
+            + f" in view {view_name!r}",
             SwErrors.swSuccess, data,
         )

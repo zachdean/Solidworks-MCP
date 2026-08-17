@@ -1138,6 +1138,52 @@ class SwTableAnnotationType(IntEnum):
     swTableAnnotation_FamilyTable = 10
 
 
+class SwHoleTableTagStyle(IntEnum):
+    """Hole table datum-tag style for IView::InsertHoleTable3's TagType
+    parameter (swHoleTableTagStyle_e).
+
+    Added by sw-mio.3 -- absent from the dossier's original research pass.
+    Fetched directly from help.solidworks.com/2025/.../swHoleTableTagStyle_e.html
+    (curl with a browser User-Agent, per docs/api/04-tables.md's intro
+    convention; plain WebFetch gets a 403 on this site).
+
+    Source: docs/api/04-tables.md (Enums section, sw-mio.3 addendum).
+    """
+
+    swHoleTable_AlphaNumericTags = 1
+    swHoleTable_NumericTags = 2
+    swHoleTable_ManualTags = 3
+
+
+class SwHoleTableTagOrder(IntEnum):
+    """Method for assigning tag numbers to holes of the same size, for
+    IView::InsertHoleTable3's TagOrder parameter (swHoleTableTagOrder_e).
+
+    Added by sw-mio.3 -- same fetch as SwHoleTableTagStyle above.
+
+    Source: docs/api/04-tables.md (Enums section, sw-mio.3 addendum).
+    """
+
+    swHoleTableTagOrder_XY = 1
+    swHoleTableTagOrder_ReduceToolPath = 2
+    swHoleTableTagOrder_Radial = 3
+
+
+class SwRevisionTableSymbolShape(IntEnum):
+    """Revision table revision-symbol shape for ISheet::InsertRevisionTable2's
+    Shape parameter (swRevisionTableSymbolShape_e).
+
+    Added by sw-mio.3 -- same fetch as SwHoleTableTagStyle above.
+
+    Source: docs/api/04-tables.md (Enums section, sw-mio.3 addendum).
+    """
+
+    swRevisionTable_CircleSymbol = 1
+    swRevisionTable_SquareSymbol = 2
+    swRevisionTable_TriangleSymbol = 3
+    swRevisionTable_HexagonSymbol = 4
+
+
 # ============================================================================
 # 05-export-and-layers.md
 # ============================================================================

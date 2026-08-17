@@ -113,6 +113,10 @@ EXPECTED_TOOL_NAMES = {
     "add_balloon",
     "renumber_balloons",
     "remove_balloons",
+    "insert_hole_table",
+    "insert_revision_table",
+    "add_revision",
+    "insert_weldment_cutlist",
     # Sketch Tools
     "create_sketch",
     "create_sketch_on_face",

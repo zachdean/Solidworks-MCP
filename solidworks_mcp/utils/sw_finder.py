@@ -54,12 +54,19 @@ class SolidWorksFinder:
     ]
     
     # Drawing-table template extensions, keyed by this project's own
-    # template_type name -- see `_find_table_template`. Only "bom" is wired
-    # up by sw-mio.1; the other table types this dossier documents
-    # (`.sldrevtbt` revision, `.sldwldtbt` weldment cut list) are left for
-    # the sibling issues that add those insert tools.
+    # template_type name -- see `_find_table_template`. "bom" was wired up by
+    # sw-mio.1; "hole"/"revision"/"weldment" added by sw-mio.3, per
+    # docs/api/04-tables.md's Gotchas for InsertHoleTable2/3
+    # (`.sldholtbt`, unverified -- inferred by analogy, not independently
+    # confirmed for hole tables), ISheet::InsertRevisionTable2 (`.sldrevtbt`),
+    # and IView::InsertWeldmentTable (`.sldwldtbt`, confirmed: "the weldment
+    # cut-list table template installed with SOLIDWORKS is
+    # <install_dir>\\lang\\<language>\\cut list.sldwldtbt").
     TABLE_TEMPLATE_EXTENSIONS = {
         "bom": ".sldbomtbt",
+        "hole": ".sldholtbt",
+        "revision": ".sldrevtbt",
+        "weldment": ".sldwldtbt",
     }
 
     # ProgramData template paths

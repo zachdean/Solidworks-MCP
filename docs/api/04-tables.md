@@ -1,6 +1,6 @@
 ---
 interface: Multiple (IModelDocExtension, IView, IBomTableAnnotation, IDrawingDoc, ISheet, IRevisionTableAnnotation, IWeldmentCutListAnnotation, IHoleTableAnnotation, ITableAnnotation, IAnnotation)
-min_methods: 14
+min_methods: 34
 status: complete
 ---
 
@@ -1372,6 +1372,20 @@ use `ITableAnnotation::DisplayedText` for the rendered text.
   needs to touch hidden cells.
 - Same editability-by-table-type and rebuild-performance caveats as `Text2` apply
   here — see that record's Gotchas.
+- **sw-mio.3 addendum:** `add_revision` writes revision-table cells (DESCRIPTION/
+  DATE/APPROVED BY/ZONE) through this predecessor rather than `Text2`, as
+  `table.Text(row, col, value)` — three positional arguments, the same
+  index(es)-then-value shape `insert_bom_table`'s `ColumnHidden` Gotcha already
+  flags as this project's best-effort, **unverified** convention for a win32com
+  dynamic-dispatch caller reaching a VB indexed property's setter half. Neither the
+  `Text`-vs-`Text2` choice nor the trailing-value call shape is confirmed against a
+  real SolidWorks install — `Text2` was not used here only because it would add a
+  fourth positional argument (`IncludeHidden`) ahead of the value with no source to
+  confirm that ordering either, not because `Text` is actually preferred. Also
+  unverified: that `Row` here is 0-based and shares indexing with
+  `IRevisionTableAnnotation::GetRowNumberForId`'s "row number" return value (see
+  that record's own Gotchas, and `CurrentRevision`'s sw-mio.3 addendum record
+  above) — `add_revision` assumes so, but no page cross-references the two.
 
 ---
 
@@ -1732,6 +1746,201 @@ interface) reference.
   counterpart — not wired to any tool by this issue, listed here only because it
   surfaced alongside `ColumnHidden` in the same member-index fetch.
 
+## Hole table, revision table, and weldment cut list additions (sw-mio.3)
+
+Four members the original research pass didn't fetch, needed by `insert_hole_table`/
+`insert_revision_table`/`add_revision`/`insert_weldment_cutlist` (sw-mio.3) and not
+otherwise covered above. Fetched with `curl -A "Mozilla/5.0 ..."` (this dossier's
+intro convention — plain `WebFetch` 403s on this site).
+
+Two requested parameters from that issue's own spec have **no** matching COM
+binding, confirmed absent by a full member-index fetch of their owning interface —
+flagged here per this dossier's honesty convention rather than guessed silently:
+
+- **`insert_hole_table`'s `combine_same_size`** is *not* an `InsertHoleTable2`/`3`
+  parameter (neither method's own signature has one — see those records above) —
+  but it **is** real, one level down: `IHoleTable::CombineSameSize` (documented
+  below), reached via `IHoleTableAnnotation::HoleTable`, not `InsertHoleTable3`
+  itself.
+- **`insert_revision_table`'s `alpha_numeric`** has no `InsertRevisionTable2`
+  parameter and no per-table COM property at all. The closest real thing is
+  `swRevisionTableTagStyle`, a member of `swUserPreferenceIntegerValue_e` (confirmed
+  present in that enum's own member-index fetch) — but it is a whole-document
+  system option (`ISldWorks::GetUserPreferenceIntegerValue`/`SetUserPreferenceIntegerValue`),
+  not scoped to one revision table, and its own numeric value is not documented on
+  the enum's page (unlike every other member of that enum, which are also
+  undocumented per `SwUserPreferenceIntegerValue`'s own docstring in
+  `constants_drawing.py` — a pre-existing, independently-confirmed gap, not new to
+  this issue). `insert_hole_table`/`insert_revision_table`'s tool layer does not set
+  this system option; `alpha_numeric` is accepted and echoed in the result only.
+
+### IHoleTable::CombineSameSize
+
+- **Interface:** IHoleTable
+- **Method:** CombineSameSize (property, read/write)
+- **Minimum SW version:** not stated on the page
+
+**Signature:**
+
+```vb
+Property CombineSameSize As System.Boolean
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| (none — set via assignment) | Boolean | n/a | Yes (on set) | `True` to merge cells of the same size, `False` to not | |
+
+**Returns:** `Boolean` — `True` if same-size cells are currently merged.
+
+**Prior selection required:** None beyond holding the `IHoleTable` reference,
+reached via `IHoleTableAnnotation::HoleTable` (the table annotation returned by
+`InsertHoleTable2`/`3`).
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IHoleTable~CombineSameSize.html
+
+**status:** verified
+
+**Gotchas:**
+- Per the page's own Remarks: "This property appears in the Scheme section of the
+  Hole Table PropertyManager page in SOLIDWORKS" — confirming it is a genuine
+  user-facing setting, not an obscure internal flag.
+- Lives on `IHoleTable` (reached via `IHoleTableAnnotation::HoleTable`), **not**
+  `IHoleTableAnnotation` itself or either `InsertHoleTable` overload — a caller
+  wanting this at creation time still has to set it as a separate step after
+  `InsertHoleTable2`/`3` returns.
+
+---
+
+### ITableAnnotation::GetColumnTitle2
+
+- **Interface:** ITableAnnotation — supersedes `GetColumnTitle`, marked obsolete on
+  its own page ("Obsolete. Superseded by ITableAnnotation::GetColumnTitle2")
+- **Method:** GetColumnTitle2
+- **Minimum SW version:** not stated on the page
+
+**Signature:**
+
+```vb
+Function GetColumnTitle2( _
+   ByVal Index As System.Integer, _
+   ByVal IncludeHidden As System.Boolean _
+) As System.String
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| Index | Integer | n/a | Yes | 0-based index indicating the column | |
+| IncludeHidden | Boolean | n/a | Yes | `True` to include hidden columns (same `IncludeHidden` convention as `Text2`) | |
+
+**Returns:** `String` — the column's title text.
+
+**Prior selection required:** None beyond holding the `ITableAnnotation` (or derived
+interface) reference.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.ITableAnnotation~GetColumnTitle2.html
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.ITableAnnotation~GetColumnTitle.html (predecessor, confirmed obsolete by its own page's red-text banner)
+
+**status:** verified
+
+**Gotchas:**
+- `add_revision` uses this to find a revision table's DESCRIPTION/DATE/APPROVED
+  (BY)/ZONE columns by title (case-insensitive substring match) rather than
+  hard-coding column indices — revision table templates are user-customizable, so a
+  fixed index would silently write the wrong cell on a non-default template.
+- No column-index-to-meaning mapping is documented anywhere in the SolidWorks API
+  for BOM/hole/revision/weldment tables — title text is the only self-describing
+  handle available.
+
+---
+
+### IRevisionTableAnnotation::CurrentRevision
+
+- **Interface:** IRevisionTableAnnotation
+- **Method:** CurrentRevision (property, read-only)
+- **Minimum SW version:** not stated on the page
+
+**Signature:**
+
+```vb
+ReadOnly Property CurrentRevision As System.String
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| (none — read-only property) | n/a | n/a | n/a | Getter takes no arguments | |
+
+**Returns:** `String` — the latest revision designation (e.g. `"A"`, `"3"`).
+
+**Prior selection required:** None beyond holding the `IRevisionTableAnnotation`
+reference.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IRevisionTableAnnotation~CurrentRevision.html
+
+**status:** verified
+
+**Gotchas:**
+- The page's own Remarks: "Use IRevisionTableAnnotation::AddRevision to add a
+  revision and get its revision ID" — confirming `AddRevision` is the only way to
+  advance this value; there is no separate "set current revision" call.
+- Not documented what this returns on a table with zero rows (a brand-new table) —
+  unverified; `add_revision`'s own `_next_revision` helper treats any falsy/empty
+  read as "no rows yet" and defaults the first automatic revision to `"A"`.
+- This is the read `add_revision`'s auto-increment (`revision` omitted) is built
+  on: `"A"` -> `"B"` (wrapping `"Z"` -> `"AA"`, Excel-column style) if
+  `CurrentRevision` is all-uppercase-letters, `"1"` -> `"2"` if all-digits;
+  anything else (e.g. a mixed `"A1"`) requires an explicit `revision` from the
+  caller, since there's no single well-defined "next" value for that shape.
+
+---
+
+### IWeldmentCutListAnnotation::WeldmentCutListFeature
+
+- **Interface:** IWeldmentCutListAnnotation
+- **Method:** WeldmentCutListFeature (property, read-only)
+- **Minimum SW version:** not stated on the page
+
+**Signature:**
+
+```vb
+ReadOnly Property WeldmentCutListFeature As WeldmentCutListFeature
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| (none — read-only property) | n/a | n/a | n/a | Getter takes no arguments | |
+
+**Returns:** `IWeldmentCutListFeature` — the weldment cut list feature this table
+annotation is backed by.
+
+**Prior selection required:** None beyond holding the `IWeldmentCutListAnnotation`
+reference (the return value of `InsertWeldmentTable`).
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IWeldmentCutListAnnotation~WeldmentCutListFeature.html
+
+**status:** verified
+
+**Gotchas:**
+- The page documents no explicit "returns Nothing if there's no cut list feature"
+  failure mode — unverified. `insert_weldment_cutlist` uses this property reading
+  back empty (falsy) immediately after a successful `InsertWeldmentTable` call as
+  its own no-cut-list-feature detection, since `InsertWeldmentTable` itself
+  documents no distinct failure mode for "the model has no weldment cut list" vs.
+  "the model has one with zero items" (see that record's own Gotchas above) — this
+  is this wrapper's own convention, not a documented SolidWorks contract, flagged
+  here rather than asserted as fact.
+
 ## Enums
 
 #### swBomType_e
@@ -1899,6 +2108,45 @@ This enum is independent, additional confirmation of the `InsertWeldmentTable` /
 for "weldment cut list" (4) and "weld table" (6) as genuinely distinct table types.
 
 Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swTableAnnotationType_e.html
+
+#### swHoleTableTagStyle_e
+
+Added by sw-mio.3. Consumed by `IView::InsertHoleTable3`'s `TagType` parameter.
+
+| Value | Number | Meaning |
+| --- | --- | --- |
+| swHoleTable_AlphaNumericTags | 1 | Letter datum tags (`insert_hole_table`'s `tag_style="alphanumeric"`, the default) |
+| swHoleTable_NumericTags | 2 | Number datum tags (`tag_style="numeric"`) |
+| swHoleTable_ManualTags | 3 | Caller-supplied tags via `ManualTags` — not offered by `insert_hole_table` (no `manual_tags` parameter in this task's Requirements) |
+
+Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swHoleTableTagStyle_e.html
+
+#### swHoleTableTagOrder_e
+
+Added by sw-mio.3. Consumed by `IView::InsertHoleTable3`'s `TagOrder` parameter —
+"method by which to assign tag numbers to holes of the same size" (the page's own
+one-line description).
+
+| Value | Number | Meaning |
+| --- | --- | --- |
+| swHoleTableTagOrder_XY | 1 | Number holes in order of their XLoc and YLoc — `insert_hole_table`'s own fixed default (not exposed as a parameter) |
+| swHoleTableTagOrder_ReduceToolPath | 2 | Number holes in next nearest order, starting at the table view origin |
+| swHoleTableTagOrder_Radial | 3 | Number holes in order of increasing radial angle from the table view origin, starting at -180 degrees counterclockwise |
+
+Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swHoleTableTagOrder_e.html
+
+#### swRevisionTableSymbolShape_e
+
+Added by sw-mio.3. Consumed by `ISheet::InsertRevisionTable2`'s `Shape` parameter.
+
+| Value | Number | Meaning |
+| --- | --- | --- |
+| swRevisionTable_CircleSymbol | 1 | Circle (`insert_revision_table`'s `symbol_shape="circle"`, the default) |
+| swRevisionTable_SquareSymbol | 2 | Square |
+| swRevisionTable_TriangleSymbol | 3 | Triangle |
+| swRevisionTable_HexagonSymbol | 4 | Hexagon |
+
+Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swRevisionTableSymbolShape_e.html
 
 #### Enums requested but not found in the current API
 
