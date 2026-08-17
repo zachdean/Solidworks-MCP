@@ -123,6 +123,12 @@ EXPECTED_TOOL_NAMES = {
     "set_table_position",
     "set_table_anchor",
     "delete_table",
+    # Layer Tools
+    "create_layer",
+    "list_layers",
+    "set_current_layer",
+    "set_layer_properties",
+    "move_annotations_to_layer",
     # Sketch Tools
     "create_sketch",
     "create_sketch_on_face",

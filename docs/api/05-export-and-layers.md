@@ -762,6 +762,42 @@ independently enumerated on the page).
   view components — see the layer-visibility worked example referenced under
   `ILayer::Visible` below).
 
+### ILayer::Description
+
+- **Interface:** ILayer
+- **Method:** Description (property, not a method)
+- **Minimum SW version:** Not stated on the fetched page.
+
+**Signature:**
+
+```vb
+Property Description As System.String
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| Value (setter) | String | n/a | Yes | Layer description | |
+
+**Returns:** `String` (getter) — the layer's current description.
+
+**Prior selection required:** None.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.ILayer~Description.html
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.ILayer_members.html (confirms the full `ILayer` property surface: `Color`, `Description`, `Name`, `Printable`, `Style`, `Visible`, `Width`, plus methods `GetID`/`GetItems` — fetched for this issue (sw-jkb.1) since `list_layers` needed a documented way to read back `DescIn` after `ILayerMgr::AddLayer` creates the layer, which the rest of this dossier's Layers section did not otherwise cover)
+
+**status:** verified
+
+**Gotchas:**
+- Not part of the task's original source research issue for this file — added directly
+  from the `ILayer_members.html` fetch above, per this repo's working agreement to add
+  (not guess) anything the dossier is missing. `ILayer::Name` is a sibling property on
+  the same members page (also `Get`/`Set`) but is not separately recorded here since no
+  tool in this issue needs to *rename* a layer — `ILayerMgr::GetLayerList`'s own
+  strings are this tool layer's only source of a layer's name.
+
 ### ILayer::Visible
 
 - **Interface:** ILayer

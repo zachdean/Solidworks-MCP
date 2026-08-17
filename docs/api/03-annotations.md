@@ -2593,6 +2593,71 @@ walks every view in the document (including each sheet's own pseudo-view via
 
 ---
 
+#### IView::GetFirstDisplayDimension6 + IDisplayDimension::GetNext5 + IDisplayDimension::GetAnnotation (sw-jkb.1)
+
+- **Interface:** IView (`GetFirstDisplayDimension6`) / IDisplayDimension (`GetNext5`,
+  `GetAnnotation`)
+- **Method:** GetFirstDisplayDimension6 + GetNext5 — the dimension analog of
+  `IView::GetFirstNote`/`INote::GetNext` (documented in the "Note enumeration" addendum
+  above) and `IView::GetFirstDatumTag`/`IDatumTag::GetNext` (documented immediately
+  above this record). Directly fetched for `move_annotations_to_layer` (sw-jkb.1), which
+  needed a per-view dimension walk this dossier did not otherwise cover — unlike most of
+  this file's `unverified`/search-snippet-only enumeration records, every page below
+  fetched with a plain `200` (no 403), so this one is `status: verified`.
+- **Minimum SW version:** not stated on any fetched page.
+
+**Signature:**
+
+```vb
+Function GetFirstDisplayDimension6() As System.Object   ' IView, returns first IDisplayDimension or Nothing
+Function GetNext5() As DisplayDimension                 ' IDisplayDimension, returns next sibling or Nothing
+Function GetAnnotation() As System.Object                ' IDisplayDimension, returns its IAnnotation wrapper
+```
+
+**Parameters:** none of the three takes any.
+
+**Returns:** `GetFirstDisplayDimension6`/`GetNext5` — an `IDisplayDimension`, or
+`Nothing`/`None` past the last display dimension in the chain (same
+`GetFirstX`/`GetNext` linked-list convention as every other annotation family in this
+dossier). `GetAnnotation` — the shared `IAnnotation` wrapper that carries `Layer`
+(documented above), same role as `INote::GetAnnotation`/`IDatumTag::GetAnnotation`/
+`ITableAnnotation::GetAnnotation`.
+
+**Prior selection required:** None — read directly off an already-held `IView`/
+`IDisplayDimension` reference, walked the same way `_iter_document_views` already walks
+every view in the document (including each sheet's own pseudo-view).
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IView~GetFirstDisplayDimension6.html
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IDisplayDimension~GetNext5.html
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IDisplayDimension_members.html (confirms `GetAnnotation`/`GetNext5` are both real, current — non-`Obsolete` — members)
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IView_members.html (confirms `GetFirstDisplayDimension6` is the current, non-`Obsolete` member)
+
+**status:** verified
+
+**Gotchas:**
+- **Five prior generations are all `Obsolete`:** `IView::GetFirstDisplayDimension`
+  (superseded by `...2`, itself superseded by `...3`, `...4`, `...5`, finally `...6`,
+  which the fetched `IView_members.html` confirms carries no further `Obsolete` tag) and
+  `IDisplayDimension::GetNext`/`GetNext2`/`GetNext3`/`GetNext4` (all superseded by
+  `GetNext5`, itself un-tagged). `GetFirstDisplayDimension6`'s own page states it
+  "obsoletes `IView::GetFirstDisplayDimension5` by supporting inactive sheets" — the
+  same "current members only" convention this project already follows elsewhere (e.g.
+  `SaveAs3` over `SaveAs`/`SaveAs2`).
+- Fetched specifically because the issue's Context names "dimensions" as the first
+  example of an annotation family a generated pack should be able to move to a layer --
+  `move_annotations_to_layer`'s `_MOVE_ANNOTATION_TYPE_ITERATORS` includes a
+  `"dimension"` entry backed by this pair (`_iter_view_dimensions`, same
+  `_iter_com_chain` shape every other family in that mapping uses).
+- A dimension can be *displayed* in more than one view even though it originates from a
+  single model feature (the page's own Remarks: "a base-extrude dimension can be brought
+  into three different views on a drawing") — each such occurrence is its own
+  `IDisplayDimension` with its own `IAnnotation`/`Layer`, so moving "all dimensions" via
+  this walk touches every displayed occurrence across every view, not one representative
+  instance per underlying model dimension.
+
+---
+
 #### IGtol::SetPTZHeight2 (projected tolerance zone)
 
 - **Interface:** IGtol

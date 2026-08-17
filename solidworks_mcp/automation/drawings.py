@@ -69,6 +69,8 @@ from ..constants_drawing import (
     SwInsertAnnotation,
     SwInsertOptions,
     SwLeaderStyle,
+    SwLineStyles,
+    SwLineWeights,
     SwNumberingType,
     SwRenameOptions,
     SwRevisionTableSymbolShape,
@@ -471,6 +473,64 @@ def _com_int(value: Any) -> Optional[int]:
     if isinstance(value, (int, float)):
         return int(value)
     return None
+
+
+def _parse_layer_color(color: Any) -> Tuple[Optional[int], Optional[str]]:
+    """Convert `create_layer`/`set_layer_properties`'s `color` argument -- a
+    `"#RRGGBB"`/`"RRGGBB"` hex string, or an `(r, g, b)` 0-255 triple -- into
+    the raw Win32 `COLORREF` integer `ILayerMgr::AddLayer`'s `ColorIn` and
+    `ILayer::Color` expect.
+
+    COLORREF packs `0x00BBGGRR` -- blue in the high byte, red in the low
+    byte, the *reverse* of the `0xRRGGBB` order `color` itself is expressed
+    in -- per docs/api/05-export-and-layers.md's `ILayer::Color` Gotchas.
+    Computed as `r | (g << 8) | (b << 16)` (the Win32 `RGB()` macro) rather
+    than by reading the hex string's own byte order, so both accepted input
+    shapes produce the identical integer for the same visual color -- this
+    is also the one place that byte-order convention is exercised, so a
+    reversed implementation would show up as a wrong-but-plausible color
+    rather than an outright error.
+
+    Returns `(colorref, None)` on success, or `(None, error_message)` if
+    `color` is neither shape, isn't 6 hex digits, or any channel is outside
+    `0-255`.
+    """
+    if isinstance(color, str):
+        text = color.strip()
+        if text.startswith("#"):
+            text = text[1:]
+        if len(text) != 6:
+            return None, f"color hex string must be 6 hex digits (RRGGBB), got {color!r}"
+        try:
+            r, g, b = (int(text[i:i + 2], 16) for i in (0, 2, 4))
+        except ValueError:
+            return None, f"color hex string {color!r} is not valid hexadecimal"
+    elif isinstance(color, (list, tuple)) and len(color) == 3:
+        try:
+            r, g, b = (int(channel) for channel in color)
+        except (TypeError, ValueError):
+            return None, f"color RGB triple {color!r} must be three integers"
+        if not all(0 <= channel <= 255 for channel in (r, g, b)):
+            return None, f"color RGB triple {color!r} channels must each be 0-255"
+    else:
+        return None, f"color must be a hex string or an (r, g, b) triple, got {color!r}"
+
+    return r | (g << 8) | (b << 16), None
+
+
+def _colorref_to_hex(colorref: Any) -> Optional[str]:
+    """The inverse of `_parse_layer_color` -- a raw Win32 `COLORREF` integer
+    (`0x00BBGGRR`) back into a `"#RRGGBB"` string for `list_layers`/
+    `create_layer`/`set_layer_properties`'s read-back payloads. `None` (never
+    raises) for anything that doesn't coerce to a non-negative int via
+    `_com_int`."""
+    value = _com_int(colorref)
+    if value is None or value < 0:
+        return None
+    r = value & 0xFF
+    g = (value >> 8) & 0xFF
+    b = (value >> 16) & 0xFF
+    return f"#{r:02X}{g:02X}{b:02X}"
 
 
 def _looks_like_missing_addin(message: str) -> bool:
@@ -1399,6 +1459,58 @@ INSERT_REVISION_TABLE2 = ComSignature("InsertRevisionTable2", [
     Param("shape", REQUIRED, enum_to_int),
     Param("auto_update_zone_cells", True, to_bool),
 ])
+
+# `create_layer`/`set_layer_properties`'s `style` -> `ILayerMgr::AddLayer`'s
+# `StyleIn` / `ILayer::Style` (`swLineStyles_e`), per docs/api/
+# 05-export-and-layers.md's Layers section.
+_LAYER_LINE_STYLES = {
+    "continuous": int(SwLineStyles.swLineCONTINUOUS),
+    "hidden": int(SwLineStyles.swLineHIDDEN),
+    "phantom": int(SwLineStyles.swLinePHANTOM),
+    "chain": int(SwLineStyles.swLineCHAIN),
+    "center": int(SwLineStyles.swLineCENTER),
+    "stitch": int(SwLineStyles.swLineSTITCH),
+    "chain_thick": int(SwLineStyles.swLineCHAINTHICK),
+    "default": int(SwLineStyles.swLineDEFAULT),
+}
+# Reverse of `_LAYER_LINE_STYLES`, keyed by the raw `swLineStyles_e` int code
+# -- what `list_layers`/`create_layer`/`set_layer_properties` use to render
+# `ILayer::Style`'s read-back value into one of this tool layer's own names.
+_LAYER_LINE_STYLE_NAMES = {value: key for key, value in _LAYER_LINE_STYLES.items()}
+
+# `create_layer`/`set_layer_properties`'s `width` -> `ILayerMgr::AddLayer`'s
+# `WidthIn` / `ILayer::Width` (`swLineWeights_e`).
+_LAYER_LINE_WEIGHTS = {
+    "none": int(SwLineWeights.swLW_NONE),
+    "thin": int(SwLineWeights.swLW_THIN),
+    "normal": int(SwLineWeights.swLW_NORMAL),
+    "thick": int(SwLineWeights.swLW_THICK),
+    "thick2": int(SwLineWeights.swLW_THICK2),
+    "thick3": int(SwLineWeights.swLW_THICK3),
+    "thick4": int(SwLineWeights.swLW_THICK4),
+    "thick5": int(SwLineWeights.swLW_THICK5),
+    "thick6": int(SwLineWeights.swLW_THICK6),
+    "number": int(SwLineWeights.swLW_NUMBER),
+    "layer": int(SwLineWeights.swLW_LAYER),
+    "custom": int(SwLineWeights.swLW_CUSTOM),
+}
+_LAYER_LINE_WEIGHT_NAMES = {value: key for key, value in _LAYER_LINE_WEIGHTS.items()}
+
+# `move_annotations_to_layer`'s `annotation_types` -> the per-view walker that
+# yields each annotation-family wrapper object (`INote`, `IDatumTag`,
+# `ITableAnnotation`, `IDisplayDimension`) -- every family this module
+# provides a `GetFirstX`/`GetNext` walk for (`_iter_view_notes`/
+# `_iter_view_datum_tags`/`_iter_view_tables`/`_iter_view_dimensions`), each
+# of which exposes `.GetAnnotation()` back to the shared `IAnnotation` that
+# carries `Layer`. GTols and weld symbols have no per-view enumeration in
+# this codebase (only `Insert*`-time creation) so are not included -- adding
+# them needs a new `GetFirstX` walk this issue's scope doesn't cover.
+_MOVE_ANNOTATION_TYPE_ITERATORS = {
+    "note": "_iter_view_notes",
+    "datum_tag": "_iter_view_datum_tags",
+    "table": "_iter_view_tables",
+    "dimension": "_iter_view_dimensions",
+}
 
 
 class DrawingOperations:
@@ -12915,3 +13027,519 @@ class DrawingOperations:
             )
 
         return self._result(True, f"Deleted table {table_name!r}", SwErrors.swSuccess, data)
+
+    # ========================================================================
+    # Layer tools (sw-jkb.1)
+    # ========================================================================
+    #
+    # `ILayerMgr`/`ILayer` per docs/api/05-export-and-layers.md's Layers
+    # section. None of `AddLayer`/`GetLayer`/`GetLayerList`/`SetCurrentLayer`
+    # nor any `ILayer` property requires a prior `ISelectionMgr` selection
+    # (each record's own "Prior selection required: None"), so unlike most of
+    # this file's annotation tools these never need the `selected(...)`
+    # context manager.
+
+    def _iter_view_dimensions(self, view: Any):
+        """Walk every display dimension attached to `view` via `IView::
+        GetFirstDisplayDimension6` / `IDisplayDimension::GetNext5` -- the
+        dimension analog of `_iter_view_notes`'s `GetFirstNote`/`GetNext`
+        walk, fetched for `move_annotations_to_layer` (sw-jkb.1) per
+        docs/api/03-annotations.md's addendum of the same name. `...6`/
+        `...5` are the current, non-`Obsolete` members (five/four prior
+        generations of each are `Obsolete`, per that record's Gotchas) --
+        not `GetFirstDisplayDimension`/`GetNext` themselves."""
+        return self._iter_com_chain(view, "GetFirstDisplayDimension6", "GetNext5",
+                                    "_iter_view_dimensions")
+
+    def _get_layer_manager(self, doc: Any, context: str) -> Tuple[Any, Optional[Dict]]:
+        """`ILayerMgr` for `doc` via `IModelDoc2::GetLayerManager` -- the
+        shared entry point for every layer tool, the same call
+        `_shown_hidden_layers` (export_pdf's keep_invisible_layers) already
+        makes."""
+        try:
+            layer_mgr = doc.GetLayerManager()
+        except Exception as e:
+            logger.error(f"{context}: GetLayerManager error: {e}")
+            return None, self._result(False, f"Get layer manager error: {e}", SwErrors.swFeatureError)
+        if layer_mgr is None:
+            return None, self._result(
+                False,
+                "GetLayerManager returned nothing -- this document may not support layers",
+                SwErrors.swFeatureError,
+            )
+        return layer_mgr, None
+
+    def _layer_names(self, layer_mgr: Any, context: str) -> Tuple[List[str], Optional[Dict]]:
+        """`ILayerMgr::GetLayerList` -- every layer name currently defined,
+        or `([], error)` if the call itself fails (as opposed to a
+        legitimately empty document, which returns `([], None)`)."""
+        try:
+            names = list(layer_mgr.GetLayerList() or [])
+        except Exception as e:
+            logger.error(f"{context}: GetLayerList error: {e}")
+            return [], self._result(False, f"List layers error: {e}", SwErrors.swFeatureError)
+        return names, None
+
+    def _unknown_layer_result(self, name: str, existing: List[str]) -> Dict:
+        """The shared "no such layer" failure -- `set_current_layer`'s and
+        `move_annotations_to_layer`'s acceptance criteria both require
+        listing every layer that *does* exist rather than a bare not-found."""
+        return self._result(
+            False,
+            f"Unknown layer {name!r}; existing layers: {existing!r}" if existing
+            else f"Unknown layer {name!r}; this document has no layers defined",
+            SwErrors.swInvalidInput, {"name": name, "existing_layers": existing},
+        )
+
+    def _describe_layer(self, name: str, layer: Any) -> Dict:
+        """One `list_layers`/`create_layer`/`set_layer_properties` layer
+        record, read back off an already-resolved `ILayer`: description,
+        visibility, printable flag, color (`"#RRGGBB"`), style, and width."""
+        style_code = _com_int(self._read_prop(layer, "Style"))
+        width_code = _com_int(self._read_prop(layer, "Width"))
+        return {
+            "name": name,
+            "description": self._read_prop(layer, "Description") or "",
+            "visible": _com_bool(self._read_prop(layer, "Visible")),
+            "printable": _com_bool(self._read_prop(layer, "Printable")),
+            "color": _colorref_to_hex(self._read_prop(layer, "Color")),
+            "style": _LAYER_LINE_STYLE_NAMES.get(style_code, style_code),
+            "width": _LAYER_LINE_WEIGHT_NAMES.get(width_code, width_code),
+        }
+
+    def create_layer(self, name: str, description: str = "", color: Optional[Any] = None,
+                      style: Optional[str] = None, width: Optional[str] = None,
+                      visible: bool = True, printable: bool = True) -> Dict:
+        """
+        Create a new drawing layer via `ILayerMgr::AddLayer`, so generated
+        dimensions/notes/reference geometry can be put on a named layer a
+        drafting-standard or certification review can toggle independently.
+
+        Args:
+            name: New layer's name. Must be non-blank and must not already
+                exist -- checked against `ILayerMgr::GetLayerList` before any
+                mutating COM call, since `AddLayer` itself does not document
+                a distinguishable failure code for a duplicate name (see its
+                dossier record's Gotchas).
+            description: Free-text description (`AddLayer`'s `DescIn`).
+            color: `"#RRGGBB"`/`"RRGGBB"` hex string, or an `(r, g, b)`
+                0-255 triple. Converted to the raw Win32 `COLORREF` integer
+                `AddLayer`'s `ColorIn` expects -- packed `0x00BBGGRR` (blue
+                in the high byte, red in the low byte), the *reverse* byte
+                order from the `0xRRGGBB` convention `color` itself is
+                expressed in (see `_parse_layer_color`). Omitted: black.
+            style: One of `_LAYER_LINE_STYLES`'s keys (`"continuous"`,
+                `"hidden"`, `"phantom"`, `"chain"`, `"center"`, `"stitch"`,
+                `"chain_thick"`, `"default"`). Omitted: `"continuous"`.
+            width: One of `_LAYER_LINE_WEIGHTS`'s keys (`"none"`, `"thin"`,
+                `"normal"`, `"thick"`..`"thick6"`, `"number"`, `"layer"`,
+                `"custom"`). Omitted: `"normal"`.
+            visible: `ILayer::Visible`, applied after creation (`AddLayer`
+                itself takes no visibility parameter).
+            printable: `ILayer::Printable`, applied *after* `visible` --
+                `ILayer::Visible`'s dossier record documents that setting
+                `Visible` can change `Printable` as a side effect, so
+                `Printable` is (re)applied second to make sure the caller's
+                requested value is what actually lands.
+
+        Returns:
+            Result dict. Fails with `swInvalidInput` (before any COM call)
+            if `name` is blank, `color` doesn't parse, `style`/`width` aren't
+            recognized keys, or a layer named `name` already exists. Fails
+            with `swFeatureError` if `AddLayer` itself returns falsy.
+        """
+        if not name or not name.strip():
+            return self._result(False, "name must not be blank", SwErrors.swInvalidInput)
+
+        colorref, color_err = (0, None) if color is None else _parse_layer_color(color)
+        if color_err:
+            return self._result(False, color_err, SwErrors.swInvalidInput, {"color": color})
+
+        style_key, style_val, err = self._enum_key(
+            style if style is not None else "continuous", _LAYER_LINE_STYLES, "style")
+        if err:
+            return err
+        width_key, width_val, err = self._enum_key(
+            width if width is not None else "normal", _LAYER_LINE_WEIGHTS, "width")
+        if err:
+            return err
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        layer_mgr, err = self._get_layer_manager(doc, "create_layer")
+        if err:
+            return err
+
+        existing, err = self._layer_names(layer_mgr, "create_layer")
+        if err:
+            return err
+        if name in existing:
+            return self._result(
+                False, f"Layer {name!r} already exists", SwErrors.swInvalidInput,
+                {"name": name, "existing_layers": existing},
+            )
+
+        try:
+            added = layer_mgr.AddLayer(name, description, colorref, style_val, width_val)
+        except Exception as e:
+            logger.error(f"create_layer({name!r}) AddLayer error: {e}")
+            return self._result(False, f"Create layer error: {e}", SwErrors.swFeatureError)
+
+        if not added:
+            return self._result(
+                False, f"Could not create layer {name!r} (AddLayer returned falsy)",
+                SwErrors.swFeatureError, {"name": name},
+            )
+
+        try:
+            layer = layer_mgr.GetLayer(name)
+        except Exception as e:
+            logger.error(f"create_layer({name!r}) GetLayer error: {e}")
+            layer = None
+
+        # Read back `Visible`/`Printable` after writing them rather than
+        # echoing the caller's requested values -- `ILayer::Printable`'s
+        # dossier record documents "it is not possible to make a layer
+        # printable if it is not visible," so a `visible=False,
+        # printable=True` request can land as `Printable == False` in real
+        # SolidWorks despite the write appearing to succeed. `color`/
+        # `style`/`width` have no such side effect (they went in through
+        # `AddLayer` itself, not a follow-up property write), so those stay
+        # the caller's own resolved values.
+        actual_visible, actual_printable = visible, printable
+        if layer is not None:
+            try:
+                layer.Visible = bool(visible)
+            except Exception as e:
+                logger.warning(f"create_layer({name!r}) set Visible error: {e}")
+            try:
+                layer.Printable = bool(printable)
+            except Exception as e:
+                logger.warning(f"create_layer({name!r}) set Printable error: {e}")
+            actual_visible = _com_bool(self._read_prop(layer, "Visible"))
+            actual_printable = _com_bool(self._read_prop(layer, "Printable"))
+
+        data = {
+            "name": name, "description": description,
+            "color": _colorref_to_hex(colorref), "style": style_key, "width": width_key,
+            "visible": actual_visible, "printable": actual_printable,
+        }
+        return self._result(True, f"Created layer {name!r}", SwErrors.swSuccess, data)
+
+    def list_layers(self) -> Dict:
+        """
+        Enumerate every layer in the active drawing via `ILayerMgr::
+        GetLayerList`/`GetLayer`, with each layer's description, visibility,
+        printable flag, color (`"#RRGGBB"`), style, and width.
+
+        Returns:
+            Result dict. `data["layers"]` is the per-layer list (see
+            `_describe_layer`); a layer whose `GetLayer` call itself fails or
+            returns nothing is skipped with a logged warning rather than
+            failing the whole listing.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        layer_mgr, err = self._get_layer_manager(doc, "list_layers")
+        if err:
+            return err
+
+        names, err = self._layer_names(layer_mgr, "list_layers")
+        if err:
+            return err
+
+        layers: List[Dict] = []
+        for name in names:
+            try:
+                layer = layer_mgr.GetLayer(name)
+            except Exception as e:
+                logger.warning(f"list_layers: GetLayer({name!r}) error: {e}")
+                continue
+            if layer is None:
+                continue
+            layers.append(self._describe_layer(name, layer))
+
+        return self._result(True, f"{len(layers)} layer(s)", SwErrors.swSuccess, {"layers": layers})
+
+    def set_current_layer(self, name: str) -> Dict:
+        """
+        Make `name` the active layer via `ILayerMgr::SetCurrentLayer`, so
+        subsequently created annotations land on it.
+
+        Args:
+            name: Existing layer's name. Unrecognized: fails with
+                `swInvalidInput` listing every layer that does exist, checked
+                against `ILayerMgr::GetLayerList` before `SetCurrentLayer` is
+                ever called (that method's own failure return, per its
+                dossier record, doesn't distinguish "unknown name" from any
+                other cause).
+
+        Returns:
+            Result dict. Fails with `swFeatureError` if `SetCurrentLayer`
+            itself returns falsy despite `name` being a real layer.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        layer_mgr, err = self._get_layer_manager(doc, "set_current_layer")
+        if err:
+            return err
+
+        existing, err = self._layer_names(layer_mgr, "set_current_layer")
+        if err:
+            return err
+        if name not in existing:
+            return self._unknown_layer_result(name, existing)
+
+        try:
+            changed = layer_mgr.SetCurrentLayer(name)
+        except Exception as e:
+            logger.error(f"set_current_layer({name!r}) error: {e}")
+            return self._result(False, f"Set current layer error: {e}", SwErrors.swFeatureError)
+
+        if not changed:
+            return self._result(
+                False, f"Could not make {name!r} the current layer (SetCurrentLayer returned falsy)",
+                SwErrors.swFeatureError, {"name": name},
+            )
+
+        return self._result(True, f"Current layer set to {name!r}", SwErrors.swSuccess, {"name": name})
+
+    def set_layer_properties(self, name: str, visible: Optional[bool] = None,
+                              printable: Optional[bool] = None, color: Optional[Any] = None,
+                              style: Optional[str] = None, width: Optional[str] = None) -> Dict:
+        """
+        Partially update an existing layer's `ILayer` properties -- every
+        argument left `None` keeps that field exactly as it already was.
+
+        Args:
+            name: Existing layer's name. Unrecognized: fails with
+                `swInvalidInput` listing every layer that does exist (same
+                pre-check as `set_current_layer`).
+            visible: New `ILayer::Visible`, or `None` to leave unchanged.
+            printable: New `ILayer::Printable`, or `None` to leave unchanged.
+                Applied *after* `visible` (when both are given) per
+                `ILayer::Visible`'s documented side-effect-on-Printable
+                Gotcha, so an explicit `printable` always wins over whatever
+                changing `visible` did to it.
+            color: New color (`"#RRGGBB"`/`(r, g, b)`, see `create_layer`),
+                or `None` to leave unchanged.
+            style: New line style key (see `create_layer`), or `None` to
+                leave unchanged.
+            width: New line width key (see `create_layer`), or `None` to
+                leave unchanged.
+
+        Returns:
+            Result dict. Fails with `swInvalidInput` (before any mutating
+            COM call) if `name` is unknown, `color` doesn't parse, or
+            `style`/`width` aren't recognized keys. `data` is the layer's
+            full state (`_describe_layer`) read back *after* every requested
+            change, so a caller can confirm both what changed and what was
+            preserved.
+        """
+        colorref: Optional[int] = None
+        if color is not None:
+            colorref, color_err = _parse_layer_color(color)
+            if color_err:
+                return self._result(False, color_err, SwErrors.swInvalidInput, {"color": color})
+
+        style_val: Optional[int] = None
+        if style is not None:
+            _style_key, style_val, err = self._enum_key(style, _LAYER_LINE_STYLES, "style")
+            if err:
+                return err
+
+        width_val: Optional[int] = None
+        if width is not None:
+            _width_key, width_val, err = self._enum_key(width, _LAYER_LINE_WEIGHTS, "width")
+            if err:
+                return err
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        layer_mgr, err = self._get_layer_manager(doc, "set_layer_properties")
+        if err:
+            return err
+
+        existing, err = self._layer_names(layer_mgr, "set_layer_properties")
+        if err:
+            return err
+        if name not in existing:
+            return self._unknown_layer_result(name, existing)
+
+        try:
+            layer = layer_mgr.GetLayer(name)
+        except Exception as e:
+            logger.error(f"set_layer_properties({name!r}) GetLayer error: {e}")
+            return self._result(False, f"Get layer error: {e}", SwErrors.swFeatureError, {"name": name})
+        if layer is None:
+            return self._result(
+                False, f"Layer {name!r} could not be resolved (GetLayer returned nothing)",
+                SwErrors.swFeatureError, {"name": name},
+            )
+
+        # `Visible` before `Printable` -- see the docstring's Gotcha. When
+        # only `visible` is given, snapshot `Printable` first and re-assert
+        # it if `Visible`'s own side effect changed it, so an *omitted*
+        # `printable` really is preserved rather than merely left unset in
+        # this call (`ILayer::Visible`'s dossier Gotcha, the same lever
+        # `_shown_hidden_layers` above already applies for export_pdf's
+        # keep_invisible_layers).
+        if visible is not None:
+            prior_printable = None if printable is not None else _com_bool(
+                self._read_prop(layer, "Printable"))
+            try:
+                layer.Visible = bool(visible)
+            except Exception as e:
+                logger.error(f"set_layer_properties({name!r}) set Visible error: {e}")
+                return self._result(False, f"Set visible error: {e}", SwErrors.swFeatureError, {"name": name})
+            if prior_printable is not None:
+                after_visible = _com_bool(self._read_prop(layer, "Printable"))
+                if after_visible is not None and after_visible != prior_printable:
+                    try:
+                        layer.Printable = prior_printable
+                    except Exception as e:
+                        logger.error(
+                            f"set_layer_properties({name!r}) restore Printable error: {e}")
+                        return self._result(
+                            False, f"Restore printable error: {e}", SwErrors.swFeatureError,
+                            {"name": name},
+                        )
+        if printable is not None:
+            try:
+                layer.Printable = bool(printable)
+            except Exception as e:
+                logger.error(f"set_layer_properties({name!r}) set Printable error: {e}")
+                return self._result(
+                    False, f"Set printable error: {e}", SwErrors.swFeatureError, {"name": name})
+        if colorref is not None:
+            try:
+                layer.Color = colorref
+            except Exception as e:
+                logger.error(f"set_layer_properties({name!r}) set Color error: {e}")
+                return self._result(False, f"Set color error: {e}", SwErrors.swFeatureError, {"name": name})
+        if style_val is not None:
+            try:
+                layer.Style = style_val
+            except Exception as e:
+                logger.error(f"set_layer_properties({name!r}) set Style error: {e}")
+                return self._result(False, f"Set style error: {e}", SwErrors.swFeatureError, {"name": name})
+        if width_val is not None:
+            try:
+                layer.Width = width_val
+            except Exception as e:
+                logger.error(f"set_layer_properties({name!r}) set Width error: {e}")
+                return self._result(False, f"Set width error: {e}", SwErrors.swFeatureError, {"name": name})
+
+        data = self._describe_layer(name, layer)
+        return self._result(True, f"Updated layer {name!r}", SwErrors.swSuccess, data)
+
+    def move_annotations_to_layer(self, layer_name: str, view_name: Optional[str] = None,
+                                   annotation_types: Optional[List[str]] = None) -> Dict:
+        """
+        Bulk-assign existing annotations to a layer via `IAnnotation::Layer`
+        -- what makes a generated dimension/note/GD&T pack reviewable by a
+        drafting-standard or certification pass that toggles layers.
+
+        Args:
+            layer_name: Existing layer's name. Unrecognized: fails with
+                `swInvalidInput` listing every layer that does exist (same
+                pre-check as `set_current_layer`) -- `IAnnotation::Layer`'s
+                setter does not itself validate the name, so without this
+                check a typo would silently detach annotations from every
+                real layer instead of erroring.
+            view_name: Restrict to annotations attached to this one view
+                (activated via `select_view_by_name`). Omitted: every view
+                in the document, including each sheet's own sheet-level/
+                title-block pseudo-view (`_iter_document_views`'s own
+                behavior).
+            annotation_types: Subset of `_MOVE_ANNOTATION_TYPE_ITERATORS`'s
+                keys (`"note"`, `"datum_tag"`, `"table"`, `"dimension"`) to
+                move. Omitted: all four. An unrecognized key fails with
+                `swInvalidInput` (before any COM call) listing the valid
+                keys. GTols and weld symbols are not movable by this tool --
+                see `_MOVE_ANNOTATION_TYPE_ITERATORS`'s own comment for why.
+
+        Returns:
+            Result dict. `data["moved"]` maps each requested type to how
+            many annotations of that type were reassigned; `data["total"]`
+            is their sum. An annotation whose `GetAnnotation()`/`Layer`
+            assignment itself fails is skipped (logged) rather than failing
+            the whole operation, so one bad object can't block the rest of
+            the pack.
+        """
+        if annotation_types is not None:
+            unknown = [t for t in annotation_types if t not in _MOVE_ANNOTATION_TYPE_ITERATORS]
+            if unknown:
+                return self._result(
+                    False,
+                    f"Unknown annotation_types {unknown!r}; expected any of "
+                    f"{sorted(_MOVE_ANNOTATION_TYPE_ITERATORS)!r}",
+                    SwErrors.swInvalidInput, {"annotation_types": annotation_types},
+                )
+            types = list(annotation_types)
+        else:
+            types = list(_MOVE_ANNOTATION_TYPE_ITERATORS)
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        layer_mgr, err = self._get_layer_manager(doc, "move_annotations_to_layer")
+        if err:
+            return err
+
+        existing, err = self._layer_names(layer_mgr, "move_annotations_to_layer")
+        if err:
+            return err
+        if layer_name not in existing:
+            return self._unknown_layer_result(layer_name, existing)
+
+        if view_name:
+            activated = self.select_view_by_name(view_name, doc=doc)
+            if not activated["success"]:
+                return activated
+            try:
+                views = [doc.ActiveDrawingView]
+            except Exception as e:
+                logger.error(f"move_annotations_to_layer({view_name!r}) error: {e}")
+                return self._result(
+                    False, f"Move annotations error: {e}", SwErrors.swSelectionError)
+        else:
+            views = list(self._iter_document_views(doc))
+
+        moved = {t: 0 for t in types}
+        for view in views:
+            for annotation_type in types:
+                iter_method = getattr(self, _MOVE_ANNOTATION_TYPE_ITERATORS[annotation_type])
+                for owner in iter_method(view):
+                    try:
+                        annotation = owner.GetAnnotation()
+                    except Exception as e:
+                        logger.warning(
+                            f"move_annotations_to_layer: GetAnnotation error on a "
+                            f"{annotation_type!r} in view {view_name!r}: {e}")
+                        continue
+                    if annotation is None:
+                        continue
+                    try:
+                        annotation.Layer = layer_name
+                    except Exception as e:
+                        logger.warning(
+                            f"move_annotations_to_layer: set Layer error on a "
+                            f"{annotation_type!r} in view {view_name!r}: {e}")
+                        continue
+                    moved[annotation_type] += 1
+
+        total = sum(moved.values())
+        return self._result(
+            True, f"Moved {total} annotation(s) to layer {layer_name!r}", SwErrors.swSuccess,
+            {"layer_name": layer_name, "view_name": view_name, "moved": moved, "total": total},
+        )
