@@ -29,6 +29,10 @@ from ..constants_drawing import (
     SwAutodimScheme,
     SwAutodimStatus,
     SwAutodimVerticalPlacement,
+    SwBalloonFit,
+    SwBalloonLayoutType,
+    SwBalloonStyle,
+    SwBalloonTextContent,
     SwBOMConfigurationAnchorType,
     SwBomType,
     SwBreakLineOrientation,
@@ -797,9 +801,16 @@ INSERT_MODEL_ANNOTATIONS4 = ComSignature("InsertModelAnnotations4", [
 # their own Requirements: "entities is a list of entity references (as returned
 # by list_view_entities)"). `add_datum_feature`/`add_gtol` (sw-1xx.4) extend this
 # with `"dimension"` -> `"DIMENSION"` (`IDisplayDimension`), per their own
-# Requirements ("place a datum tag on a selected edge/face/dimension").
+# Requirements ("place a datum tag on a selected edge/face/dimension"). `add_balloon`
+# (sw-mio.2) extends this again with `"component"` -> `"COMPONENT"`
+# (`IComponent2`, confirmed in docs/api/03-annotations.md's own `SelectByID2`
+# Type-string table) -- the thing a BOM balloon actually points at is normally an
+# assembly component instance, not bare geometry, matching `InsertBOMBalloon`'s
+# own dossier note ("select the item ... likely 'COMPONENT' for an assembly
+# instance").
 _ENTITY_KIND_TYPE_STR = {
     "edge": "EDGE", "vertex": "VERTEX", "face": "FACE", "dimension": "DIMENSION",
+    "component": "COMPONENT",
 }
 
 # `add_dimension`'s `dimension_type` -> which COM creation call to use, the
@@ -1221,6 +1232,101 @@ INSERT_BOM_TABLE6 = ComSignature("InsertBomTable6", [
     Param("detailed_cut_list", False, to_bool),
     Param("dissolve_part_level_rows", False, to_bool),
     Param("display_as_one_item", False, to_bool),
+])
+
+# `auto_balloon_view`'s `layout` -> `IAutoBalloonOptions::Layout` (`swBalloonLayoutType_e`).
+_BALLOON_LAYOUTS = {
+    "square": int(SwBalloonLayoutType.swDetailingBalloonLayout_Square),
+    "circle": int(SwBalloonLayoutType.swDetailingBalloonLayout_Circle),
+    "top": int(SwBalloonLayoutType.swDetailingBalloonLayout_Top),
+    "bottom": int(SwBalloonLayoutType.swDetailingBalloonLayout_Bottom),
+    "right": int(SwBalloonLayoutType.swDetailingBalloonLayout_Right),
+    "left": int(SwBalloonLayoutType.swDetailingBalloonLayout_Left),
+}
+
+# `auto_balloon_view`/`add_balloon`'s `style` -> `IAutoBalloonOptions::Style` /
+# `InsertBOMBalloon`'s `Style` (`swBalloonStyle_e`) -- every member the dossier's
+# Enums section documents, since none is singled out by this task's Requirements.
+_BALLOON_STYLES = {
+    "none": int(SwBalloonStyle.swBS_None),
+    "circular": int(SwBalloonStyle.swBS_Circular),
+    "triangle": int(SwBalloonStyle.swBS_Triangle),
+    "hexagon": int(SwBalloonStyle.swBS_Hexagon),
+    "box": int(SwBalloonStyle.swBS_Box),
+    "diamond": int(SwBalloonStyle.swBS_Diamond),
+    "pentagon": int(SwBalloonStyle.swBS_Pentagon),
+    "split_circle": int(SwBalloonStyle.swBS_SplitCirc),
+    "flag_pentagon": int(SwBalloonStyle.swBS_FlagPentagon),
+    "flag_triangle": int(SwBalloonStyle.swBS_FlagTriangle),
+    "underline": int(SwBalloonStyle.swBS_Underline),
+    "square": int(SwBalloonStyle.swBS_Square),
+    "s_circle": int(SwBalloonStyle.swBS_SCircle),
+    "inspection": int(SwBalloonStyle.swBS_Inspection),
+    "arc_bracket": int(SwBalloonStyle.swBS_ArcBracket),
+    "rect_bracket": int(SwBalloonStyle.swBS_RectBracket),
+    "arc_length_symbol": int(SwBalloonStyle.swBS_ArclenSym),
+    "fixed_symbol": int(SwBalloonStyle.swBS_FixedSym),
+    "double_arrow": int(SwBalloonStyle.swBS_DoubleArrow),
+    "split_square": int(SwBalloonStyle.swBS_SplitSquare),
+    "verbose": int(SwBalloonStyle.swBS_Verbose),
+}
+
+# `auto_balloon_view`/`add_balloon`'s `size` -> `IAutoBalloonOptions::Size` /
+# `InsertBOMBalloon`'s `Size` (`swBalloonFit_e`). `swBF_UserDef` is omitted --
+# its numeric value is not independently confirmed on the enum's own page (see
+# docs/api/04-tables.md's `swBalloonFit_e` record), so no public key routes to it.
+_BALLOON_SIZES = {
+    "tight_fit": int(SwBalloonFit.swBF_Tightest),
+    "1_char": int(SwBalloonFit.swBF_1Char),
+    "2_chars": int(SwBalloonFit.swBF_2Chars),
+    "3_chars": int(SwBalloonFit.swBF_3Chars),
+    "4_chars": int(SwBalloonFit.swBF_4Chars),
+    "5_chars": int(SwBalloonFit.swBF_5Chars),
+}
+
+# `auto_balloon_view`'s `text_content` -> `IAutoBalloonOptions::UpperTextContent` /
+# `add_balloon`'s `text_content` -> `InsertBOMBalloon`'s `UpperTextStyle`
+# (`swBalloonTextContent_e`).
+_BALLOON_TEXT_CONTENT = {
+    "custom": int(SwBalloonTextContent.swBalloonTextCustom),
+    "item_number": int(SwBalloonTextContent.swBalloonTextItemNumber),
+    "quantity": int(SwBalloonTextContent.swBalloonTextQuantity),
+    "custom_properties": int(SwBalloonTextContent.swBalloonTextCustomProperties),
+    "component_reference": int(SwBalloonTextContent.swBalloonTextComponentReference),
+    "spool_reference": int(SwBalloonTextContent.swBalloonTextSpoolReference),
+    "part_number_bom": int(SwBalloonTextContent.swBalloonTextPartNumberBOM),
+    "file_name": int(SwBalloonTextContent.swBalloonTextFileName),
+    "cutlist_properties": int(SwBalloonTextContent.swBalloonTextCutlistProperties),
+    "view_sheet": int(SwBalloonTextContent.swBalloonTextViewSheet),
+    "view_sheet_with_label": int(SwBalloonTextContent.swBalloonTextViewSheetWithLabel),
+    "view_zone": int(SwBalloonTextContent.swBalloonTextViewZone),
+    "view_letter": int(SwBalloonTextContent.swBalloonTextViewViewLetter),
+}
+
+# `add_balloon`'s `leader_attachment` -> `IAutoBalloonOptions::LeaderAttachmentToFaces`-
+# style bool ("edge" attaches to edges, "face" to faces) -- reused for
+# `auto_balloon_view`'s own `leader_attachment` parameter (same underlying property).
+_LEADER_ATTACHMENT_TO_FACES = {"edge": False, "face": True}
+
+# `IModelDocExtension::InsertBOMBalloon`'s positional signature, in the exact order
+# documented in docs/api/04-tables.md: Style, Size, UpperTextStyle, UpperText,
+# LowerTextStyle, LowerText, CustomSize, ShowQuantity, QuantityPlacement,
+# QuantityDenotationText. 10 positional parameters -- ComSignature per this issue's
+# working agreement (>6 params). `add_balloon` does not expose `QuantityPlacement`/
+# `QuantityDenotationText` as its own parameters (not in this task's Requirements),
+# so they always bind their own SolidWorks-sensible defaults (Left, no denotation
+# text).
+INSERT_BOM_BALLOON = ComSignature("InsertBOMBalloon", [
+    Param("style", REQUIRED, enum_to_int),
+    Param("size", REQUIRED, enum_to_int),
+    Param("upper_text_style", REQUIRED, enum_to_int),
+    Param("upper_text", ""),
+    Param("lower_text_style", 0, enum_to_int),
+    Param("lower_text", ""),
+    Param("custom_size", 0.0, to_meters),
+    Param("show_quantity", False, to_bool),
+    Param("quantity_placement", 0, enum_to_int),
+    Param("quantity_denotation_text", ""),
 ])
 
 
@@ -10695,4 +10801,680 @@ class DrawingOperations:
                 "table_name": table_name, "view_name": view_name,
                 "row_count": row_count, "column_count": column_count, "rows": rows,
             },
+        )
+
+    # ========================================================================
+    # Balloon tools
+    # ========================================================================
+
+    def _sheet_has_bom_table(self, doc, sheet_name: Optional[str],
+                              table_name: Optional[str]) -> Tuple[bool, Optional[Dict]]:
+        """Whether `sheet_name`'s own tables include a BOM
+        (`swTableAnnotation_BillOfMaterials`) -- `auto_balloon_view`'s
+        missing-BOM detection, sharing `_scoped_views`' walk with
+        `list_tables`.
+
+        Args:
+            table_name: If given, require a table with exactly this name
+                (`IAnnotation::GetName`) to exist on the sheet and be a BOM
+                table -- a caller-named table that doesn't check out is
+                reported as an error rather than silently degrading to "any
+                BOM found".
+
+        Returns:
+            `(True, None)` / `(False, None)` on a normal check, or
+            `(False, error_dict)` if `table_name` was given and didn't
+            resolve to a real BOM table on this sheet, or the sheet's views
+            couldn't be walked at all.
+        """
+        scoped, err = self._scoped_views(doc, sheet_name, "auto_balloon_view", "Auto balloon")
+        if err:
+            return False, err
+
+        bom_type = int(SwTableAnnotationType.swTableAnnotation_BillOfMaterials)
+        found_any = False
+        found_named = False
+        for view, _v_name in scoped:
+            for table in self._iter_view_tables(view):
+                type_code = _com_int(self._read_prop(table, "Type"))
+                if type_code != bom_type:
+                    continue
+                found_any = True
+                if table_name:
+                    annotation = self._table_annotation(table)
+                    if self._read_prop(annotation, "GetName") == table_name:
+                        found_named = True
+
+        if table_name and not found_named:
+            return False, self._result(
+                False,
+                f"bom_table_name {table_name!r} is not a BOM table on sheet "
+                f"{sheet_name!r} (or does not exist)",
+                SwErrors.swInvalidInput, {"bom_table_name": table_name, "sheet_name": sheet_name},
+            )
+        return found_any, None
+
+    def auto_balloon_view(
+        self, view_name: str, layout: str = "square", style: str = "circular",
+        size: str = "tight_fit", text_content: str = "item_number",
+        reverse_direction: bool = False, ignore_multiple: bool = True,
+        insert_magnetic_line: bool = False, leader_attachment: str = "edge",
+        bom_table_name: Optional[str] = None,
+    ) -> Dict:
+        """
+        Auto-balloon a drawing view via `IDrawingDoc::
+        CreateAutoBalloonOptions` + `AutoBalloon5`, per docs/api/04-tables.md's
+        "Automatic balloons and IAutoBalloonOptions" section. The common
+        case -- ballooning an entire view is one COM call, one-balloon-at-a-
+        time (`add_balloon`) is not worth an LLM round trip per item.
+
+        Args:
+            view_name: Drawing view to balloon, on the active sheet.
+                Selected via `SelectByID2("...", "DRAWINGVIEW", ...)` before
+                the options object is created, per `AutoBalloon5`'s own
+                Remarks recipe (select first, *then* create the options
+                object and set its properties).
+            layout: `'square'` (default), `'circle'`, `'top'`, `'bottom'`,
+                `'right'`, or `'left'` -- `IAutoBalloonOptions::Layout`
+                (`swBalloonLayoutType_e`).
+            style: Balloon shape -- see `_BALLOON_STYLES` for every accepted
+                key (`swBalloonStyle_e`). Default `'circular'`.
+            size: Balloon fit -- `'tight_fit'` (default), `'1_char'`,
+                `'2_chars'`, `'3_chars'`, `'4_chars'`, or `'5_chars'`
+                (`swBalloonFit_e`).
+            text_content: Upper-text content source -- see
+                `_BALLOON_TEXT_CONTENT` for every accepted key
+                (`swBalloonTextContent_e`). Default `'item_number'`.
+            reverse_direction: `IAutoBalloonOptions::ReverseDirection`. Only
+                has an effect when `ItemOrder` (not exposed by this tool)
+                is left at its sequential default -- see this dossier's
+                sw-mio.2 addendum.
+            ignore_multiple: `IAutoBalloonOptions::IgnoreMultiple` -- `True`
+                (default) balloons only one instance of a repeated item,
+                `False` balloons every instance.
+            insert_magnetic_line: `IAutoBalloonOptions::InsertMagneticLine`
+                -- only valid when `layout != 'circle'` per its own page;
+                set through as given rather than pre-validated (see this
+                dossier's sw-mio.2 addendum).
+            leader_attachment: `'edge'` (default) or `'face'` --
+                `IAutoBalloonOptions::LeaderAttachmentToFaces`.
+            bom_table_name: If given, requires a BOM table with exactly
+                this name to exist on `view_name`'s sheet -- fails with
+                `swInvalidInput` before any COM call otherwise. Omitted:
+                any BOM table on the sheet is enough to avoid the missing-
+                BOM warning below; with no BOM table at all, `AutoBalloon5`
+                still runs and balloons are still created, but the result
+                message says so, since item numbers may not mean anything
+                without a BOM behind them.
+
+        Returns:
+            Result dict. `data["count"]` is how many balloons `AutoBalloon5`
+            actually returned (the length of its `System.Object` array of
+            `INote`s) -- `0` if it returned `None` (treated as "nothing to
+            balloon", the same warned-success convention `add_center_marks`/
+            `add_centerlines`/`remove_center_marks` use, not a failure).
+            `data["has_bom"]` reports whether a BOM table was found on the
+            sheet. Fails with `swFeatureError` if `CreateAutoBalloonOptions`
+            returns nothing, or if setting a property on the options object
+            raises.
+        """
+        layout_key = layout.strip().lower() if isinstance(layout, str) else ""
+        layout_enum = _BALLOON_LAYOUTS.get(layout_key)
+        if layout_enum is None:
+            return self._result(
+                False, f"Unknown layout {layout!r}; expected one of {sorted(_BALLOON_LAYOUTS)!r}",
+                SwErrors.swInvalidInput, {"layout": layout},
+            )
+
+        style_key = style.strip().lower() if isinstance(style, str) else ""
+        style_enum = _BALLOON_STYLES.get(style_key)
+        if style_enum is None:
+            return self._result(
+                False, f"Unknown style {style!r}; expected one of {sorted(_BALLOON_STYLES)!r}",
+                SwErrors.swInvalidInput, {"style": style},
+            )
+
+        size_key = size.strip().lower() if isinstance(size, str) else ""
+        size_enum = _BALLOON_SIZES.get(size_key)
+        if size_enum is None:
+            return self._result(
+                False, f"Unknown size {size!r}; expected one of {sorted(_BALLOON_SIZES)!r}",
+                SwErrors.swInvalidInput, {"size": size},
+            )
+
+        text_key = text_content.strip().lower() if isinstance(text_content, str) else ""
+        text_enum = _BALLOON_TEXT_CONTENT.get(text_key)
+        if text_enum is None:
+            return self._result(
+                False,
+                f"Unknown text_content {text_content!r}; expected one of "
+                f"{sorted(_BALLOON_TEXT_CONTENT)!r}",
+                SwErrors.swInvalidInput, {"text_content": text_content},
+            )
+
+        attach_key = leader_attachment.strip().lower() if isinstance(leader_attachment, str) else ""
+        if attach_key not in _LEADER_ATTACHMENT_TO_FACES:
+            return self._result(
+                False,
+                f"Unknown leader_attachment {leader_attachment!r}; expected one of "
+                f"{sorted(_LEADER_ATTACHMENT_TO_FACES)!r}",
+                SwErrors.swInvalidInput, {"leader_attachment": leader_attachment},
+            )
+        leader_to_faces = _LEADER_ATTACHMENT_TO_FACES[attach_key]
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        sheet, err = self._resolve_sheet(doc, None)
+        if err:
+            return err
+        sheet_name = self._sheet_name(sheet)
+        if not sheet_name:
+            # `_sheet_has_bom_table` -> `_scoped_views(doc, sheet_name, ...)`
+            # treats a falsy `sheet_name` as "no sheet scope -- walk the
+            # whole document" (see `_scoped_views`' own `if sheet_name:`
+            # branch). Falling through with `sheet_name=None` here would
+            # silently widen the BOM check from "this sheet" to "anywhere
+            # in the document" -- a BOM table on an unrelated sheet would
+            # then wrongly suppress the missing-BOM warning below.
+            return self._result(
+                False, "Could not read the active sheet's name (ISheet::GetName) "
+                "-- cannot scope the missing-BOM check to this sheet",
+                SwErrors.swUnknownError, {"view_name": view_name},
+            )
+
+        view, err = self._require_view(doc, view_name, None, sheet=sheet)
+        if err:
+            return err
+
+        has_bom, bom_err = self._sheet_has_bom_table(doc, sheet_name, bom_table_name)
+        if bom_err:
+            return bom_err
+
+        data = {
+            "view_name": view_name, "layout": layout_key, "style": style_key,
+            "size": size_key, "text_content": text_key,
+            "reverse_direction": bool(reverse_direction), "ignore_multiple": bool(ignore_multiple),
+            "insert_magnetic_line": bool(insert_magnetic_line), "leader_attachment": attach_key,
+            "bom_table_name": bom_table_name, "has_bom": has_bom,
+        }
+
+        with self.selected(view_name, "DRAWINGVIEW", 0, 0, 0, doc=doc) as sel:
+            if not sel["success"]:
+                return sel
+
+            try:
+                options = doc.CreateAutoBalloonOptions()
+            except Exception as e:
+                logger.error(f"auto_balloon_view({view_name!r}) CreateAutoBalloonOptions error: {e}")
+                return self._result(
+                    False, f"Create auto-balloon options error: {e}", SwErrors.swFeatureError, data,
+                )
+            if options is None:
+                return self._result(
+                    False, "CreateAutoBalloonOptions returned nothing -- balloon options not created",
+                    SwErrors.swFeatureError, data,
+                )
+
+            try:
+                options.Layout = layout_enum
+                options.Style = style_enum
+                options.Size = size_enum
+                options.UpperTextContent = text_enum
+                options.ReverseDirection = bool(reverse_direction)
+                options.IgnoreMultiple = bool(ignore_multiple)
+                options.InsertMagneticLine = bool(insert_magnetic_line)
+                options.LeaderAttachmentToFaces = leader_to_faces
+            except Exception as e:
+                logger.error(f"auto_balloon_view({view_name!r}) set option error: {e}")
+                return self._result(
+                    False, f"Set auto-balloon option error: {e}", SwErrors.swFeatureError, data,
+                )
+
+            try:
+                raw = doc.AutoBalloon5(options)
+            except Exception as e:
+                logger.error(f"auto_balloon_view({view_name!r}) AutoBalloon5 error: {e}")
+                return self._result(False, f"Auto balloon error: {e}", SwErrors.swFeatureError, data)
+
+        # `None` is treated the same as an empty result -- `AutoBalloon5`'s
+        # own page states only that it returns a `System.Object` array of
+        # `INote`s, with no documented sentinel for "nothing to balloon",
+        # and pywin32 commonly marshals an empty SAFEARRAY back as `None`.
+        # Every sibling batch-annotation tool in this module treats "0
+        # produced" as a warned success rather than a failure
+        # (`add_center_marks`, `add_centerlines`, `remove_center_marks`) --
+        # this one matches that convention rather than guessing `None`
+        # specifically means the call failed.
+        if raw is None:
+            count = 0
+        else:
+            try:
+                count = len(list(raw))
+            except TypeError:
+                count = 1
+
+        data["count"] = count
+
+        message = f"Auto-ballooned {count} item(s) in view {view_name!r}"
+        if not has_bom:
+            message += (
+                " -- WARNING: no BOM table found on this sheet; balloon item "
+                "numbers may be meaningless until a BOM table is inserted"
+            )
+
+        return self._result(True, message, SwErrors.swSuccess, data)
+
+    def add_balloon(
+        self, view_name: str, entity: Dict[str, Any], x: float, y: float,
+        style: str = "circular", size: str = "tight_fit", text_content: str = "item_number",
+        upper_text: Optional[str] = None, lower_text: Optional[str] = None,
+        quantity_display: bool = False,
+    ) -> Dict:
+        """
+        Add a single BOM balloon via `IModelDocExtension::InsertBOMBalloon`
+        -- the one-balloon-at-a-time case `auto_balloon_view` doesn't cover
+        (fixing up a bad batch, or a drawing with no BOM to auto-balloon
+        against yet).
+
+        Args:
+            view_name: Drawing view the entity lives in. Activated via
+                `select_view_by_name`.
+            entity: Entity reference in the shape `list_view_entities`
+                returns (`{"kind": "edge"/"face"/"vertex", "x", "y", "z"}`),
+                plus `"component"` -> `"COMPONENT"` (`IComponent2`) for the
+                normal "balloon this assembly component instance" case --
+                `list_view_entities` never emits `"component"` itself.
+            x, y: Balloon placement, caller's default unit -- converted to
+                meters via `IAnnotation::SetPosition2`.
+            style: Balloon shape -- see `_BALLOON_STYLES`. Default
+                `'circular'`. `lower_text` is only accepted when
+                `style='split_circle'` (`swBS_SplitCirc`) -- SolidWorks'
+                own documented constraint on `LowerText`/`LowerTextStyle`.
+            size: Balloon fit -- see `_BALLOON_SIZES`. Default `'tight_fit'`.
+            text_content: Upper-text content source -- see
+                `_BALLOON_TEXT_CONTENT`. Default `'item_number'`; only
+                `'custom'` actually uses `upper_text`'s literal string --
+                SolidWorks ignores it for a content-linked style like
+                `'item_number'`/`'quantity'` (per `SetBomBalloonText`'s own
+                Remarks, which documents the identical `UpperTextStyle`/
+                `UpperText` pairing `InsertBOMBalloon` also uses).
+            upper_text: Literal upper text -- only meaningful when
+                `text_content='custom'`. Omitted: `""`.
+            lower_text: Literal lower text -- only valid when
+                `style='split_circle'`; rejected with `swInvalidInput`
+                otherwise. Omitted: no lower text.
+            quantity_display: `InsertBOMBalloon`'s `ShowQuantity`. Quantity
+                placement/denotation text are not exposed -- SolidWorks'
+                own defaults (left, no denotation text) are used.
+
+        Returns:
+            Result dict. `data["name"]` is the new balloon's
+            `IAnnotation::GetName` value. Fails with `swFeatureError` if
+            `InsertBOMBalloon` returns nothing (the most likely cause: the
+            entity reference didn't actually select anything
+            ballooned-eligible).
+        """
+        style_key = style.strip().lower() if isinstance(style, str) else ""
+        style_enum = _BALLOON_STYLES.get(style_key)
+        if style_enum is None:
+            return self._result(
+                False, f"Unknown style {style!r}; expected one of {sorted(_BALLOON_STYLES)!r}",
+                SwErrors.swInvalidInput, {"style": style},
+            )
+
+        size_key = size.strip().lower() if isinstance(size, str) else ""
+        size_enum = _BALLOON_SIZES.get(size_key)
+        if size_enum is None:
+            return self._result(
+                False, f"Unknown size {size!r}; expected one of {sorted(_BALLOON_SIZES)!r}",
+                SwErrors.swInvalidInput, {"size": size},
+            )
+
+        text_key = text_content.strip().lower() if isinstance(text_content, str) else ""
+        text_enum = _BALLOON_TEXT_CONTENT.get(text_key)
+        if text_enum is None:
+            return self._result(
+                False,
+                f"Unknown text_content {text_content!r}; expected one of "
+                f"{sorted(_BALLOON_TEXT_CONTENT)!r}",
+                SwErrors.swInvalidInput, {"text_content": text_content},
+            )
+
+        if lower_text and style_key != "split_circle":
+            return self._result(
+                False,
+                f"lower_text is only valid when style='split_circle', got style={style!r}",
+                SwErrors.swInvalidInput, {"style": style, "lower_text": lower_text},
+            )
+
+        parsed_entity, entity_err = _parse_entity_ref(entity)
+        if entity_err:
+            return self._result(False, entity_err, SwErrors.swInvalidInput, {"entity": entity})
+
+        xy_err = self._validate_xy(x, y)
+        if xy_err:
+            return xy_err
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        activated = self.select_view_by_name(view_name, doc=doc)
+        if not activated["success"]:
+            return activated
+
+        type_str, ex, ey, ez = parsed_entity
+        data = {
+            "view_name": view_name, "x": x, "y": y, "style": style_key, "size": size_key,
+            "text_content": text_key, "upper_text": upper_text, "lower_text": lower_text,
+            "quantity_display": bool(quantity_display),
+        }
+
+        lower_style_enum = int(SwBalloonTextContent.swBalloonTextCustom) if lower_text else 0
+        annotation = None
+
+        with self.selected("", type_str, ex, ey, ez, doc=doc) as sel:
+            if not sel["success"]:
+                return sel
+
+            try:
+                args = INSERT_BOM_BALLOON.bind(
+                    units=self._units,
+                    style=style_enum, size=size_enum,
+                    upper_text_style=text_enum, upper_text=upper_text or "",
+                    lower_text_style=lower_style_enum, lower_text=lower_text or "",
+                    custom_size=0.0, show_quantity=quantity_display,
+                    quantity_placement=0, quantity_denotation_text="",
+                )
+                note = doc.Extension.InsertBOMBalloon(*args)
+            except Exception as e:
+                logger.error(f"add_balloon({view_name!r}) InsertBOMBalloon error: {e}")
+                return self._result(False, f"Insert balloon error: {e}", SwErrors.swFeatureError, data)
+
+            if note is None:
+                return self._result(
+                    False,
+                    "InsertBOMBalloon returned nothing -- balloon not created "
+                    "(an entity that isn't ballooned-eligible is the most likely cause)",
+                    SwErrors.swFeatureError, data,
+                )
+
+            annotation, place_err = self._place_annotation(
+                note, x, y, "Balloon", "balloon", f"add_balloon({view_name!r})", data,
+            )
+            if place_err:
+                return place_err
+
+        _, tx, ty = self._annotation_name_position(annotation)
+        data["x"] = tx if tx is not None else x
+        data["y"] = ty if ty is not None else y
+
+        name = data.get("name")
+        return self._result(
+            True, f"Added balloon {name!r} in view {view_name!r}" if name
+            else f"Added balloon in view {view_name!r}",
+            SwErrors.swSuccess, data,
+        )
+
+    def remove_balloons(self, view_name: str) -> Dict:
+        """
+        Clear every BOM balloon note from a drawing view via `INote::
+        IsBomBalloon` (filter) + `SelectByID2("...", "NOTE", ...)` +
+        `IModelDocExtension::DeleteSelection2` -- the same select-then-
+        delete idiom `remove_center_marks` uses, adapted to select by the
+        balloon note's own name (`IAnnotation::GetName`) via the documented
+        `"NOTE"` `SelectByID2` type string (docs/api/03-annotations.md's
+        Type-string table), since this dossier found no dedicated
+        per-object `Select` method on `INote`/`IAnnotation` the way
+        `ICenterMark::Select` exists.
+
+        Args:
+            view_name: Drawing view to clear. Activated via
+                `select_view_by_name`.
+
+        Returns:
+            Result dict. `data["count"]` (and `data["removed"]`, an alias)
+            is how many balloon notes were actually deleted -- counted from
+            this walk's own successful `DeleteSelection2` calls. A view
+            with no BOM balloons is a warned success with `count: 0`.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        activated = self.select_view_by_name(view_name, doc=doc)
+        if not activated["success"]:
+            return activated
+
+        try:
+            view = doc.ActiveDrawingView
+            extension = doc.Extension
+        except Exception as e:
+            logger.error(f"remove_balloons({view_name!r}) error: {e}")
+            return self._result(
+                False, f"Remove balloons error: {e}", SwErrors.swSelectionError,
+                {"view_name": view_name},
+            )
+
+        data = {"view_name": view_name}
+
+        # Eager, like `remove_center_marks`' `_view_center_marks` walk: the
+        # whole `GetFirstNote`/`GetNext` chain is exhausted -- filtered to
+        # `IsBomBalloon() = True`, and each surviving note's name captured
+        # -- before the first delete, since a deleted COM object's own
+        # `GetNext` is not guaranteed to still answer.
+        names: List[str] = []
+        for note in self._iter_view_notes(view):
+            try:
+                is_balloon = bool(note.IsBomBalloon())
+            except Exception as e:
+                logger.warning(f"remove_balloons({view_name!r}) IsBomBalloon error: {e}")
+                is_balloon = False
+            if not is_balloon:
+                continue
+            try:
+                annotation = note.GetAnnotation()
+            except Exception as e:
+                logger.warning(f"remove_balloons({view_name!r}) GetAnnotation error: {e}")
+                annotation = None
+            name = self._read_prop(annotation, "GetName") if annotation is not None else None
+            names.append(name or "")
+
+        candidates = len(names)
+        removed = 0
+        for name in names:
+            with self.selected(name, "NOTE", 0, 0, 0, doc=doc) as sel:
+                if not sel["success"]:
+                    continue
+                try:
+                    deleted = extension.DeleteSelection2(0)
+                except Exception as e:
+                    logger.warning(f"remove_balloons({view_name!r}) DeleteSelection2 error: {e}")
+                    deleted = False
+            if deleted:
+                removed += 1
+
+        data["count"] = removed
+        data["removed"] = removed
+
+        if candidates == 0:
+            return self._result(
+                True, f"No BOM balloons found in view {view_name!r} -- 0 removed",
+                SwErrors.swSuccess, data,
+            )
+
+        if removed == 0:
+            return self._result(
+                False,
+                f"Found {candidates} BOM balloon(s) in view {view_name!r} but could not remove any",
+                SwErrors.swFeatureError, data,
+            )
+
+        return self._result(
+            True, f"Removed {removed} BOM balloon(s) from view {view_name!r}",
+            SwErrors.swSuccess, data,
+        )
+
+    def renumber_balloons(self, view_name: Optional[str] = None, start: int = 1,
+                           order: str = "by_position") -> Dict:
+        """
+        Deterministically renumber every BOM balloon via `INote::
+        SetBomBalloonText`, so re-running this tool against unchanged
+        balloon positions always produces the same numbering.
+
+        Args:
+            view_name: Restrict to one view's balloons. Omitted: every BOM
+                balloon in the document (every view, via
+                `_iter_document_views`).
+            start: First item number to assign (default `1`). Must be a
+                plain `int`, not `bool`.
+            order: Only `'by_position'` (default) is implemented --
+                balloons are sorted by sheet position, **top-left first**:
+                primary key descending `y` (top of the sheet first),
+                secondary key ascending `x` (left of the sheet first),
+                tertiary key the balloon's own name (a stable tie-break for
+                two balloons at the exact same position) -- so the same
+                document state always produces the same order, independent
+                of `GetFirstNote`/`GetNext` walk order.
+
+        Returns:
+            Result dict. `data["count"]` is how many balloons were
+            renumbered; `data["balloons"]` lists each one's `name`,
+            `item_number`, `x`/`y` (caller's default unit), and
+            `view_name`, in the assigned order. A document/view with no BOM
+            balloons is a warned success with `count: 0`.
+
+            Numbering is written via `SetBomBalloonText(swBalloonTextCustom,
+            str(item_number), <existing lower style>, <existing lower
+            text>)` -- **not** `swBalloonTextItemNumber` -- per that
+            method's own Remarks ("If the upper- or lower-text style is
+            swBalloonTextQuantity or swBalloonTextItemNumber, then
+            SOLIDWORKS ignores the specified upper or lower text"): passing
+            an explicit number through the item-number style would be
+            silently discarded, defeating the whole point of this tool. The
+            balloon's existing lower text/style is read back first (via
+            `GetBomBalloonTextStyle`/`GetBomBalloonText`) and passed
+            through unchanged, so a split-circle balloon's lower half
+            survives a renumber pass.
+        """
+        if isinstance(start, bool) or not isinstance(start, int):
+            return self._result(
+                False, f"start must be an integer, got {start!r}", SwErrors.swInvalidInput,
+                {"start": start},
+            )
+
+        order_key = order.strip().lower() if isinstance(order, str) else ""
+        if order_key != "by_position":
+            return self._result(
+                False, f"Unknown order {order!r}; only 'by_position' is implemented",
+                SwErrors.swInvalidInput, {"order": order},
+            )
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        if view_name:
+            view, err = self._require_view(doc, view_name, None)
+            if err:
+                return err
+            views = [(view, view_name)]
+        else:
+            views = [(v, self._read_prop(v, "GetName2")) for v in self._iter_document_views(doc)]
+
+        balloons: List[Dict[str, Any]] = []
+        for view, v_name in views:
+            for note in self._iter_view_notes(view):
+                try:
+                    is_balloon = bool(note.IsBomBalloon())
+                except Exception as e:
+                    logger.warning(f"renumber_balloons: IsBomBalloon error: {e}")
+                    is_balloon = False
+                if not is_balloon:
+                    continue
+                try:
+                    annotation = note.GetAnnotation()
+                except Exception as e:
+                    logger.warning(f"renumber_balloons: GetAnnotation error: {e}")
+                    annotation = None
+                name, x, y = self._annotation_name_position(annotation)
+                balloons.append({"note": note, "name": name, "x": x, "y": y, "view_name": v_name})
+
+        def _sort_key(b: Dict[str, Any]) -> Tuple[float, float, str]:
+            y = b["y"] if isinstance(b["y"], (int, float)) else float("-inf")
+            x = b["x"] if isinstance(b["x"], (int, float)) else float("inf")
+            return (-y, x, b["name"] or "")
+
+        balloons.sort(key=_sort_key)
+
+        data: Dict[str, Any] = {"view_name": view_name, "start": start, "order": order_key}
+
+        if not balloons:
+            data["count"] = 0
+            data["balloons"] = []
+            return self._result(
+                True,
+                "No BOM balloons found"
+                + (f" in view {view_name!r}" if view_name else " in this document")
+                + " -- 0 renumbered",
+                SwErrors.swSuccess, data,
+            )
+
+        renumbered: List[Dict[str, Any]] = []
+        for index, b in enumerate(balloons):
+            note = b["note"]
+            item_number = start + index
+
+            try:
+                lower_style = _com_int(note.GetBomBalloonTextStyle(False))
+            except Exception as e:
+                logger.warning(f"renumber_balloons: GetBomBalloonTextStyle error: {e}")
+                lower_style = None
+            if lower_style is None:
+                lower_style = 0
+
+            try:
+                lower_text = note.GetBomBalloonText(False)
+            except Exception as e:
+                logger.warning(f"renumber_balloons: GetBomBalloonText error: {e}")
+                lower_text = None
+            if not isinstance(lower_text, str):
+                lower_text = ""
+
+            try:
+                ok = note.SetBomBalloonText(
+                    int(SwBalloonTextContent.swBalloonTextCustom), str(item_number),
+                    lower_style, lower_text,
+                )
+            except Exception as e:
+                logger.error(f"renumber_balloons: SetBomBalloonText error: {e}")
+                data["count"] = len(renumbered)
+                data["balloons"] = renumbered
+                return self._result(False, f"Set balloon text error: {e}", SwErrors.swFeatureError, data)
+
+            if ok is False:
+                data["count"] = len(renumbered)
+                data["balloons"] = renumbered
+                return self._result(
+                    False,
+                    f"Could not set balloon {b['name']!r} text to {item_number} "
+                    "(SetBomBalloonText returned False)",
+                    SwErrors.swFeatureError, data,
+                )
+
+            renumbered.append({
+                "name": b["name"], "item_number": item_number, "x": b["x"], "y": b["y"],
+                "view_name": b["view_name"],
+            })
+
+        data["count"] = len(renumbered)
+        data["balloons"] = renumbered
+
+        return self._result(
+            True,
+            f"Renumbered {len(renumbered)} balloon(s) starting at {start}"
+            + (f" in view {view_name!r}" if view_name else ""),
+            SwErrors.swSuccess, data,
         )

@@ -109,6 +109,10 @@ EXPECTED_TOOL_NAMES = {
     "insert_bom_table",
     "list_tables",
     "get_bom_contents",
+    "auto_balloon_view",
+    "add_balloon",
+    "renumber_balloons",
+    "remove_balloons",
     # Sketch Tools
     "create_sketch",
     "create_sketch_on_face",

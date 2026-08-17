@@ -467,11 +467,23 @@ selection type filter; treat as unverified and confirm the `Type` string empiric
 - See `INote::PropertyLinkedText` for the link-string syntax usable with
   `UpperTextStyle`/`LowerTextStyle = swBalloonTextContent_e.swBalloonTextCustomProperties`
   (not documented further in this dossier).
-- Superseded in practice (though not formally deprecated) by `InsertBOMBalloon2`
-  (below), which takes a single `IBalloonOptions` object instead of ten positional
-  parameters — prefer `InsertBOMBalloon2` for new code; this record is kept because it
-  is the name closest to the source research issue's request and remains a real,
-  current, callable member.
+- Superseded in practice by `InsertBOMBalloon2` (below), which takes a single
+  `IBalloonOptions` object instead of ten positional parameters — prefer
+  `InsertBOMBalloon2` for new code; this record is kept because it is the name
+  closest to the source research issue's request and remains a real, callable
+  member. **Update (sw-mio.2 re-fetch):** the 2025 help page now labels this method
+  "Obsolete. Superseded by IModelDocExtension::InsertBomBalloon2" at the top of the
+  page — contradicting this dossier's earlier "not formally deprecated" note. It is
+  still present in the 2025 type library with the exact signature documented above
+  (fetched directly, not inferred), so "Obsolete" here reads as "superseded, still
+  callable" rather than "removed" — sw-mio.2's `add_balloon` tool uses it anyway,
+  since its positional shape is what lets `ComSignature` assert exact call order in
+  tests, and `InsertBOMBalloon2`'s `IBalloonOptions` member list remains out of scope
+  for this dossier (see the Gotcha below).
+- `InsertBOMBalloon`'s own Remarks/See-Also list names `INote::GetBomBalloonText`,
+  `GetBomBalloonTextStyle`, `SetBomBalloonText`, and `IsBomBalloon` as the balloon's
+  own post-creation read/write surface — see their own H3 records below (fetched for
+  sw-mio.2's `renumber_balloons`/`remove_balloons` tools).
 
 ---
 
@@ -608,10 +620,10 @@ verified against its own SOLIDWORKS 2025 help page, all SOLIDWORKS 2012 FCS Revi
 | `IgnoreMultiple` | Boolean | `True` to balloon only one instance of a repeated item, `False` to balloon every instance | |
 | `EditBalloons` | Boolean | `True` to apply the edit-balloon behavior configured by `EditBalloonOption`, `False` to not | |
 | `EditBalloonOption` | Integer | Edit-balloon behavior; valid only when `EditBalloons = True` | `swEditBalloonOption_e` (not independently fetched in this pass) |
-| `InsertMagneticLine` | Boolean | (Listed in the interface's member index; not individually fetched this pass — meaning inferred from name only, unverified) | |
-| `LeaderAttachmentToFaces` | Boolean | (Listed in the interface's member index; not individually fetched this pass — likely `AutoBalloon4`'s `BalloonsToFaces` equivalent, unverified) | |
+| `InsertMagneticLine` | Boolean | `True` to insert magnetic lines with balloons, `False` to not; only valid when `Layout` is not `swDetailingBalloonLayout_Circle` (fetched sw-mio.2) | |
+| `LeaderAttachmentToFaces` | Boolean | `True` to attach balloon leaders to faces, `False` to attach to edges — confirmed the `AutoBalloon4`'s `BalloonsToFaces` equivalent (fetched sw-mio.2) | |
 | `Layername` | String | (Listed in the interface's member index; not individually fetched this pass) | |
-| `ReverseDirection` | Boolean | (Listed in the interface's member index; not individually fetched this pass) | |
+| `ReverseDirection` | Boolean | `True` to reverse the balloons' item ordering, `False` to not; only valid when `ItemOrder` is `swBalloonItemNumbersOrder_e.swBalloonItemNumbers_OrderSequentially` (fetched sw-mio.2) | `swBalloonItemNumbersOrder_e` |
 | `FirstItem` | Integer/String | (Listed in the interface's member index; not individually fetched this pass) | |
 
 Source (property list and individually-verified rows above):
@@ -620,9 +632,227 @@ and each property's own page under
 `SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IAutoBalloonOptions~<Property>.html`
 (`Layout`, `Style`, `Size`, `CustomSize`, `UpperTextContent`, `LowerTextContent`,
 `UpperText`, `LowerText`, `ItemOrder`, `ItemNumberStart`, `ItemNumberIncrement`,
-`IgnoreMultiple`, `EditBalloons`, `EditBalloonOption` were each individually fetched
-and verified; the last five rows are members-index-only and marked unverified above
-per this dossier's honesty convention — they were not individually fetched this pass).
+`IgnoreMultiple`, `EditBalloons`, `EditBalloonOption`, `InsertMagneticLine`,
+`LeaderAttachmentToFaces`, `ReverseDirection` were each individually fetched and
+verified; `Layername`/`FirstItem` remain members-index-only and marked unverified
+above per this dossier's honesty convention — not individually fetched this pass,
+and not consumed by any sw-mio.2 tool).
+
+**Gotchas (sw-mio.2 addendum):**
+- `ReverseDirection` only has an effect when `ItemOrder` is left at (or explicitly
+  set to) `swBalloonItemNumbers_OrderSequentially` — `auto_balloon_view` does not
+  expose `ItemOrder` as its own parameter, so `reverse_direction` relies on that
+  being SOLIDWORKS' own default. Unverified whether the document default is always
+  sequential; not independently confirmed this pass.
+- `InsertMagneticLine`'s page states it is "only valid when Layout is not ...
+  Circle", but does not say whether passing `True` together with a circular layout
+  is silently ignored or actively rejected — `auto_balloon_view` sets it through
+  as given rather than guessing which.
+
+### IDrawingDoc::CreateAutoBalloonOptions
+
+- **Interface:** IDrawingDoc
+- **Method:** CreateAutoBalloonOptions
+- **Minimum SW version:** SOLIDWORKS 2012 FCS, Revision Number 20.0
+
+**Signature:**
+
+```vb
+Function CreateAutoBalloonOptions() As AutoBalloonOptions
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| (none) | | | | | |
+
+**Returns:** `IAutoBalloonOptions` — a fresh options object, its properties left at
+SOLIDWORKS' own defaults until the caller sets them (see the property table above).
+
+**Prior selection required:** None for this call itself; the page's own Remarks
+recipe is: (1) select one or more views or sheets, (2) call this method, (3) set
+properties on the returned object, (4) pass it to `IDrawingDoc::AutoBalloon5`.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IDrawingDoc~CreateAutoBalloonOptions.html
+
+**status:** verified
+
+**Gotchas:**
+- Confirms `AutoBalloon5`'s own recipe order verbatim: select first, *then* create
+  the options object — the options object itself carries no target view/sheet, only
+  cosmetic/numbering settings, so selection state at the time `AutoBalloon5` is
+  actually called is what determines what gets ballooned.
+- See also `IModelDocExtension::CreateBalloonOptions` (the single-balloon
+  `IBalloonOptions` counterpart, used by `InsertBOMBalloon2` above) and
+  `IModelDocExtension::CreateStackedBalloonOptions` (out of scope for this dossier).
+
+### INote::IsBomBalloon
+
+- **Interface:** INote
+- **Method:** IsBomBalloon
+- **Minimum SW version:** SOLIDWORKS 2001 FCS, Revision Number 9.0
+
+**Signature:**
+
+```vb
+Function IsBomBalloon() As System.Boolean
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| (none) | | | | | |
+
+**Returns:** `Boolean` — `True` if this note has a BOM balloon, `False` if not.
+
+**Prior selection required:** None — called directly on an already-held `INote`
+(e.g. one obtained by walking `IView::GetFirstNote`/`INote::GetNext`).
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.INote~IsBomBalloon.html
+
+**status:** verified
+
+**Gotchas:**
+- This is how `remove_balloons`/`renumber_balloons` (sw-mio.2) distinguish balloon
+  notes from ordinary notes while walking a view's `GetFirstNote`/`GetNext` chain —
+  the same enumeration `list_notes` already uses, filtered to `IsBomBalloon() = True`.
+
+### INote::GetBomBalloonTextStyle
+
+- **Interface:** INote
+- **Method:** GetBomBalloonTextStyle
+- **Minimum SW version:** SOLIDWORKS 2001 FCS, Revision Number 9.0
+
+**Signature:**
+
+```vb
+Function GetBomBalloonTextStyle( _
+   ByVal WhichOne As System.Boolean _
+) As System.Integer
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| WhichOne | Boolean | n/a | Yes | `True` for the upper text's style, `False` for the lower text's style | |
+
+**Returns:** `Integer` — the text style, per the page's own wording "as defined in
+`swDetailingNoteTextContent_e`" (see Gotchas re: this vs. `swBalloonTextContent_e`).
+
+**Prior selection required:** None — called directly on an already-held `INote`.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.INote~GetBomBalloonTextStyle.html
+
+**status:** verified
+
+**Gotchas:**
+- `renumber_balloons` (sw-mio.2) reads this (with `WhichOne=False`, the lower text)
+  before calling `SetBomBalloonText`, so a split-circle balloon's lower text/style
+  survives a renumber untouched instead of being clobbered by an empty default.
+- The page names the governing enum `swDetailingNoteTextContent_e`, while
+  `InsertBOMBalloon`'s own page (above) names `UpperTextStyle`/`LowerTextStyle` as
+  `swBalloonTextContent_e`. Not independently resolved whether these are two names
+  for the same enum or genuinely distinct — this dossier's existing
+  `SwBalloonTextContent`/`swBalloonTextContent_e` values are used throughout, since
+  that is the name every other balloon-text-style parameter in this file documents.
+
+### INote::GetBomBalloonText
+
+- **Interface:** INote
+- **Method:** GetBomBalloonText
+- **Minimum SW version:** SOLIDWORKS 2001 FCS, Revision Number 9.0
+
+**Signature:**
+
+```vb
+Function GetBomBalloonText( _
+   ByVal WhichOne As System.Boolean _
+) As System.String
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| WhichOne | Boolean | n/a | Yes | `True` for the upper text, `False` for the lower text | |
+
+**Returns:** `String` — the balloon text.
+
+**Prior selection required:** None — called directly on an already-held `INote`.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.INote~GetBomBalloonText.html
+
+**status:** verified
+
+**Gotchas:**
+- `renumber_balloons` (sw-mio.2) reads this (with `WhichOne=False`) alongside
+  `GetBomBalloonTextStyle` to preserve a split-circle balloon's lower text across a
+  renumber call.
+
+### INote::SetBomBalloonText
+
+- **Interface:** INote
+- **Method:** SetBomBalloonText
+- **Minimum SW version:** SOLIDWORKS 2001 FCS, Revision Number 9.0
+
+**Signature:**
+
+```vb
+Function SetBomBalloonText( _
+   ByVal UpperTextStyle As System.Integer, _
+   ByVal UpperText As System.String, _
+   ByVal LowerTextStyle As System.Integer, _
+   ByVal LowerText As System.String _
+) As System.Boolean
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| UpperTextStyle | Integer | n/a | Yes | Style for the upper text | `swDetailingNoteTextContent_e` (see Gotchas) |
+| UpperText | String | n/a | Yes | Upper text | |
+| LowerTextStyle | Integer | n/a | Yes | Style for the lower text | `swDetailingNoteTextContent_e` (see Gotchas) |
+| LowerText | String | n/a | Yes | Lower text | |
+
+**Returns:** `Boolean` — `True` if successfully set, `False` if not. All 4 parameters
+are required on every call — there is no "leave the lower text alone" sentinel, per
+the page's own Parameters list (see Gotchas for how `renumber_balloons` avoids
+clobbering the lower text as a result).
+
+**Prior selection required:** None — called directly on an already-held `INote`.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.INote~SetBomBalloonText.html
+
+**status:** verified
+
+**Gotchas:**
+- **Remarks (quoted): "If the upper- or lower-text style is `swBalloonTextQuantity`
+  or `swBalloonTextItemNumber`, then SOLIDWORKS ignores the specified upper or lower
+  text."** This directly blocks the naive reading of "renumber a balloon" as "call
+  `SetBomBalloonText` with `UpperTextStyle=swBalloonTextItemNumber` and the new
+  number as `UpperText`" — SOLIDWORKS would silently ignore that text and keep
+  computing the item number itself from BOM/selection order, exactly the
+  non-determinism `renumber_balloons` exists to eliminate. `renumber_balloons`
+  (sw-mio.2) therefore sets `UpperTextStyle=swBalloonTextCustom` with the target
+  number as a literal string in `UpperText` — a deliberate, documented-by-Remarks
+  choice, not a guess. This does decouple the balloon's displayed number from the
+  live BOM item order going forward (it becomes a static custom label); the
+  dossier's existing note on `IBomFeature::KeepCurrentItemNumbers`/
+  `SequenceStartNumber` (see the "BOM tables" section above) remains the closest
+  real API surface for driving numbering from the BOM feature itself instead.
+- Since all 4 parameters are required on every call, `renumber_balloons` reads the
+  balloon's *current* `LowerTextStyle`/`LowerText` via `GetBomBalloonTextStyle`/
+  `GetBomBalloonText` first and passes them straight through unchanged, so a
+  split-circle balloon's lower half survives a renumber pass.
 
 ## Hole tables
 
