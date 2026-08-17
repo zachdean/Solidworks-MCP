@@ -73,6 +73,10 @@ EXPECTED_TOOL_NAMES = {
     "insert_section_view",
     "insert_detail_view",
     "insert_broken_out_section",
+    "insert_break_view",
+    "remove_break_view",
+    "add_crop_view",
+    "remove_crop_view",
     "list_views",
     # Drawing View Placement, Alignment, Display, and Deletion Tools
     "move_view",

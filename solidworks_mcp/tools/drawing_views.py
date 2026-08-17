@@ -3,7 +3,8 @@ Drawing View Creation & Discovery Tools
 -----------------------------------------
 insert_model_view, insert_standard_3_view, insert_projected_view,
 insert_predefined_views, insert_auxiliary_view, insert_section_view,
-insert_detail_view, insert_broken_out_section, list_views.
+insert_detail_view, insert_broken_out_section, insert_break_view,
+remove_break_view, add_crop_view, remove_crop_view, list_views.
 
 Backed by `DrawingOperations` (solidworks_mcp/automation/drawings.py), per
 docs/api/02-views.md.
@@ -478,6 +479,160 @@ def insert_broken_out_section(arguments: dict) -> Dict:
         arguments.get("depth_reference"),
         arguments.get("preview", False),
     )
+
+
+@tool(
+    name="insert_break_view",
+    description=(
+        "Insert a break into an existing drawing view via IView::"
+        "InsertBreak3 followed by IDrawingDoc::BreakView (requested as "
+        "IDrawingDoc::InsertBreak, which does not exist -- the parameterized "
+        "call lives on IView, not IDrawingDoc). InsertBreak3 only creates "
+        "the break lines; BreakView (called on the selected view) is what "
+        "actually applies/displays the break. position1/position2 are in "
+        "the view's coordinate space (a Y value if orientation is "
+        "horizontal, an X value if vertical). orientation is vertical "
+        "(default) or horizontal -- anything else fails before any COM "
+        "call. gap sets IView::BreakLineGap (a separate property, not an "
+        "InsertBreak3 parameter); omit to leave the existing gap untouched. "
+        "style is straight/zigzag (default)/curve/small_zigzag/jagged, "
+        "mapped to swBreakLineStyle_e -- an unknown value fails listing the "
+        "valid values. Returns the resulting break count."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "view_name": {
+                "type": "string",
+                "description": "Name of the existing drawing view to break (see list_views)",
+            },
+            "position1": {
+                "type": "number",
+                "description": "Location of the first break line, in the view's coordinate space, in set_units' unit",
+            },
+            "position2": {
+                "type": "number",
+                "description": "Location of the second break line, in the view's coordinate space, in set_units' unit",
+            },
+            "orientation": {
+                "type": "string", "default": "vertical",
+                "description": "vertical (default) or horizontal (case-insensitive)",
+            },
+            "gap": {
+                "type": "number",
+                "description": "Break line gap, in set_units' unit. Omit to leave the existing gap unchanged.",
+            },
+            "style": {
+                "type": "string", "default": "zigzag",
+                "description": "straight, zigzag (default), curve, small_zigzag, or jagged (case-insensitive)",
+            },
+        },
+        "required": ["view_name", "position1", "position2"],
+    },
+)
+def insert_break_view(arguments: dict) -> Dict:
+    return sw_automation.insert_break_view(
+        arguments.get("view_name", ""),
+        arguments.get("position1", 0),
+        arguments.get("position2", 0),
+        arguments.get("orientation", "vertical"),
+        arguments.get("gap"),
+        arguments.get("style", "zigzag"),
+    )
+
+
+@tool(
+    name="remove_break_view",
+    description=(
+        "Remove all breaks from a drawing view via select + IDrawingDoc::"
+        "UnBreakView -- there is no dedicated per-break removal call; "
+        "UnBreakView acts on whichever view is currently selected. "
+        "Verifies via IView::IsBroken() afterward and fails if the view "
+        "still reports broken."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "view_name": {
+                "type": "string",
+                "description": "Name of the existing drawing view to unbreak (see list_views)",
+            },
+        },
+        "required": ["view_name"],
+    },
+)
+def remove_break_view(arguments: dict) -> Dict:
+    return sw_automation.remove_break_view(arguments.get("view_name", ""))
+
+
+@tool(
+    name="add_crop_view",
+    description=(
+        "Crop an existing drawing view to a closed sketch profile via "
+        "IView::Crop2 (requested as IView::CropView, which does not exist). "
+        "Owns the whole sequence: activates view_name, sketches "
+        "profile_points as a closed loop of line segments (auto-closed -- "
+        "the last point connects back to the first), selects them, crops. "
+        "Fails before any COM call if profile_points has fewer than 3 (or "
+        "fewer than 3 distinct) points. Fails without sketching if the view "
+        "is already cropped -- crop a view only once; call remove_crop_view "
+        "first to re-crop. On any failure after the profile is sketched, it "
+        "is deleted so no stray construction sketch is left on the sheet."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "view_name": {
+                "type": "string",
+                "description": "Name of the existing drawing view to crop (see list_views)",
+            },
+            "profile_points": {
+                "type": "array",
+                "description": (
+                    "3+ points [x, y] (or {'x':.., 'y':..}) in the view's "
+                    "coordinate space, in set_units' unit -- the closed "
+                    "profile boundary (auto-closed; a pre-closed chain is "
+                    "also accepted)."
+                ),
+                "items": {"type": "object"},
+                "minItems": 3,
+            },
+        },
+        "required": ["view_name", "profile_points"],
+    },
+)
+def add_crop_view(arguments: dict) -> Dict:
+    return sw_automation.add_crop_view(
+        arguments.get("view_name", ""),
+        arguments.get("profile_points", []),
+    )
+
+
+@tool(
+    name="remove_crop_view",
+    description=(
+        "Remove a view's crop via select + ISldWorks::RunCommand"
+        "(swCommands_Tools_Crop_Delete) (requested as IView::RemoveCropView, "
+        "which does not exist and has no dedicated API equivalent -- crop "
+        "removal is documented only as a right-click UI action; this fires "
+        "the same command ID that action fires). Fails without calling "
+        "RunCommand if the view is not currently cropped. Verifies via "
+        "IView::IsCropped() afterward and fails if the view still reports "
+        "cropped."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "view_name": {
+                "type": "string",
+                "description": "Name of the existing, cropped drawing view (see list_views)",
+            },
+        },
+        "required": ["view_name"],
+    },
+)
+def remove_crop_view(arguments: dict) -> Dict:
+    return sw_automation.remove_crop_view(arguments.get("view_name", ""))
 
 
 @tool(

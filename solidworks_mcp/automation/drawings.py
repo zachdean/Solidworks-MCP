@@ -28,8 +28,12 @@ from ..constants_drawing import (
     SwAutodimScheme,
     SwAutodimStatus,
     SwAutodimVerticalPlacement,
+    SwBreakLineOrientation,
+    SwBreakLineStyle,
+    SwCommands,
     SwCreateOrdDimError,
     SwCreateSectionViewAtOptions,
+    SwCropViewErrors,
     SwCustomInfoType,
     SwCustomPropertyAddOption,
     SwDatumDisplayType,
@@ -653,6 +657,26 @@ _DETAIL_VIEW_SHOWTYPE = {
     "circle": int(SwDetCircleShowType.swDetCircleCIRCLE),
     "profile": int(SwDetCircleShowType.swDetCirclePROFILE),
     "none": int(SwDetCircleShowType.swDetCircleDONTSHOW),
+}
+
+# `insert_break_view`'s `orientation` -> `swBreakLineOrientation_e`, per
+# docs/api/02-views.md's `IView::InsertBreak3` and `swBreakLineOrientation_e`
+# records (requested as `swBreakDir_e`, which does not exist).
+_BREAK_LINE_ORIENTATION = {
+    "vertical": int(SwBreakLineOrientation.swBreakLineVertical),
+    "horizontal": int(SwBreakLineOrientation.swBreakLineHorizontal),
+}
+
+# `insert_break_view`'s `style` -> `swBreakLineStyle_e`'s `Style` parameter,
+# per docs/api/02-views.md's `IView::InsertBreak3` and `swBreakLineStyle_e`
+# records. `"zigzag"` is this tool's own default, matching the task's
+# Requirements.
+_BREAK_LINE_STYLE = {
+    "straight": int(SwBreakLineStyle.swBreakLine_Straight),
+    "zigzag": int(SwBreakLineStyle.swBreakLine_ZigZag),
+    "curve": int(SwBreakLineStyle.swBreakLine_Curve),
+    "small_zigzag": int(SwBreakLineStyle.swBreakLine_SmallZigZag),
+    "jagged": int(SwBreakLineStyle.swBreakLine_Jagged),
 }
 
 # `insert_model_items`'s `types` -> `swInsertAnnotation_e` bit(s), per
@@ -4916,7 +4940,8 @@ class DrawingOperations:
 
     def _delete_sketch_geometry(self, doc, points: List[Tuple[float, float]]) -> None:
         """Best-effort cleanup of construction sketch geometry left behind by a
-        failed `insert_detail_view`/`insert_broken_out_section` call, via
+        failed `insert_detail_view`/`insert_broken_out_section`/`add_crop_view`
+        call, via
         `IModelDocExtension::DeleteSelection2` (docs/api/02-views.md's own
         record, reused here per that record's sw-8ww.4 addendum) -- selects
         every point in `points` (view-local space, caller's default unit) as
@@ -5145,8 +5170,8 @@ class DrawingOperations:
     def _normalize_profile_points(
         profile_points: Any,
     ) -> Tuple[Optional[List[Tuple[float, float]]], Optional[str]]:
-        """Validate and normalize `insert_broken_out_section`'s
-        `profile_points` into a list of `(x, y)` float tuples, in the
+        """Validate and normalize `insert_broken_out_section`'s and
+        `add_crop_view`'s `profile_points` into a list of `(x, y)` float tuples, in the
         caller's default unit (not yet converted to meters -- that happens
         per-segment once a parent view is confirmed to exist).
 
@@ -5433,6 +5458,426 @@ class DrawingOperations:
             True, f"Inserted broken-out section on {parent_view_name!r}",
             SwErrors.swSuccess, data,
         )
+
+    # ========================================================================
+    # Break and crop views (sw-8ww.5)
+    # ========================================================================
+
+    def insert_break_view(
+        self, view_name: str, position1: float, position2: float,
+        orientation: str = "vertical", gap: Optional[float] = None,
+        style: str = "zigzag",
+    ) -> Dict:
+        """
+        Insert a break into an existing drawing view via `IView::InsertBreak3`
+        followed by `IDrawingDoc::BreakView` -- requested as `IDrawingDoc::
+        InsertBreak`, which does not exist (docs/api/02-views.md's
+        `InsertBreak3` record: the parameterized, position-controlling call
+        lives on `IView`, not `IDrawingDoc`). `InsertBreak3` only creates the
+        break lines; `BreakView` -- called on the selected view, per the
+        dossier's `BreakView` record added for this issue -- is what actually
+        applies/displays the break.
+
+        Args:
+            view_name: Name of the existing drawing view to break
+                (`IView::GetName2`, e.g. from `list_views`). Validated
+                against the sheet's actual views first (`swInvalidInput`
+                listing the real names on a miss), then activated via
+                `IDrawingDoc::ActivateView` before the break lines are
+                inserted, so `position1`/`position2` land in that view's own
+                coordinate space.
+            position1, position2: Location of the two break lines, in the
+                view's coordinate space, in the caller's default unit
+                (`set_units`) -- `InsertBreak3`'s own `Position1`/`Position2`
+                (a Y value if `orientation` is horizontal, an X value if
+                vertical, per the dossier's axis-convention note).
+            orientation: `"vertical"` (default) or `"horizontal"` --
+                `InsertBreak3`'s `Orientation` (`swBreakLineOrientation_e`).
+                Anything else fails with `swInvalidInput` before any COM
+                call.
+            gap: Break line gap, in the caller's default unit -- sets
+                `IView::BreakLineGap`, a separate get/set property, not an
+                `InsertBreak3` parameter (per the dossier's Gotchas). `None`
+                (default) leaves the view's existing gap untouched.
+            style: Break line cut style -- one of `"straight"`, `"zigzag"`
+                (default), `"curve"`, `"small_zigzag"`, `"jagged"`, mapped to
+                `swBreakLineStyle_e`. An unrecognized value fails with
+                `swInvalidInput` before any COM call, listing the valid
+                values.
+
+        Returns:
+            Result dict. On success, `data["break_count"]` is the view's
+            resulting break count, read back via `IView::GetBreakLineCount2`
+            (best-effort -- a read failure doesn't fail the whole call, since
+            the break itself was already successfully applied by that
+            point).
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        data = {
+            "view_name": view_name, "position1": position1, "position2": position2,
+            "orientation": orientation, "gap": gap, "style": style,
+        }
+
+        orientation_key = (orientation or "").strip().lower()
+        orientation_int = _BREAK_LINE_ORIENTATION.get(orientation_key)
+        if orientation_int is None:
+            return self._result(
+                False,
+                f"Unknown orientation {orientation!r}; expected one of "
+                f"{sorted(_BREAK_LINE_ORIENTATION)!r}",
+                SwErrors.swInvalidInput, data,
+            )
+
+        style_key = (style or "").strip().lower()
+        style_int = _BREAK_LINE_STYLE.get(style_key)
+        if style_int is None:
+            return self._result(
+                False,
+                f"Unknown style {style!r}; expected one of {sorted(_BREAK_LINE_STYLE)!r}",
+                SwErrors.swInvalidInput, data,
+            )
+
+        view, available_views, find_err = self._find_view_by_name(doc, view_name, None)
+        if find_err:
+            return find_err
+        if view is None:
+            return self._result(
+                False,
+                f"Unknown view {view_name!r}; available views: {available_views!r}",
+                SwErrors.swInvalidInput,
+                {**data, "available_views": available_views},
+            )
+
+        try:
+            activated = doc.ActivateView(view_name)
+        except Exception as e:
+            logger.error(f"insert_break_view activate view error: {e}")
+            return self._result(False, f"Activate view error: {e}", SwErrors.swFeatureError, data)
+        if not activated:
+            return self._result(
+                False, f"Failed to activate view {view_name!r}",
+                SwErrors.swFeatureError, data,
+            )
+
+        pos1_m = self._units.to_meters(position1)
+        pos2_m = self._units.to_meters(position2)
+
+        try:
+            inserted = view.InsertBreak3(orientation_int, pos1_m, pos2_m, style_int, 1, False)
+        except Exception as e:
+            logger.error(f"insert_break_view InsertBreak3 error: {e}")
+            return self._result(False, f"Insert break error: {e}", SwErrors.swFeatureError, data)
+        if inserted is None:
+            return self._result(
+                False, f"Failed to insert break lines on {view_name!r}",
+                SwErrors.swFeatureError, data,
+            )
+
+        if gap is not None:
+            try:
+                view.BreakLineGap = self._units.to_meters(gap)
+            except Exception as e:
+                logger.error(f"insert_break_view BreakLineGap error: {e}")
+                return self._result(
+                    False,
+                    f"Inserted break lines on {view_name!r} but failed to set gap: {e}",
+                    SwErrors.swFeatureError, data,
+                )
+
+        with self.selected(view_name, "DRAWINGVIEW", 0, 0, 0) as sel:
+            if not sel["success"]:
+                return self._result(
+                    False,
+                    f"Inserted break lines on {view_name!r} but could not select the "
+                    f"view to apply the break: {sel['message']}",
+                    SwErrors.swSelectionError, data,
+                )
+            try:
+                doc.BreakView()
+            except Exception as e:
+                logger.error(f"insert_break_view BreakView error: {e}")
+                return self._result(
+                    False, f"Inserted break lines on {view_name!r} but BreakView failed: {e}",
+                    SwErrors.swFeatureError, data,
+                )
+
+        try:
+            count = view.GetBreakLineCount2(0)
+        except Exception as e:
+            logger.debug(f"insert_break_view GetBreakLineCount2 read failed: {e}")
+            count = None
+        data["break_count"] = (
+            int(count) if isinstance(count, (int, float)) and not isinstance(count, bool) else count
+        )
+
+        return self._result(True, f"Inserted break on {view_name!r}", SwErrors.swSuccess, data)
+
+    def remove_break_view(self, view_name: str) -> Dict:
+        """
+        Remove all breaks from a drawing view via select + `IDrawingDoc::
+        UnBreakView` -- there is no dedicated "RemoveBreak"/per-break
+        removal call; `UnBreakView` acts on whichever view is currently
+        selected (docs/api/02-views.md's `UnBreakView` record -- note it
+        lives on `IDrawingDoc`, not `IView`, unlike `InsertBreak3`).
+
+        Args:
+            view_name: Name of the existing drawing view to unbreak
+                (`IView::GetName2`, e.g. from `list_views`). Validated
+                against the sheet's actual views first (`swInvalidInput`
+                listing the real names on a miss).
+
+        Returns:
+            Result dict. `UnBreakView` is a bare `Sub` with no return value,
+            so this verifies via `IView::IsBroken()` afterward (per the
+            dossier's Gotchas: its thin help page doesn't itself confirm the
+            break state actually cleared) and fails with `swFeatureError` if
+            the view still reports broken.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        data = {"view_name": view_name}
+
+        view, available_views, find_err = self._find_view_by_name(doc, view_name, None)
+        if find_err:
+            return find_err
+        if view is None:
+            return self._result(
+                False,
+                f"Unknown view {view_name!r}; available views: {available_views!r}",
+                SwErrors.swInvalidInput,
+                {**data, "available_views": available_views},
+            )
+
+        with self.selected(view_name, "DRAWINGVIEW", 0, 0, 0) as sel:
+            if not sel["success"]:
+                return sel
+            try:
+                doc.UnBreakView()
+            except Exception as e:
+                logger.error(f"remove_break_view UnBreakView error: {e}")
+                return self._result(False, f"Remove break error: {e}", SwErrors.swFeatureError, data)
+
+        if self._read_prop(view, "IsBroken"):
+            return self._result(
+                False, f"UnBreakView did not clear the break state on {view_name!r}",
+                SwErrors.swFeatureError, data,
+            )
+
+        return self._result(True, f"Removed break from {view_name!r}", SwErrors.swSuccess, data)
+
+    def add_crop_view(self, view_name: str, profile_points: List[Any]) -> Dict:
+        """
+        Crop an existing drawing view to a closed sketch profile via
+        `IView::Crop2` -- requested as `IView::CropView`, which does not
+        exist (docs/api/02-views.md's `Crop2` record: `Crop2` is the current
+        overload, `Crop` its obsolete predecessor). Owns the whole sequence
+        -- activate the view, sketch the closed profile as line segments,
+        select them, crop -- the same shape `insert_broken_out_section` uses
+        for its own prior-selection requirement.
+
+        Args:
+            view_name: Name of the existing drawing view to crop
+                (`IView::GetName2`, e.g. from `list_views`). Validated
+                against the sheet's actual views first (`swInvalidInput`
+                listing the real names on a miss). Rejected with
+                `swFeatureError` -- before any sketch geometry is created --
+                if the view is already cropped (`IView::IsCropped()`), so a
+                second crop never stacks on top of the first: `Crop2`'s own
+                `swCropViewErrors_e` return code has no "already cropped"
+                member, so this is checked proactively rather than relying
+                on the COM call to catch it.
+            profile_points: 3+ `[x, y]` (or `{"x":.., "y":..}`) pairs, in the
+                view's coordinate space, in the caller's default unit
+                (`set_units`) -- the closed profile boundary, built from `N`
+                `ISketchManager::CreateLine` segments, auto-closed the same
+                way `insert_broken_out_section` closes its own loop (an
+                extra segment connects the last point back to the first;
+                fewer than 3 points, or fewer than 3 distinct points, fails
+                with `swInvalidInput` before any COM call).
+
+        Returns:
+            Result dict. On success, `data["view_name"]` is `view_name` and
+            `data["crop_status"]` is `Crop2`'s own `swCropViewErrors_e`
+            return code (always `1`/`swCropViewErrors_NoError` on success --
+            see the dossier's return-code trap: `0` is `Unknown`, not
+            success). On any failure after the profile was successfully
+            sketched (selection failure, `Crop2` itself raising or returning
+            a non-success code), whatever segments were sketched are deleted
+            via `_delete_sketch_geometry` before the error is returned, so a
+            failed call never leaves a stray open sketch on the sheet.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        data = {"view_name": view_name}
+
+        points, point_err = self._normalize_profile_points(profile_points)
+        if point_err:
+            return self._result(False, point_err, SwErrors.swInvalidInput, data)
+
+        view, available_views, find_err = self._find_view_by_name(doc, view_name, None)
+        if find_err:
+            return find_err
+        if view is None:
+            return self._result(
+                False,
+                f"Unknown view {view_name!r}; available views: {available_views!r}",
+                SwErrors.swInvalidInput,
+                {**data, "available_views": available_views},
+            )
+
+        if self._read_prop(view, "IsCropped"):
+            return self._result(
+                False,
+                f"View {view_name!r} is already cropped -- remove the existing crop "
+                "first (remove_crop_view) rather than stacking a new one",
+                SwErrors.swFeatureError, data,
+            )
+
+        try:
+            activated = doc.ActivateView(view_name)
+        except Exception as e:
+            logger.error(f"add_crop_view activate view error: {e}")
+            return self._result(False, f"Activate view error: {e}", SwErrors.swFeatureError, data)
+        if not activated:
+            return self._result(
+                False, f"Failed to activate view {view_name!r}",
+                SwErrors.swFeatureError, data,
+            )
+
+        # Auto-close: an extra segment connects the last point back to the first.
+        loop_points = list(points) + [points[0]]
+
+        segment_midpoints: List[Tuple[float, float]] = []
+        try:
+            for (x1, y1), (x2, y2) in zip(loop_points, loop_points[1:]):
+                x1_m, y1_m = self._units.to_meters(x1), self._units.to_meters(y1)
+                x2_m, y2_m = self._units.to_meters(x2), self._units.to_meters(y2)
+                segment = doc.SketchManager.CreateLine(x1_m, y1_m, 0.0, x2_m, y2_m, 0.0)
+                if segment is None:
+                    self._delete_sketch_geometry(doc, segment_midpoints)
+                    return self._result(
+                        False,
+                        "Failed to sketch profile segment -- ensure the view "
+                        f"{view_name!r} supports a crop",
+                        SwErrors.swSketchError, data,
+                    )
+                segment_midpoints.append(((x1 + x2) / 2.0, (y1 + y2) / 2.0))
+        except Exception as e:
+            logger.error(f"add_crop_view sketch error: {e}")
+            self._delete_sketch_geometry(doc, segment_midpoints)
+            return self._result(False, f"Sketch profile error: {e}", SwErrors.swSketchError, data)
+
+        with ExitStack() as stack:
+            for i, (mx, my) in enumerate(segment_midpoints):
+                sel = stack.enter_context(
+                    self.selected("", "SKETCHSEGMENT", mx, my, 0, append=(i > 0), mark=i)
+                )
+                if not sel["success"]:
+                    self._delete_sketch_geometry(doc, segment_midpoints)
+                    return sel
+
+            try:
+                status = view.Crop2(False, False, 1)
+            except Exception as e:
+                logger.error(f"add_crop_view Crop2 error: {e}")
+                self._delete_sketch_geometry(doc, segment_midpoints)
+                return self._result(False, f"Crop view error: {e}", SwErrors.swFeatureError, data)
+
+        status_int = (
+            int(status) if isinstance(status, (int, float)) and not isinstance(status, bool) else None
+        )
+        if status_int != int(SwCropViewErrors.swCropViewErrors_NoError):
+            self._delete_sketch_geometry(doc, segment_midpoints)
+            try:
+                status_name = SwCropViewErrors(status_int).name
+            except ValueError:
+                status_name = repr(status)
+            return self._result(
+                False, f"Failed to crop view {view_name!r} -- Crop2 returned {status_name}",
+                SwErrors.swFeatureError, data,
+            )
+
+        data["crop_status"] = status_int
+        return self._result(True, f"Cropped view {view_name!r}", SwErrors.swSuccess, data)
+
+    def remove_crop_view(self, view_name: str) -> Dict:
+        """
+        Remove a view's crop via select + `ISldWorks::RunCommand(swCommands_
+        Tools_Crop_Delete)` -- requested as `IView::RemoveCropView`, which
+        does not exist and has no dedicated API equivalent at all
+        (docs/api/02-views.md's `RunCommand` record: crop removal is
+        documented only as a right-click UI action; this fires the same
+        command ID that action fires -- a workaround, not a purpose-built
+        API call).
+
+        Args:
+            view_name: Name of the existing, cropped drawing view
+                (`IView::GetName2`, e.g. from `list_views`). Validated
+                against the sheet's actual views first (`swInvalidInput`
+                listing the real names on a miss). Rejected with
+                `swFeatureError` -- before the `RunCommand` call -- if the
+                view is not currently cropped (`IView::IsCropped()`), the
+                precondition `swCommands_Tools_Crop_Delete` itself documents
+                ("valid for a selected Crop View in a drawing").
+
+        Returns:
+            Result dict. `RunCommand` returns only a bare boolean with no
+            structured error info (per the dossier), so this verifies via
+            `IView::IsCropped()` afterward and fails with `swFeatureError`
+            if the view still reports cropped.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        data = {"view_name": view_name}
+
+        view, available_views, find_err = self._find_view_by_name(doc, view_name, None)
+        if find_err:
+            return find_err
+        if view is None:
+            return self._result(
+                False,
+                f"Unknown view {view_name!r}; available views: {available_views!r}",
+                SwErrors.swInvalidInput,
+                {**data, "available_views": available_views},
+            )
+
+        if not self._read_prop(view, "IsCropped"):
+            return self._result(
+                False, f"View {view_name!r} is not cropped -- nothing to remove",
+                SwErrors.swFeatureError, data,
+            )
+
+        with self.selected(view_name, "DRAWINGVIEW", 0, 0, 0) as sel:
+            if not sel["success"]:
+                return sel
+            try:
+                ran = self.app.RunCommand(int(SwCommands.swCommands_Tools_Crop_Delete), "")
+            except Exception as e:
+                logger.error(f"remove_crop_view RunCommand error: {e}")
+                return self._result(False, f"Remove crop error: {e}", SwErrors.swFeatureError, data)
+
+        if not ran:
+            return self._result(
+                False, f"RunCommand reported failure removing the crop on {view_name!r}",
+                SwErrors.swFeatureError, data,
+            )
+
+        if self._read_prop(view, "IsCropped"):
+            return self._result(
+                False, f"Crop was not removed from {view_name!r}",
+                SwErrors.swFeatureError, data,
+            )
+
+        return self._result(True, f"Removed crop from {view_name!r}", SwErrors.swSuccess, data)
 
     # ========================================================================
     # View placement, alignment, display, and deletion (sw-8ww.6)

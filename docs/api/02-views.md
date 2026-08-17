@@ -1301,6 +1301,65 @@ implying break and crop states are mutually exclusive on the same view.
   presence and `IsBroken` for applied state; they can disagree.
 - Font/line style of the break lines is set separately via `IBreakLine::Style`.
 
+### IDrawingDoc::BreakView
+
+- **Interface:** IDrawingDoc
+- **Method:** BreakView
+- **Minimum SW version:** not stated on help page (no Availability section
+  present, consistent with its sibling methods
+  `InsertBreakHorizontal`/`InsertBreakVertical`/`UnBreakView` on the same
+  interface, none of which carry an Availability tag either)
+
+**Signature:**
+
+```vb
+Sub BreakView()
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| (none) | — | n/a | — | Takes no parameters | — |
+
+**Returns:** None (`Sub`, void). No error code or boolean success indicator
+is returned; failure mode is not documented.
+
+**Prior selection required:** Believed, by direct symmetry with
+`UnBreakView` (added for sw-8ww.5) -- both are zero-argument `Sub` members
+on `IDrawingDoc` with no Availability tag, and `UnBreakView`'s own help page
+explicitly documents "Removes a break in the selected drawing view." No
+independently fetchable source states the *selection* precondition for
+`BreakView` itself this directly (`help.solidworks.com` 403'd this specific
+page and the codestack/forum secondary sources checked for a worked example
+did not surface one either), so this is an inference from the matched-pair
+relationship, not a page-confirmed fact -- treat with the same caution as
+this dossier's other believed-but-not-independently-confirmed notes. Applied
+here as: select the target view (`IView::InsertBreak3` was already called on
+it directly, so it's the natural target) via `ISelectionMgr`/
+`IModelDocExtension::SelectByID2`, then call `BreakView()` on the active
+`IDrawingDoc`.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IDrawingDoc~BreakView.html (403 Forbidden on direct fetch, same WAF block noted throughout this dossier)
+- https://www.rimptec.com/rsolidworks/net/lehal/sw/IDrawingDoc.html (type-library mirror; confirms zero-argument, void-returning signature for both `breakView()` and `unBreakView()`)
+- This record's own `InsertBreak3` and `UnBreakView` entries above (cross-referenced remarks establishing the "creates lines, doesn't apply" / "matched Sub pair" relationships)
+
+**status:** unverified (signature arity/void-return confirmed via type-library
+mirror; the selection precondition is inferred by symmetry with `UnBreakView`,
+not independently page-confirmed)
+
+**Gotchas:**
+- **`InsertBreak3` only creates break lines; `BreakView()` is what actually
+  displays the view as broken** -- confirmed in `InsertBreak3`'s own Gotchas
+  above, restated here because it's the reason this method exists as a
+  separate call at all.
+- Because the selection precondition is inferred rather than confirmed, a
+  caller that skips selecting the view before calling `BreakView()` risks a
+  silent no-op (acting on whatever else happens to be selected, or nothing)
+  rather than a raised error -- the same risk `UnBreakView`'s own Gotchas
+  flag for that method.
+
 ### IView::GetBreakLineCount2
 
 - **Interface:** IView

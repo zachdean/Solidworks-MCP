@@ -440,6 +440,37 @@ class SwBreakLineOrientation(IntEnum):
     swBreakLineVertical = 2
 
 
+class SwCropViewErrors(IntEnum):
+    """Crop status returned by IView::Crop2 (swCropViewErrors_e).
+
+    Success is ``swCropViewErrors_NoError`` (1), NOT 0/falsy -- 0 is
+    ``swCropViewErrors_Unknown``, a distinct non-success value.
+
+    Source: docs/api/02-views.md (``IView::Crop2`` record and Enums section).
+    """
+
+    swCropViewErrors_Unknown = 0
+    swCropViewErrors_NoError = 1
+    swCropViewErrors_CannotCropDetailOrBrokenView = 2
+    swCropViewErrors_CannotUnfoldView = 3
+    swCropViewErrors_IncorrectProfile = 4
+
+
+class SwCommands(IntEnum):
+    """Curated subset of `swCommands_e` command IDs consumed via
+    ``ISldWorks::RunCommand``.
+
+    Only the member this dossier's crop-removal workaround needs is listed
+    here -- `swCommands_e` has hundreds of members and no accessible source
+    publishes the full list; add more as specific tools need them.
+
+    Source: docs/api/02-views.md (``ISldWorks::RunCommand`` record --
+    ``swCommands_Tools_Crop_Delete`` maps to "RMB menu > Crop View > Remove Crop").
+    """
+
+    swCommands_Tools_Crop_Delete = 1389
+
+
 class SwViewAlignment(IntEnum):
     """Alignment state returned by IView::GetAlignment (swViewAlignment_e).
 
