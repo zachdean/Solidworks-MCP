@@ -1,6 +1,6 @@
 ---
-interface: Multiple (ISldWorks, IModelDoc2, IModelDocExtension, IDrawingDoc, ICustomPropertyManager)
-min_methods: 16
+interface: Multiple (ISldWorks, IModelDoc2, IModelDocExtension, IDrawingDoc, ISheet, ICustomPropertyManager)
+min_methods: 17
 status: complete
 ---
 
@@ -685,6 +685,58 @@ Function GetCurrentSheet() As System.Object
 - Return type is `System.Object` and must be cast to `ISheet` by the caller (e.g. `CType(swDraw.GetCurrentSheet(), SldWorks.Sheet)`/`ISheet` depending on interop assembly) — same casting gotcha pattern as `GetSheetNames`.
 - An `IGetCurrentSheet` sibling method also exists on `IDrawingDoc` per the member index, presumably the interop-friendlier typed variant; not documented here since out of scope.
 - Returns whatever sheet is currently active in the UI/session — if the caller just created or activated a different sheet via `ActivateSheet`/`NewSheet4`, that call must complete (and, per SetupSheet's Remarks pattern elsewhere in this interface, sometimes a rebuild) before `GetCurrentSheet` reliably reflects the change.
+
+### ISheet::GetProperties2
+
+- **Interface:** ISheet
+- **Method:** GetProperties2
+- **Minimum SW version:** SOLIDWORKS 2016 FCS (Revision Number 24.0)
+
+Not part of the original sw-kzy epic's source research issue; added while building `list_sheets`/`get_active_sheet` (sw-kzy.1), which need a per-sheet scale/paper-size/projection-type/dimensions read and no other documented `IDrawingDoc`/`ISheet` member provides one in a single call.
+
+**Signature:**
+
+```vb
+Function GetProperties2() As System.Object
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| (none) | n/a | n/a | n/a | Method takes no arguments | |
+
+**Returns:** `Object` (a `Variant` array of eight `Double`s at the COM layer). Per the help page's Remarks, verbatim structure:
+
+```
+[ paperSize, templateIn, scale1, scale2, firstAngle, width, height, sameCustomProp ]
+```
+
+| Index | Name | Meaning |
+| --- | --- | --- |
+| 0 | paperSize | Paper size; a `Long`/Integer packed into a `Double`, per `swDwgPaperSizes_e` |
+| 1 | templateIn | Template index; a `Long`/Integer packed into a `Double`, per `swDwgTemplates_e` |
+| 2 | scale1 | Scale numerator |
+| 3 | scale2 | Scale denominator |
+| 4 | firstAngle | Boolean packed into a `Double`: `true` (`1.0`)/`1` if the sheet uses first-angle projection, `false` (`0.0`)/`0` if third-angle |
+| 5 | width | Paper width |
+| 6 | height | Paper height |
+| 7 | sameCustomProp | Boolean packed into a `Double`: `true` if the sheet's Sheet Properties dialog has "Same as sheet specified in Document Properties" selected, `false` if not |
+
+**Prior selection required:** None — called directly on an already-resolved `ISheet` reference (e.g. from `IDrawingDoc::GetCurrentSheet`/`Sheet`), same as `ISheet::GetViews` (docs/api/02-views.md).
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.ISheet~GetProperties2.html — fetched directly (the bare `WebFetch` tool 403s on every `help.solidworks.com` URL tried in this session, the same WAF behavior noted throughout this dossier's other records; a plain `curl` with a browser `User-Agent` header succeeded where the tool's own request signature didn't — worth remembering for future dossier work hitting the same wall). Page content confirmed authentic via its own embedded `helpContentData` JSON payload (title `"GetProperties2 Method (ISheet)"`), not a scraped mirror.
+- https://help.solidworks.com/2021/English/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.ISheet~GetProperties2.html — independently fetched via the same method; byte-identical `helpText` payload to the 2025 page (same eight-element array order, same "SOLIDWORKS 2016 FCS, Revision Number 24.0" Availability line), corroborating that this record hasn't changed across at least five SOLIDWORKS releases.
+
+**status:** verified
+
+**Gotchas:**
+- **Units of `width`/`height` are not stated on this page.** Unlike `NewSheet4`'s Width/Height (whose meters units this dossier corroborates via a worked VBA example), this page's Remarks give no unit for the two dimensions it returns. Treating them as meters here follows the API-wide convention documented in [`README.md`](README.md#units-convention) and the fact that they are the read-side counterpart of `NewSheet4`'s/`SetupSheet5`'s same-named, meters-denominated `Width`/`Height` parameters — but this specific page does not state it, so flag it as convention-inferred, not independently confirmed, if a caller's values look off by a unit-conversion factor.
+- **`sameCustomProp` (index 7) is unused by this issue's tools.** `list_sheets`/`get_active_sheet` (sw-kzy.1) read indices 0–6 only; index 7 reflects a Sheet Properties dialog checkbox state with no requested tool surface here.
+- The page's own "NOTES" section additionally states: to ensure a correct return value, the document must be open read-write or read-only — opening it view-only leaves "insufficient information available". Not independently verified against the fake-COM harness (no such distinction exists there); flagged here for a caller hitting unexpectedly-empty values against a real session.
+- `ISheet::GetSize` is called out on the same page ("See Also") as an alternative/companion for just the sheet's size and standard-size classification; not fetched independently for this dossier since `GetProperties2` alone covers every field `list_sheets`/`get_active_sheet` need.
+- Same `Object` → typed-array casting requirement as `GetSheetNames`/`GetCurrentSheet` elsewhere in this dossier — a real interop layer requires an explicit cast to `double[]`, not a direct index into the raw `Object`.
 
 ### IDrawingDoc sheet deletion (via selection — no direct DeleteSheet API)
 

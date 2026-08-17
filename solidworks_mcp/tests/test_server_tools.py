@@ -52,6 +52,11 @@ EXPECTED_TOOL_NAMES = {
     "export_edrawings",
     "get_custom_properties",
     "set_custom_properties",
+    # Drawing Sheet Management Tools
+    "add_sheet",
+    "activate_sheet",
+    "list_sheets",
+    "get_active_sheet",
     # Drawing View Creation & Discovery Tools
     "insert_model_view",
     "insert_standard_3_view",

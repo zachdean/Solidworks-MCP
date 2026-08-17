@@ -35,8 +35,10 @@ from ..constants_drawing import (
     SwDimensionTextParts,
     SwDimensionType,
     SwDisplayMode,
+    SwDrawingProjectionType,
     SwDrawingViewTypes,
     SwDwgPaperSizes,
+    SwDwgTemplates,
     SwDxfFormat,
     SwDxfMultisheet,
     SwEdrawingSaveAsOption,
@@ -77,6 +79,95 @@ _PAPER_SIZES = {
     "A1": (SwDwgPaperSizes.swDwgPaperA1size, None),
     "A0": (SwDwgPaperSizes.swDwgPaperA0size, None),
 }
+
+# Reverse of `_PAPER_SIZES`, keyed by the raw `swDwgPaperSizes_e` int code --
+# what `list_sheets`/`get_active_sheet` use to render `ISheet::GetProperties2`'s
+# `paperSize` element back into one of this tool layer's own short names.
+# Portrait variants get a "-vertical" suffix so the name round-trips through
+# `add_sheet`'s own `paper_size` argument only for the landscape half (that
+# tool has no separate orientation parameter -- see its docstring); a sheet
+# actually created in a portrait size still reports a distinguishable name
+# here rather than silently collapsing onto its landscape sibling's name.
+# `swDwgPapersUserDefined` (12) is `add_sheet`'s own "custom" spelling, not a
+# `_PAPER_SIZES` member (that dict only holds the eleven named sizes).
+_PAPER_SIZE_NAMES = {int(SwDwgPaperSizes.swDwgPapersUserDefined): "custom"}
+for _size_name, (_landscape, _portrait) in _PAPER_SIZES.items():
+    _PAPER_SIZE_NAMES[int(_landscape)] = _size_name
+    if _portrait is not None:
+        _PAPER_SIZE_NAMES[int(_portrait)] = f"{_size_name}-vertical"
+del _size_name, _landscape, _portrait
+
+
+def _paper_size_name(code: Any) -> Optional[str]:
+    """Readable `add_sheet`-style name for a `swDwgPaperSizes_e` code read
+    back off `ISheet::GetProperties2`, or `f"unknown paper size {code!r}"`
+    for anything `_PAPER_SIZE_NAMES` doesn't recognize -- `None` only when
+    `code` itself couldn't be read at all."""
+    if code is None:
+        return None
+    try:
+        code_int = int(code)
+    except (TypeError, ValueError):
+        return f"unknown paper size {code!r}"
+    return _PAPER_SIZE_NAMES.get(code_int, f"unknown paper size {code_int}")
+
+
+def _normalize_sheet_names(raw: Any) -> List[str]:
+    """`IDrawingDoc::GetSheetNames` returns a `Variant` array of strings at
+    the COM layer, but per docs/api/01-documents-and-sheets.md's Gotchas
+    that's a `System.Object` a caller must cast -- and in practice this
+    project has seen it arrive as a Python tuple/list, a bare single string
+    (some interop layers unwrap a one-element safearray), or `None` (a
+    brand-new drawing before any sheet exists, or a load failure). Normalize
+    all three shapes to a plain list of names so every sheet-management tool
+    can treat `GetSheetNames`'s result uniformly."""
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return [raw]
+    if isinstance(raw, (list, tuple)):
+        return list(raw)
+    return []
+
+
+# `IDrawingDoc::NewSheet4`'s positional signature, in the exact order
+# documented in docs/api/01-documents-and-sheets.md: Name, PaperSize,
+# TemplateIn, Scale1, Scale2, FirstAngle, TemplateName, Width, Height,
+# PropertyViewName, ZoneLeftMargin, ZoneRightMargin, ZoneTopMargin,
+# ZoneBottomMargin, ZoneRow, ZoneCol. 16 positional parameters -- ComSignature
+# per this issue's working agreement (>6 params).
+#
+# `add_sheet` has no zone-grid parameters of its own (not requested by this
+# issue's acceptance criteria), so the six Zone*/ZoneRow/ZoneCol arguments are
+# always bound to their "no zone grid" default here. Per the dossier's own
+# Gotchas, the official worked example never demonstrates a zero-zone call
+# and how to fully suppress the grid is explicitly unverified -- `0` for
+# every margin and for both ZoneRow/ZoneCol is this wrapper's own convention
+# for "caller didn't ask for zones", not a dossier-confirmed suppression
+# value; same unverified-convention caveat this file already applies to
+# `_OPEN_DOC_OPTION_READ_ONLY`/`_LEADER_SIDE_DEFAULT` above. The Zone*Margin
+# params also have no converter (`identity`, not `to_meters`): the dossier's
+# own worked example shows a 0.5 margin on a 0.2794 m sheet, which is
+# geometrically impossible in meters, so their real unit is unverified and
+# is deliberately *not* guessed at here via a mm-to-meters conversion.
+NEW_SHEET4 = ComSignature("NewSheet4", [
+    Param("name", REQUIRED),
+    Param("paper_size", REQUIRED, enum_to_int),
+    Param("template_in", REQUIRED, enum_to_int),
+    Param("scale1", 1.0),
+    Param("scale2", 1.0),
+    Param("first_angle", False, to_bool),
+    Param("template_name", ""),
+    Param("width", 0.0, to_meters),
+    Param("height", 0.0, to_meters),
+    Param("property_view_name", ""),
+    Param("zone_left_margin", 0.0),
+    Param("zone_right_margin", 0.0),
+    Param("zone_top_margin", 0.0),
+    Param("zone_bottom_margin", 0.0),
+    Param("zone_row", 0, enum_to_int),
+    Param("zone_col", 0, enum_to_int),
+])
 
 # `ISldWorks::OpenDoc6`'s `Options` argument (swOpenDocOptions_e) is only
 # referenced by name, not enumerated, in docs/api/01-documents-and-sheets.md's
@@ -1882,6 +1973,299 @@ class DrawingOperations:
             SwErrors.swSuccess if overall_success else SwErrors.swUnknownError,
             {"configuration": config_name, "results": results},
         )
+
+    # ========================================================================
+    # Sheet management tools
+    # ========================================================================
+
+    def add_sheet(self, name: str, template_path: Optional[str] = None,
+                  paper_size: str = "A3", scale_num: float = 1, scale_denom: float = 1,
+                  first_angle: bool = False, width: Optional[float] = None,
+                  height: Optional[float] = None) -> Dict:
+        """
+        Create a new drawing sheet via `IDrawingDoc::NewSheet4`.
+
+        Args:
+            name: Name for the new sheet.
+            template_path: Full path to a custom sheet-format `.slddrt`
+                template. When given, `NewSheet4`'s `TemplateIn` is bound to
+                `swDwgTemplateCustom` and this path becomes `TemplateName`.
+                Omitted (default): `TemplateIn` is `swDwgTemplateNone`, so
+                `paper_size` (and, for `paper_size="custom"`, `width`/
+                `height`) determine the sheet's size instead.
+            paper_size: One of `"A"`, `"B"`, `"C"`, `"D"`, `"E"`, `"A0"`-`"A4"`
+                (case-insensitive -- the *landscape* `swDwgPaperSizes_e`
+                value; this tool has no separate orientation parameter), or
+                `"custom"` to size the sheet from `width`/`height` instead.
+            scale_num, scale_denom: `NewSheet4`'s `Scale1`/`Scale2` --
+                dimensionless, passed through unconverted.
+            first_angle: `NewSheet4`'s raw `FirstAngle` boolean -- `True` for
+                first-angle projection, `False` (default) for third-angle.
+            width, height: Sheet dimensions in the caller's unit, converted
+                to meters at the COM boundary. Only valid when
+                `paper_size="custom"` -- passing either alongside any other
+                `paper_size` fails with `swInvalidInput`, and
+                `paper_size="custom"` without both fails the same way.
+
+        Returns:
+            Result dict; `data` echoes back the resolved sheet parameters on
+            success. Fails with `swFeatureError` if `NewSheet4` itself
+            returns `False` -- its own dossier record documents no specific
+            failure cause (e.g. a duplicate `name`) for that, so the message
+            says so rather than guessing one.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        paper_key = (paper_size or "").strip().upper()
+        is_custom = paper_key == "CUSTOM"
+
+        if is_custom:
+            if width is None or height is None:
+                return self._result(
+                    False,
+                    "paper_size='custom' requires both width and height",
+                    SwErrors.swInvalidInput,
+                )
+            paper_size_value = int(SwDwgPaperSizes.swDwgPapersUserDefined)
+        else:
+            if width is not None or height is not None:
+                return self._result(
+                    False,
+                    "width/height are only valid when paper_size='custom' "
+                    f"(got paper_size={paper_size!r})",
+                    SwErrors.swInvalidInput,
+                    {"paper_size": paper_size},
+                )
+            sizes = _PAPER_SIZES.get(paper_key)
+            if sizes is None:
+                valid = sorted(_PAPER_SIZES) + ["custom"]
+                return self._result(
+                    False,
+                    f"Unknown paper_size {paper_size!r}; expected one of {valid!r}",
+                    SwErrors.swInvalidInput,
+                )
+            paper_size_value = int(sizes[0])
+
+        if template_path:
+            template_in = int(SwDwgTemplates.swDwgTemplateCustom)
+            template_name = template_path
+        else:
+            template_in = int(SwDwgTemplates.swDwgTemplateNone)
+            template_name = ""
+
+        try:
+            args = NEW_SHEET4.bind(
+                units=self._units,
+                name=name, paper_size=paper_size_value, template_in=template_in,
+                scale1=scale_num, scale2=scale_denom, first_angle=first_angle,
+                template_name=template_name,
+                width=width if width is not None else 0,
+                height=height if height is not None else 0,
+            )
+            ok = doc.NewSheet4(*args)
+        except Exception as e:
+            logger.error(f"add_sheet error: {e}")
+            return self._result(False, f"Add sheet error: {e}", SwErrors.swUnknownError)
+
+        data = {
+            "name": name,
+            # Reuses the exact same lookup `list_sheets`/`get_active_sheet` use
+            # to render `ISheet::GetProperties2`'s `paperSize` element, so a
+            # sheet just created here reports the same `paper_size` spelling
+            # a caller would see reading it back (e.g. "A3", not "a3").
+            "paper_size": _paper_size_name(paper_size_value),
+            "template_path": template_path,
+            "scale_num": scale_num, "scale_denom": scale_denom,
+            "first_angle": bool(first_angle),
+            "width": width, "height": height,
+        }
+
+        if not ok:
+            return self._result(
+                False,
+                f"Failed to create sheet {name!r} -- NewSheet4 returned false "
+                "(possibly a duplicate name; SolidWorks does not document a "
+                "specific failure cause for this call)",
+                SwErrors.swFeatureError, data,
+            )
+
+        return self._result(True, f"Created sheet {name!r}", SwErrors.swSuccess, data)
+
+    def activate_sheet(self, name: str) -> Dict:
+        """
+        Make `name` the active sheet via `IDrawingDoc::ActivateSheet`.
+
+        Args:
+            name: Sheet name to activate.
+
+        Returns:
+            Result dict. Fails with `swInvalidInput` (listing the sheets
+            that do exist, via `GetSheetNames`) if `ActivateSheet` returns
+            `False` -- its own dossier record documents that as the "no
+            sheet with that name" signal.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        try:
+            ok = doc.ActivateSheet(name)
+        except Exception as e:
+            logger.error(f"activate_sheet error: {e}")
+            return self._result(False, f"Activate sheet error: {e}", SwErrors.swUnknownError)
+
+        if not ok:
+            try:
+                available = _normalize_sheet_names(doc.GetSheetNames())
+            except Exception:
+                available = []
+            return self._result(
+                False,
+                f"Sheet {name!r} not found; available sheets: {available!r}",
+                SwErrors.swInvalidInput,
+                {"name": name, "available_sheets": available},
+            )
+
+        return self._result(True, f"Activated sheet {name!r}", SwErrors.swSuccess, {"name": name})
+
+    def _sheet_properties(self, sheet: Any) -> Dict[str, Any]:
+        """`ISheet::GetProperties2` -> `{scale_num, scale_denom,
+        paper_size_code, paper_size, projection, width, height}`, shared by
+        `list_sheets` and `get_active_sheet`.
+
+        Defensive against anything other than the documented 8-element
+        `Double` array -- `None`, a short/empty sequence, a non-sequence
+        auto-vivified COM stand-in, or a sequence whose individual elements
+        aren't the numbers they're documented to be -- every field comes
+        back `None` rather than raising, so a sheet whose properties can't
+        be read still shows up in `list_sheets`' results instead of the
+        whole call raising out of the tool (this project's own "never raise
+        out of a tool" rule).
+        """
+        empty = {
+            "scale_num": None, "scale_denom": None,
+            "paper_size_code": None, "paper_size": None,
+            "projection": None, "width": None, "height": None,
+        }
+
+        try:
+            props = sheet.GetProperties2()
+        except Exception:
+            return empty
+
+        if not isinstance(props, (list, tuple)) or len(props) < 7:
+            return empty
+
+        try:
+            paper_size_code = int(props[0])
+            first_angle = bool(props[4])
+            return {
+                "scale_num": float(props[2]),
+                "scale_denom": float(props[3]),
+                "paper_size_code": paper_size_code,
+                "paper_size": _paper_size_name(paper_size_code),
+                "projection": (
+                    SwDrawingProjectionType.swDrawing1stAngleProjection.name if first_angle
+                    else SwDrawingProjectionType.swDrawing3rdAngleProjection.name
+                ),
+                "width": self._units.from_meters(float(props[5])),
+                "height": self._units.from_meters(float(props[6])),
+            }
+        except (TypeError, ValueError):
+            return empty
+
+    def _count_sheet_views(self, sheet: Any) -> int:
+        """Real (non-sheet-pseudo-view) view count on `sheet` via
+        `ISheet::GetViews`, filtered the same way `list_views` filters its
+        own results (docs/api/02-views.md's Gotchas on that pseudo-entry)."""
+        try:
+            views_raw = sheet.GetViews() or []
+        except Exception:
+            views_raw = []
+        if not isinstance(views_raw, (list, tuple)):
+            return 0
+
+        sheet_type_code = int(SwDrawingViewTypes.swDrawingSheet)
+        count = 0
+        for view in views_raw:
+            type_code = self._read_prop(view, "Type")
+            if (isinstance(type_code, (int, float)) and not isinstance(type_code, bool)
+                    and int(type_code) == sheet_type_code):
+                continue
+            count += 1
+        return count
+
+    def list_sheets(self) -> Dict:
+        """
+        Enumerate every sheet in the active drawing via
+        `IDrawingDoc::GetSheetNames`, resolving each name to its `ISheet`
+        (via `IDrawingDoc::Sheet`) for its scale/paper-size/projection-type/
+        dimensions (`ISheet::GetProperties2`) and view count
+        (`ISheet::GetViews`).
+
+        Handles `GetSheetNames` arriving as a tuple, a bare single string, or
+        `None` (see `_normalize_sheet_names`) -- the COM-layer quirk this
+        issue's acceptance criteria calls out explicitly.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        try:
+            raw_names = doc.GetSheetNames()
+        except Exception as e:
+            logger.error(f"list_sheets error: {e}")
+            return self._result(False, f"List sheets error: {e}", SwErrors.swUnknownError)
+
+        names = _normalize_sheet_names(raw_names)
+
+        sheets = []
+        for sheet_name in names:
+            try:
+                sheet = doc.Sheet(sheet_name)
+            except Exception:
+                sheet = None
+            if not sheet:
+                sheets.append({
+                    "name": sheet_name, "scale_num": None, "scale_denom": None,
+                    "paper_size_code": None, "paper_size": None, "projection": None,
+                    "width": None, "height": None, "view_count": 0,
+                })
+                continue
+            sheets.append({
+                "name": sheet_name,
+                **self._sheet_properties(sheet),
+                "view_count": self._count_sheet_views(sheet),
+            })
+
+        return self._result(
+            True, f"{len(sheets)} sheet(s)", SwErrors.swSuccess, {"sheets": sheets},
+        )
+
+    def get_active_sheet(self) -> Dict:
+        """
+        Report the currently active sheet's name/scale/paper-size via
+        `IDrawingDoc::GetCurrentSheet` + `ISheet::GetProperties2`.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        try:
+            sheet = doc.GetCurrentSheet()
+        except Exception as e:
+            logger.error(f"get_active_sheet error: {e}")
+            return self._result(False, f"Get active sheet error: {e}", SwErrors.swUnknownError)
+
+        if not sheet:
+            return self._result(False, "No active sheet", SwErrors.swFeatureError)
+
+        name = self._read_prop(sheet, "Name")
+        data = {"name": name, **self._sheet_properties(sheet)}
+        message = f"Active sheet: {name!r}" if name else "Active sheet"
+        return self._result(True, message, SwErrors.swSuccess, data)
 
     # ========================================================================
     # View creation / discovery tools
