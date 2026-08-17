@@ -15,67 +15,24 @@ import os
 import pytest
 
 from solidworks_mcp.constants_drawing import SwFileSaveError
-from solidworks_mcp.tools import dispatch, sw_automation
-
-
-@pytest.fixture
-def tool_sw(make_sw):
-    """Factory mirroring test_tools_export_pdf.py's `tool_sw`, connecting the
-    shared `tools.sw_automation` singleton (what `dispatch()` actually calls
-    through) to a fresh fake `SldWorks.Application`, defaulting to a drawing
-    document since both tools under test require one."""
-    def _make(doc_type="drawing", **kwargs):
-        fake = make_sw(doc_type, **kwargs)
-        connected = sw_automation.connect()
-        assert connected["success"], connected
-        return fake
-    yield _make
-    sw_automation.disconnect()
+from solidworks_mcp.tools import dispatch
 
 
 class TestExportDxfDwgValidation:
-    def test_invalid_format_rejected_before_com(self, tool_sw, tmp_path):
+    @pytest.mark.parametrize("filename, extra", [
+        ("out.dxf", {"format": "step"}),          # unknown format
+        ("out.pdf", {"format": "dxf"}),           # extension doesn't match format
+        ("out.dxf", {"export_fonts_as": "bitmap"}),
+        ("out.dxf", {"version": "R1985"}),
+    ], ids=["format", "extension_mismatch", "export_fonts_as", "version"])
+    def test_bad_argument_rejected_before_com(self, tool_sw, tmp_path, filename, extra):
+        """Every fail-fast input check rejects with `swInvalidInput` and
+        without reaching `SaveAs3` -- one body, since the whole point of each
+        is that it happens before any COM call."""
         fake_sw = tool_sw("drawing")
-        output_path = tmp_path / "out.dxf"
 
         result = dispatch("export_dxf_dwg", {
-            "output_path": str(output_path), "format": "step",
-        })
-
-        assert result["success"] is False
-        assert result["error_name"] == "swInvalidInput"
-        assert not fake_sw.call_log.calls_to("SaveAs3")
-
-    def test_output_path_extension_mismatch_rejected(self, tool_sw, tmp_path):
-        fake_sw = tool_sw("drawing")
-        output_path = tmp_path / "out.pdf"
-
-        result = dispatch("export_dxf_dwg", {
-            "output_path": str(output_path), "format": "dxf",
-        })
-
-        assert result["success"] is False
-        assert result["error_name"] == "swInvalidInput"
-        assert not fake_sw.call_log.calls_to("SaveAs3")
-
-    def test_invalid_export_fonts_as_rejected(self, tool_sw, tmp_path):
-        fake_sw = tool_sw("drawing")
-        output_path = tmp_path / "out.dxf"
-
-        result = dispatch("export_dxf_dwg", {
-            "output_path": str(output_path), "export_fonts_as": "bitmap",
-        })
-
-        assert result["success"] is False
-        assert result["error_name"] == "swInvalidInput"
-        assert not fake_sw.call_log.calls_to("SaveAs3")
-
-    def test_invalid_version_rejected(self, tool_sw, tmp_path):
-        fake_sw = tool_sw("drawing")
-        output_path = tmp_path / "out.dxf"
-
-        result = dispatch("export_dxf_dwg", {
-            "output_path": str(output_path), "version": "R1985",
+            "output_path": str(tmp_path / filename), **extra,
         })
 
         assert result["success"] is False
@@ -305,7 +262,10 @@ class TestExportDxfDwgFileVerification:
 
         assert result["success"] is False
         assert result["error_name"] == "swExportError"
-        assert str(output_path) in result["data"]["missing"]
+        # Verified per file by the shared `_save_as3` primitive, so the
+        # failure names the one path that wasn't written rather than
+        # collecting a `missing` list in a second pass afterward.
+        assert result["data"]["path"] == str(output_path)
 
     def test_nonzero_save_error_fails_even_if_return_value_is_truthy(self, tool_sw, tmp_path):
         fake_sw = tool_sw("drawing")

@@ -19,24 +19,7 @@ Because of that pre-creation trick, every happy-path test below passes
 import datetime
 import json
 
-import pytest
-
-from solidworks_mcp.tools import dispatch, sw_automation
-
-
-@pytest.fixture
-def tool_sw(make_sw):
-    """Factory mirroring test_tools_export_pdf.py's `tool_sw`, connecting the
-    shared `tools.sw_automation` singleton (what `dispatch()` actually calls
-    through) to a fresh fake `SldWorks.Application`, defaulting to a drawing
-    document since `batch_export_pack` requires one."""
-    def _make(doc_type="drawing", **kwargs):
-        fake = make_sw(doc_type, **kwargs)
-        connected = sw_automation.connect()
-        assert connected["success"], connected
-        return fake
-    yield _make
-    sw_automation.disconnect()
+from solidworks_mcp.tools import dispatch
 
 
 def _wire_saveas3_ok(fake_sw):

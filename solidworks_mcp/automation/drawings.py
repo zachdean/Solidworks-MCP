@@ -10,7 +10,7 @@ import os
 import logging
 import re
 import string
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from math import ceil, sqrt
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -237,6 +237,14 @@ _BATCH_EXPORT_FORMAT_EXTENSIONS = {
     "edrawings": ".edrw",
 }
 
+# Which `batch_export_pack` formats need the target sheet made active before
+# their per-sheet export, because they have no "these specific sheets" mode of
+# their own: DXF/DWG and eDrawings are driven by user preferences that only
+# reach the active sheet, while PDF has `IExportPdfData::SetSheets`. Consulted
+# both to decide whether a sheet switch is needed at all and to attribute an
+# activation failure only to the formats it actually blocks.
+_BATCH_EXPORT_NEEDS_ACTIVE_SHEET = frozenset({"dxf", "dwg", "edrawings"})
+
 # Characters illegal in a Windows file/directory name, plus C0 control
 # characters -- `batch_export_pack`'s filename_pattern tokens (a sheet name
 # in particular) are caller/model-controlled data, not a path this project
@@ -274,6 +282,61 @@ def _looks_like_missing_addin(message: str) -> bool:
     """
     lowered = message.lower()
     return any(keyword in lowered for keyword in ("add-in", "addin", "edrawings"))
+
+
+# `IModelDocExtension::SaveAs3`'s positional signature, in the exact order
+# documented in docs/api/05-export-and-layers.md: Name, Version, Options,
+# ExportData, AdvancedSaveAsOptions, Errors, Warnings. 7 positional
+# parameters -- ComSignature per this issue's working agreement (>6 params),
+# and the one COM call this package makes from the most call sites
+# (`save_drawing`, all three export tools, and `batch_export_pack`'s native
+# archive copy), so a transposed `version`/`options` pair -- a silently wrong
+# save -- is exactly what binding by keyword rules out here.
+#
+# `errors`/`warnings` are byref out-parameters: the caller creates them with
+# `com_backend.byref_int()` and reads `.value` after the call, so they bind
+# through unconverted rather than carrying a default.
+SAVE_AS3 = ComSignature("SaveAs3", [
+    Param("path", REQUIRED),
+    Param("version", SwSaveAsVersion.swSaveAsCurrentVersion, enum_to_int),
+    Param("options", SwSaveAsOptions.swSaveAsOptions_Silent, enum_to_int),
+    Param("export_data", None, to_optional_object),
+    Param("advanced_options", None, to_optional_object),
+    Param("errors", REQUIRED),
+    Param("warnings", REQUIRED),
+])
+
+
+class _PreferenceError(Exception):
+    """A `Get`/`SetUserPreference*` call raised while entering
+    `DrawingOperations._user_preference`.
+
+    Carries the caller-facing message so each export tool can return its own
+    `_result(False, str(e), ...)` without having to know which half of the
+    snapshot-then-set pair failed.
+    """
+
+
+# `_user_preference`'s dispatch table: which `ISldWorks` getter/setter pair
+# reaches a given preference enum, and how a value is coerced on the way in.
+# Keyed by the enum class itself, so the accessor kind travels with the
+# constant instead of being re-picked by hand at each call site (picking
+# `SetUserPreferenceIntegerValue` for a toggle is otherwise a silent no-op,
+# not an error).
+#
+# Restore values are passed back exactly as the getter returned them, with no
+# re-coercion -- an unscripted preference read against the fake-COM harness
+# hands back a wrapper object with no `__int__`, while a real COM read already
+# hands back a genuine `int`/`bool`/list.
+_PREFERENCE_ACCESSORS = {
+    SwUserPreferenceToggle: (
+        "GetUserPreferenceToggle", "SetUserPreferenceToggle", bool),
+    SwUserPreferenceIntegerValue: (
+        "GetUserPreferenceIntegerValue", "SetUserPreferenceIntegerValue", int),
+    SwUserPreferenceStringListValue: (
+        "GetUserPreferenceStringListValue", "SetUserPreferenceStringListValue", list),
+}
+
 
 # `IDrawingDoc::CreateDrawViewFromModelView3`'s `ViewName` argument accepts the
 # asterisk-prefixed standard-orientation names (docs/api/02-views.md's "Front"
@@ -1067,6 +1130,327 @@ class DrawingOperations:
 
         return self._result(True, "Rebuild successful", SwErrors.swSuccess, data)
 
+    # ========================================================================
+    # Shared export primitives
+    # ========================================================================
+    #
+    # Every export tool below (`export_pdf`, `export_dxf_dwg`,
+    # `export_edrawings`, and `batch_export_pack`'s native archive copy) is
+    # the same four steps in the same order: validate which sheets to export,
+    # prepare the output path, apply the user preferences that format needs
+    # (restoring them afterward no matter how the call ends), then drive
+    # `SaveAs3` and decode its byref `Errors`/`Warnings`. Each of those four
+    # steps lives here exactly once so a format tool contains only what is
+    # actually specific to its format.
+
+    def _prepare_output_path(
+        self, output_path: str, *, expected_ext: Optional[str] = None,
+        probe_writable: bool = False,
+    ) -> Tuple[str, Optional[Dict]]:
+        """Absolutize `output_path`, check its extension, and create its
+        parent directory -- returning `(path, None)` or `(path, error_result)`.
+
+        Args:
+            expected_ext: Required lowercase extension including the dot
+                (e.g. `".dxf"`). `None` skips the check (PDF export accepts
+                any extension the caller asks for, as `SaveAs3` keys the
+                conversion off it).
+            probe_writable: Open the target for append and delete it again if
+                the probe created it, so an unwritable destination fails here
+                with a diagnosis rather than as whatever generic COM
+                exception `SaveAs3` happens to raise. The single most common
+                real-world export failure is the target file already being
+                open in a viewer.
+        """
+        output_path = os.path.abspath(output_path)
+
+        if expected_ext is not None and os.path.splitext(output_path)[1].lower() != expected_ext:
+            return output_path, self._result(
+                False,
+                f"output_path must end with {expected_ext!r}, got {output_path!r}",
+                SwErrors.swInvalidInput)
+
+        dir_path = os.path.dirname(output_path)
+        if dir_path and not os.path.exists(dir_path):
+            try:
+                os.makedirs(dir_path)
+            except OSError as e:
+                return output_path, self._result(
+                    False, f"Could not create output directory {dir_path!r}: {e}",
+                    SwErrors.swExportError)
+
+        if probe_writable:
+            existed_before = os.path.exists(output_path)
+            try:
+                with open(output_path, "ab"):
+                    pass
+            except OSError as e:
+                return output_path, self._result(
+                    False,
+                    f"Cannot write to {output_path!r} -- the file may be open in "
+                    f"another program (e.g. a PDF viewer) or the location is not "
+                    f"writable: {e}",
+                    SwErrors.swExportError,
+                )
+            if not existed_before:
+                try:
+                    os.remove(output_path)
+                except OSError:
+                    pass
+
+        return output_path, None
+
+    def _resolve_export_sheets(
+        self, doc: Any, sheets: Any, *, allow_list: bool = True,
+    ) -> Tuple[List[str], str, Optional[Dict]]:
+        """Resolve an export tool's `sheets` argument into
+        `(sheet_names, mode, error_result)`, where `mode` is `"all"`,
+        `"current"`, or `"list"`.
+
+        Shared by every export tool so "which sheets does this mean" is
+        answered one way. An explicit list is validated against
+        `IDrawingDoc::GetSheetNames` *before* any COM export call -- an
+        unknown name fails fast with the available sheet names in the
+        message, rather than surfacing whatever `SetSheets`/`SaveAs3` would
+        have done with a bad name (undocumented on either method's page).
+
+        Args:
+            allow_list: `False` for a format with no "these specific sheets"
+                mode of its own (eDrawings -- `swEdrawingSaveAsOption_e`'s
+                third member saves the current `ISelectionMgr` selection, not
+                a named-sheet list), which then rejects a list outright
+                instead of silently reinterpreting it.
+        """
+        try:
+            available_sheets = _normalize_sheet_names(doc.GetSheetNames())
+        except Exception as e:
+            logger.error(f"GetSheetNames error: {e}")
+            return [], "", self._result(
+                False, f"Could not read sheet names: {e}", SwErrors.swUnknownError)
+
+        if isinstance(sheets, str) and sheets == "all":
+            if not available_sheets:
+                return [], "all", self._result(
+                    False, "Drawing has no sheets to export", SwErrors.swFeatureError)
+            return available_sheets, "all", None
+
+        if isinstance(sheets, str) and sheets == "current":
+            try:
+                current_sheet = doc.GetCurrentSheet()
+            except Exception:
+                current_sheet = None
+            current_name = self._read_prop(current_sheet, "Name") if current_sheet else None
+            if not current_name:
+                return [], "current", self._result(
+                    False, "Could not determine the active sheet's name",
+                    SwErrors.swFeatureError)
+            return [current_name], "current", None
+
+        if allow_list and isinstance(sheets, (list, tuple)):
+            requested = list(sheets)
+            unknown = [s for s in requested if s not in available_sheets]
+            if unknown:
+                return [], "list", self._result(
+                    False,
+                    f"Unknown sheet(s) {unknown!r}; available sheets: "
+                    f"{available_sheets!r}",
+                    SwErrors.swInvalidInput,
+                    {"unknown_sheets": unknown, "available_sheets": available_sheets},
+                )
+            return requested, "list", None
+
+        expected = (
+            "'all', 'current', or a list of sheet names" if allow_list
+            else "'all' or 'current'"
+        )
+        return [], "", self._result(
+            False, f"sheets must be {expected}, got {sheets!r}", SwErrors.swInvalidInput)
+
+    @contextmanager
+    def _user_preference(self, pref: Any, value: Any):
+        """Set the `ISldWorks` user preference `pref` to `value` for the
+        duration of the block, restoring whatever it held on entry when the
+        block exits -- normally, by exception, or by an early `return`.
+
+        The getter/setter pair and the inbound coercion come from
+        `_PREFERENCE_ACCESSORS`, keyed by `pref`'s own enum class, so a
+        toggle can't accidentally be written through the integer setter (a
+        silent no-op rather than an error). Compose several with the
+        `ExitStack` this module already uses for `selected()`, and they
+        unwind last-in-first-out.
+
+        Raises:
+            _PreferenceError: if reading or writing the preference raises.
+                A tool that can't establish the setting it needs must fail
+                rather than export under whatever the session happened to
+                hold -- an inherited setting is exactly the kind of silent
+                output change these tools exist to rule out.
+        """
+        accessors = _PREFERENCE_ACCESSORS.get(type(pref))
+        if accessors is None:
+            raise _PreferenceError(
+                f"No user-preference accessor is declared for {type(pref).__name__}")
+        getter_name, setter_name, coerce = accessors
+        pref_id = int(pref)
+
+        try:
+            original = getattr(self._sw_app, getter_name)(pref_id)
+        except Exception as e:
+            logger.error(f"read preference {pref!r} error: {e}")
+            raise _PreferenceError(f"Read preference error: {e}")
+
+        try:
+            getattr(self._sw_app, setter_name)(pref_id, coerce(value))
+        except Exception as e:
+            logger.error(f"set preference {pref!r} error: {e}")
+            raise _PreferenceError(f"Set preference error: {e}")
+
+        try:
+            yield
+        finally:
+            try:
+                getattr(self._sw_app, setter_name)(pref_id, original)
+            except Exception as e:
+                logger.error(f"restore preference {pref!r} error: {e}")
+
+    @contextmanager
+    def _shown_hidden_layers(self, doc: Any):
+        """Temporarily make every hidden layer (`ILayer::Visible == False`,
+        via `ILayerMgr::GetLayerList`/`GetLayer`) visible for the duration of
+        the block, restoring each to hidden on exit.
+
+        This is `export_pdf`'s `keep_invisible_layers`: SolidWorks has no
+        documented, numerically verifiable `IExportPdfData`/user-preference
+        lever for "include hidden layers in this export"
+        (`swPDFExportIncludeLayersNotToPrint` is both semantically distinct --
+        it's about `ILayer::Printable`, not `ILayer::Visible` -- and has no
+        published numeric value anywhere; see docs/api/05-export-and-layers.md's
+        Enums section). Layer visibility is the one documented, unambiguous
+        lever that actually controls whether hidden-layer geometry renders
+        into any export.
+
+        `ILayer::Visible`'s own Gotchas warn that setting `Visible` can change
+        `ILayer::Printable` as a side effect, so each touched layer's
+        `Printable` is snapshotted before `Visible` is flipped and re-asserted
+        (Visible first, then Printable, per that record's documented ordering)
+        after `Visible` is restored -- without this, the export could silently
+        leave a layer's printable state different from what it found.
+        """
+        # Each entry is (layer, prior_printable).
+        restore_layers: List[Tuple[Any, Any]] = []
+        try:
+            layer_mgr = doc.GetLayerManager()
+            layer_names = list(layer_mgr.GetLayerList() or []) if layer_mgr else []
+        except Exception as e:
+            logger.error(f"GetLayerManager error: {e}")
+            layer_names = []
+
+        for name in layer_names:
+            try:
+                layer = layer_mgr.GetLayer(name)
+            except Exception as e:
+                logger.error(f"GetLayer({name!r}) error: {e}")
+                continue
+            if layer is None:
+                continue
+            if self._read_prop(layer, "Visible") is False:
+                prior_printable = self._read_prop(layer, "Printable")
+                try:
+                    layer.Visible = True
+                    restore_layers.append((layer, prior_printable))
+                except Exception as e:
+                    logger.error(f"show layer {name!r} error: {e}")
+
+        try:
+            yield
+        finally:
+            for layer, prior_printable in restore_layers:
+                try:
+                    layer.Visible = False
+                    if prior_printable is True or prior_printable is False:
+                        layer.Printable = prior_printable
+                except Exception as e:
+                    logger.error(f"restore layer visibility error: {e}")
+
+    def _save_as3(
+        self, doc: Any, path: str, *, label: str,
+        options: Any = SwSaveAsOptions.swSaveAsOptions_Silent,
+        export_data: Any = None, extra_data: Optional[Dict] = None,
+        raise_com_errors: bool = False,
+    ) -> Dict:
+        """Drive `IModelDocExtension::SaveAs3` at `path` and turn its result
+        into this project's standard result dict.
+
+        The one place this package calls `SaveAs3`, so the byref
+        `Errors`/`Warnings` decoding, the "a nonzero `Errors` bitmask fails
+        even if the boolean return claimed success" rule, and the on-disk
+        existence check are defined once rather than per format. A `SaveAs3`
+        call that returns `True` with `Errors == 0` but writes no file is a
+        real, distinct failure mode from either of the other two, so it's
+        checked explicitly rather than trusted.
+
+        Args:
+            label: Human-readable operation name for the messages, e.g.
+                `"PDF export"` -- used as `"{label} failed: ..."` and
+                `"{label} error: ..."`.
+            options: `swSaveAsOptions_e` bitmask; `swSaveAsOptions_Silent`
+                unless a caller needs more (`_save_native_copy` adds
+                `swSaveAsOptions_Copy`).
+            export_data: A PDF `IExportPdfData`, or `None` for every other
+                format (that parameter is PDF-only).
+            extra_data: Format-specific keys merged into the returned
+                `data` dict, present on both the success and failure paths.
+            raise_com_errors: Let a `SaveAs3` exception propagate instead of
+                becoming a `"{label} error: ..."` result. For a caller that
+                has to classify the exception itself -- `export_edrawings`
+                reads the message to tell "the add-in isn't loaded" apart
+                from an ordinary COM failure, which it can only do with the
+                exception in hand.
+
+        Returns:
+            Result dict whose `data` always has `path`, `errors`, `warnings`,
+            and `decoded_errors`, plus `size_bytes` on success.
+        """
+        errors = com_backend.byref_int()
+        warnings = com_backend.byref_int()
+        data: Dict[str, Any] = dict(extra_data or {})
+        data["path"] = path
+
+        try:
+            args = SAVE_AS3.bind(
+                path=path, options=options, export_data=export_data,
+                errors=errors, warnings=warnings,
+            )
+            saved = doc.Extension.SaveAs3(*args)
+        except Exception as e:
+            if raise_com_errors:
+                raise
+            logger.error(f"{label} error: {e}")
+            return self._result(
+                False, f"{label} error: {e}", SwErrors.swFileSaveError, data)
+
+        error_code = int(errors.value or 0)
+        warning_code = int(warnings.value or 0)
+        decoded = decode_save_error(error_code)
+        data.update({
+            "errors": error_code, "warnings": warning_code, "decoded_errors": decoded,
+        })
+
+        if not saved or error_code != 0:
+            reason = decoded if error_code != 0 else "SaveAs3 returned false"
+            return self._result(
+                False, f"{label} failed: {reason}", SwErrors.swFileSaveError, data)
+
+        if not os.path.exists(path):
+            return self._result(
+                False,
+                f"SaveAs3 reported success but no file was written to {path!r}",
+                SwErrors.swExportError, data,
+            )
+
+        data["size_bytes"] = os.path.getsize(path)
+        return self._result(True, f"{label} complete: {path}", SwErrors.swSuccess, data)
+
     def save_drawing(self, filepath: Optional[str] = None) -> Dict:
         """
         Save the active document -- `IModelDoc2::Save3` in place, or
@@ -1153,215 +1537,62 @@ class DrawingOperations:
                 for unattended/batch export -- see that record's Gotchas
                 for why the dossier calls out `True` as the wrong default
                 for automation.
-            keep_invisible_layers: SolidWorks has no documented, numerically
-                verifiable `IExportPdfData`/user-preference lever for
-                "include hidden layers in this export" --
-                `swPDFExportIncludeLayersNotToPrint` is both semantically
-                distinct (it's about `ILayer::Printable`, not
-                `ILayer::Visible`) and has no published numeric value
-                anywhere (see docs/api/05-export-and-layers.md's Enums
-                section). Instead, every currently-hidden layer
-                (`ILayer::Visible == False`, via `ILayerMgr::GetLayerList`/
-                `GetLayer`) is temporarily made visible for the duration of
-                this call, then restored to hidden afterward -- the one
-                documented, unambiguous lever that actually controls
-                whether hidden-layer geometry renders into any export.
-                `ILayer::Visible`'s own Gotchas warn that setting `Visible`
-                can change `ILayer::Printable` as a side effect, so each
-                touched layer's `Printable` is snapshotted before `Visible`
-                is flipped and re-asserted after `Visible` is restored --
-                without this, the export could silently leave a layer's
-                printable state different from what it found.
+            keep_invisible_layers: Temporarily show every hidden layer for
+                the duration of the export, restoring each afterward -- see
+                `_shown_hidden_layers` for why layer visibility is the lever
+                this has to use.
             high_quality: `swPDFExportHighQuality` user-preference toggle,
-                snapshotted via `GetUserPreferenceToggle` and restored via
-                `SetUserPreferenceToggle` in a `finally` after the call, the
-                same save/restore discipline `insert_standard_3_view` uses
-                for `swAutomaticScaling3ViewDrawings` -- so a batch export
-                run never silently leaves the operator's SolidWorks install
-                on a different quality setting than it found.
+                snapshotted and restored around the call via
+                `_user_preference` -- so a batch export run never silently
+                leaves the operator's SolidWorks install on a different
+                quality setting than it found.
 
         Returns:
             Result dict. On success, `data` has `path`, `sheets` (the sheet
             names actually exported), `size_bytes`, `errors`, `warnings`,
             and `decoded_errors`. Fails (with the same `data` where
             available) if: the drawing can't be read, an explicit sheet name
-            isn't found, the output path can't be written to, `SaveAs3`
-            reports a nonzero `Errors` bitmask or a false return, or the PDF
-            file doesn't actually exist on disk afterward -- a `SaveAs3`
-            call that returns `True`/`Errors == 0` but writes no file is a
-            real, distinct failure mode from either of the above, so it's
-            checked explicitly rather than trusted.
+            isn't found, the output path can't be written to, or `SaveAs3`
+            reports a nonzero `Errors` bitmask, a false return, or wrote no
+            file (see `_save_as3`).
         """
         doc, err = self.get_drawing_doc()
         if err:
             return err
 
+        export_sheet_names, mode, err = self._resolve_export_sheets(doc, sheets)
+        if err:
+            return err
+        which = int({
+            "all": SwExportDataSheetsToExport.swExportData_ExportAllSheets,
+            "current": SwExportDataSheetsToExport.swExportData_ExportCurrentSheet,
+            "list": SwExportDataSheetsToExport.swExportData_ExportSpecifiedSheets,
+        }[mode])
+
+        output_path, err = self._prepare_output_path(output_path, probe_writable=True)
+        if err:
+            return err
+
         try:
-            available_sheets = list(doc.GetSheetNames() or [])
-        except Exception as e:
-            logger.error(f"export_pdf GetSheetNames error: {e}")
-            return self._result(
-                False, f"Could not read sheet names: {e}", SwErrors.swUnknownError)
+            with ExitStack() as restore:
+                restore.enter_context(self._user_preference(
+                    SwUserPreferenceToggle.swPDFExportHighQuality, high_quality))
+                if keep_invisible_layers:
+                    restore.enter_context(self._shown_hidden_layers(doc))
 
-        if isinstance(sheets, str) and sheets == "all":
-            which = int(SwExportDataSheetsToExport.swExportData_ExportAllSheets)
-            export_sheet_names = available_sheets
-        elif isinstance(sheets, str) and sheets == "current":
-            which = int(SwExportDataSheetsToExport.swExportData_ExportCurrentSheet)
-            try:
-                current_sheet = doc.GetCurrentSheet()
-            except Exception:
-                current_sheet = None
-            current_name = self._read_prop(current_sheet, "Name") if current_sheet else None
-            if not current_name:
-                return self._result(
-                    False, "Could not determine the active sheet's name",
-                    SwErrors.swFeatureError)
-            export_sheet_names = [current_name]
-        elif isinstance(sheets, (list, tuple)):
-            requested = list(sheets)
-            unknown = [s for s in requested if s not in available_sheets]
-            if unknown:
-                return self._result(
-                    False,
-                    f"Unknown sheet(s) {unknown!r}; available sheets: "
-                    f"{available_sheets!r}",
-                    SwErrors.swInvalidInput,
-                    {"unknown_sheets": unknown, "available_sheets": available_sheets},
-                )
-            which = int(SwExportDataSheetsToExport.swExportData_ExportSpecifiedSheets)
-            export_sheet_names = requested
-        else:
-            return self._result(
-                False,
-                f"sheets must be 'all', 'current', or a list of sheet names, "
-                f"got {sheets!r}",
-                SwErrors.swInvalidInput,
-            )
+                export_data = self._sw_app.GetExportFileData(
+                    int(SwExportDataFileType.swExportPdfData))
+                export_data.SetSheets(which, list(export_sheet_names))
+                export_data.ViewPdfAfterSaving = bool(open_after)
 
-        output_path = os.path.abspath(output_path)
-        dir_path = os.path.dirname(output_path)
-        if dir_path and not os.path.exists(dir_path):
-            try:
-                os.makedirs(dir_path)
-            except OSError as e:
-                return self._result(
-                    False, f"Could not create output directory {dir_path!r}: {e}",
-                    SwErrors.swExportError)
-
-        existed_before = os.path.exists(output_path)
-        try:
-            with open(output_path, "ab"):
-                pass
-        except OSError as e:
-            return self._result(
-                False,
-                f"Cannot write to {output_path!r} -- the file may be open in "
-                f"another program (e.g. a PDF viewer) or the location is not "
-                f"writable: {e}",
-                SwErrors.swExportError,
-            )
-        if not existed_before:
-            try:
-                os.remove(output_path)
-            except OSError:
-                pass
-
-        quality_toggle = int(SwUserPreferenceToggle.swPDFExportHighQuality)
-        try:
-            original_high_quality = self._sw_app.GetUserPreferenceToggle(quality_toggle)
-        except Exception as e:
-            logger.error(f"export_pdf read quality preference error: {e}")
-            return self._result(False, f"Read preference error: {e}", SwErrors.swUnknownError)
-        try:
-            self._sw_app.SetUserPreferenceToggle(quality_toggle, bool(high_quality))
-        except Exception as e:
-            logger.error(f"export_pdf set quality preference error: {e}")
-            return self._result(False, f"Set preference error: {e}", SwErrors.swUnknownError)
-
-        # Each entry is (layer, prior_printable) -- `ILayer::Visible`'s own
-        # Gotchas warn that setting `Visible` can change `ILayer::Printable`
-        # as a side effect, so `Printable` is snapshotted before `Visible`
-        # is flipped and re-asserted (Visible first, then Printable, per
-        # that record's documented ordering) after `Visible` is restored.
-        restore_layers: List[Tuple[Any, Any]] = []
-        if keep_invisible_layers:
-            try:
-                layer_mgr = doc.GetLayerManager()
-                layer_names = list(layer_mgr.GetLayerList() or []) if layer_mgr else []
-            except Exception as e:
-                logger.error(f"export_pdf GetLayerManager error: {e}")
-                layer_mgr, layer_names = None, []
-            for name in layer_names:
-                try:
-                    layer = layer_mgr.GetLayer(name)
-                except Exception as e:
-                    logger.error(f"export_pdf GetLayer({name!r}) error: {e}")
-                    continue
-                if layer is None:
-                    continue
-                if self._read_prop(layer, "Visible") is False:
-                    prior_printable = self._read_prop(layer, "Printable")
-                    try:
-                        layer.Visible = True
-                        restore_layers.append((layer, prior_printable))
-                    except Exception as e:
-                        logger.error(f"export_pdf show layer {name!r} error: {e}")
-
-        errors = com_backend.byref_int()
-        warnings = com_backend.byref_int()
-        try:
-            export_data = self._sw_app.GetExportFileData(
-                int(SwExportDataFileType.swExportPdfData))
-            export_data.SetSheets(which, list(export_sheet_names))
-            export_data.ViewPdfAfterSaving = bool(open_after)
-
-            advanced_options = com_backend.null_dispatch()
-            saved = doc.Extension.SaveAs3(
-                output_path, int(SwSaveAsVersion.swSaveAsCurrentVersion),
-                int(SwSaveAsOptions.swSaveAsOptions_Silent),
-                export_data, advanced_options, errors, warnings,
-            )
+                return self._save_as3(
+                    doc, output_path, label="PDF export", export_data=export_data,
+                    extra_data={"sheets": export_sheet_names})
+        except _PreferenceError as e:
+            return self._result(False, str(e), SwErrors.swUnknownError)
         except Exception as e:
             logger.error(f"export_pdf error: {e}")
             return self._result(False, f"PDF export error: {e}", SwErrors.swFileSaveError)
-        finally:
-            try:
-                self._sw_app.SetUserPreferenceToggle(
-                    quality_toggle, bool(original_high_quality))
-            except Exception as e:
-                logger.error(f"export_pdf restore quality preference error: {e}")
-            for layer, prior_printable in restore_layers:
-                try:
-                    layer.Visible = False
-                    if prior_printable is True or prior_printable is False:
-                        layer.Printable = prior_printable
-                except Exception as e:
-                    logger.error(f"export_pdf restore layer visibility error: {e}")
-
-        error_code = int(errors.value or 0)
-        warning_code = int(warnings.value or 0)
-        decoded = decode_save_error(error_code)
-        data = {
-            "path": output_path, "sheets": export_sheet_names,
-            "errors": error_code, "warnings": warning_code, "decoded_errors": decoded,
-        }
-
-        if not saved or error_code != 0:
-            reason = decoded if error_code != 0 else "SaveAs3 returned false"
-            return self._result(False, f"PDF export failed: {reason}",
-                                SwErrors.swFileSaveError, data)
-
-        if not os.path.exists(output_path):
-            return self._result(
-                False,
-                f"SaveAs3 reported success but no file was written to "
-                f"{output_path!r}",
-                SwErrors.swExportError, data,
-            )
-
-        data["size_bytes"] = os.path.getsize(output_path)
-        return self._result(True, f"Exported PDF: {output_path}", SwErrors.swSuccess, data)
 
     def export_dxf_dwg(
         self, output_path: str, format: str = "dxf", sheets: Any = "all",
@@ -1384,11 +1615,12 @@ class DrawingOperations:
         `Options`-bitmask equivalent of PDF's `IExportPdfData` (dossier's
         `swSaveAsOptions_e` Gotchas).
 
-        Every preference this call touches is snapshotted via the matching
-        `GetUserPreference*` getter first and restored in a `finally` --
-        success, a decoded `SaveAs3` failure, or a raised exception all take
-        the same restore path, so a batch run never leaves the operator's
-        SolidWorks install on different DXF/DWG settings than it found:
+        Every preference this call touches is snapshotted and restored via
+        `_user_preference` on a single `ExitStack` -- success, a decoded
+        `SaveAs3` failure, or a raised exception all take the same
+        last-in-first-out restore path, so a batch run never leaves the
+        operator's SolidWorks install on different DXF/DWG settings than it
+        found:
 
         - `swDxfOutputFonts` (`export_fonts_as`) -- always set; there is no
           "leave inherited" option, since an inherited font setting is
@@ -1530,214 +1762,87 @@ class DrawingOperations:
             return self._result(
                 False, f"Map file not found: {map_file}", SwErrors.swFileNotFoundError)
 
-        output_path = os.path.abspath(output_path)
-        if os.path.splitext(output_path)[1].lower() != ext:
-            return self._result(
-                False,
-                f"output_path must end with {ext!r} for format={fmt!r}, "
-                f"got {output_path!r}",
-                SwErrors.swInvalidInput)
+        output_path, err = self._prepare_output_path(output_path, expected_ext=ext)
+        if err:
+            return err
 
-        dir_path = os.path.dirname(output_path)
-        if dir_path and not os.path.exists(dir_path):
-            try:
-                os.makedirs(dir_path)
-            except OSError as e:
-                return self._result(
-                    False, f"Could not create output directory {dir_path!r}: {e}",
-                    SwErrors.swExportError)
-
-        try:
-            available_sheets = list(doc.GetSheetNames() or [])
-        except Exception as e:
-            logger.error(f"export_dxf_dwg GetSheetNames error: {e}")
-            return self._result(
-                False, f"Could not read sheet names: {e}", SwErrors.swUnknownError)
-
-        if isinstance(sheets, str) and sheets == "all":
-            if not available_sheets:
-                return self._result(
-                    False, "Drawing has no sheets to export", SwErrors.swFeatureError)
-            target_sheets = available_sheets
-            export_mode = "combined" if multisheet == "single_file" else "per_sheet"
-        elif isinstance(sheets, str) and sheets == "current":
-            try:
-                current_sheet = doc.GetCurrentSheet()
-            except Exception:
-                current_sheet = None
-            current_name = self._read_prop(current_sheet, "Name") if current_sheet else None
-            if not current_name:
-                return self._result(
-                    False, "Could not determine the active sheet's name",
-                    SwErrors.swFeatureError)
-            target_sheets = [current_name]
+        target_sheets, mode, err = self._resolve_export_sheets(doc, sheets)
+        if err:
+            return err
+        if mode == "current":
             export_mode = "current"
-        elif isinstance(sheets, (list, tuple)):
-            requested = list(sheets)
-            unknown = [s for s in requested if s not in available_sheets]
-            if unknown:
-                return self._result(
-                    False,
-                    f"Unknown sheet(s) {unknown!r}; available sheets: "
-                    f"{available_sheets!r}",
-                    SwErrors.swInvalidInput,
-                    {"unknown_sheets": unknown, "available_sheets": available_sheets},
-                )
-            target_sheets = requested
-            export_mode = "per_sheet"
+        elif mode == "all" and multisheet == "single_file":
+            export_mode = "combined"
         else:
-            return self._result(
-                False,
-                f"sheets must be 'all', 'current', or a list of sheet names, "
-                f"got {sheets!r}",
-                SwErrors.swInvalidInput,
-            )
+            # An explicit list always exports one file per sheet, regardless
+            # of `multisheet` -- see this method's `sheets` docs for why a
+            # named subset can only mean that.
+            export_mode = "per_sheet"
 
-        restore_actions: List[Any] = []
-
-        def _track_toggle(pref_id: int, new_value: bool) -> None:
-            original = self._sw_app.GetUserPreferenceToggle(pref_id)
-            self._sw_app.SetUserPreferenceToggle(pref_id, bool(new_value))
-            restore_actions.append(
-                lambda: self._sw_app.SetUserPreferenceToggle(pref_id, bool(original)))
-
-        def _track_integer(pref_id: int, new_value: int) -> None:
-            original = self._sw_app.GetUserPreferenceIntegerValue(pref_id)
-            self._sw_app.SetUserPreferenceIntegerValue(pref_id, int(new_value))
-            # `original` is passed straight back, not re-wrapped with `int()`
-            # -- an unscripted preference read against the fake-COM harness
-            # hands back a wrapper object with no `__int__`, and a real COM
-            # read already hands back a genuine `int`.
-            restore_actions.append(
-                lambda: self._sw_app.SetUserPreferenceIntegerValue(pref_id, original))
-
-        def _track_string_list(pref_id: int, new_value: List[str]) -> None:
-            original = self._sw_app.GetUserPreferenceStringListValue(pref_id)
-            self._sw_app.SetUserPreferenceStringListValue(pref_id, list(new_value))
-            restore_actions.append(
-                lambda: self._sw_app.SetUserPreferenceStringListValue(pref_id, original))
-
+        base, _ = os.path.splitext(output_path)
         written_files: List[Dict[str, Any]] = []
         try:
-            _track_integer(int(SwUserPreferenceIntegerValue.swDxfOutputFonts), fonts_value)
+            with ExitStack() as restore:
+                def apply(pref, value):
+                    restore.enter_context(self._user_preference(pref, value))
 
-            multisheet_value = int(
-                SwDxfMultisheet.swDxfMultiSheet if export_mode == "combined"
-                else SwDxfMultisheet.swDxfActiveSheetOnly)
-            _track_integer(
-                int(SwUserPreferenceIntegerValue.swDxfMultiSheetOption), multisheet_value)
+                apply(SwUserPreferenceIntegerValue.swDxfOutputFonts, fonts_value)
+                apply(
+                    SwUserPreferenceIntegerValue.swDxfMultiSheetOption,
+                    SwDxfMultisheet.swDxfMultiSheet if export_mode == "combined"
+                    else SwDxfMultisheet.swDxfActiveSheetOnly)
+                if version_member is not None:
+                    apply(SwUserPreferenceIntegerValue.swDxfVersion, version_member)
+                if map_file is not None:
+                    apply(SwUserPreferenceToggle.swDxfMapping, True)
+                    apply(SwUserPreferenceToggle.swDXFDontShowMap, True)
+                    apply(SwUserPreferenceStringListValue.swDxfMappingFiles, [map_file])
+                    apply(SwUserPreferenceIntegerValue.swDxfMappingFileIndex, 0)
 
-            if version_member is not None:
-                _track_integer(int(SwUserPreferenceIntegerValue.swDxfVersion), int(version_member))
-
-            if map_file is not None:
-                _track_toggle(int(SwUserPreferenceToggle.swDxfMapping), True)
-                _track_toggle(int(SwUserPreferenceToggle.swDXFDontShowMap), True)
-                _track_string_list(
-                    int(SwUserPreferenceStringListValue.swDxfMappingFiles), [map_file])
-                _track_integer(int(SwUserPreferenceIntegerValue.swDxfMappingFileIndex), 0)
-
-            if export_mode in ("combined", "current"):
-                errors = com_backend.byref_int()
-                warnings = com_backend.byref_int()
-                export_data = com_backend.null_dispatch()
-                advanced_options = com_backend.null_dispatch()
-                saved = doc.Extension.SaveAs3(
-                    output_path, int(SwSaveAsVersion.swSaveAsCurrentVersion),
-                    int(SwSaveAsOptions.swSaveAsOptions_Silent),
-                    export_data, advanced_options, errors, warnings,
-                )
-                error_code = int(errors.value or 0)
-                warning_code = int(warnings.value or 0)
-                decoded = decode_save_error(error_code)
-                if not saved or error_code != 0:
-                    reason = decoded if error_code != 0 else "SaveAs3 returned false"
-                    return self._result(
-                        False, f"DXF/DWG export failed: {reason}", SwErrors.swFileSaveError,
-                        {
-                            "sheets": target_sheets, "errors": error_code,
-                            "warnings": warning_code, "decoded_errors": decoded,
-                        },
-                    )
-                written_files.append({
-                    "path": output_path,
-                    "sheet": None if export_mode == "combined" else target_sheets[0],
-                    # Stamped here, not in a later pass over `written_files`
-                    # -- a per-sheet failure below returns `written_files` for
-                    # already-succeeded sheets as-is, so every entry must be
-                    # complete (not missing `size_bytes`) the moment it's
-                    # appended, not only on the eventual success path.
-                    "size_bytes": (
-                        os.path.getsize(output_path) if os.path.exists(output_path) else None
-                    ),
-                })
-            else:  # per_sheet
-                for sheet_name in target_sheets:
-                    try:
-                        activated = doc.ActivateSheet(sheet_name)
-                    except Exception as e:
-                        logger.error(f"export_dxf_dwg activate sheet error: {e}")
-                        return self._result(
-                            False, f"Activate sheet error: {e}", SwErrors.swInvalidInput,
-                            {"sheet_name": sheet_name, "files": written_files})
-                    if not activated:
-                        return self._result(
-                            False, f"Sheet {sheet_name!r} not found", SwErrors.swInvalidInput,
-                            {"sheet_name": sheet_name, "files": written_files})
-
-                    base, _ = os.path.splitext(output_path)
-                    sheet_path = f"{base}_{sheet_name}{ext}"
-
-                    errors = com_backend.byref_int()
-                    warnings = com_backend.byref_int()
-                    export_data = com_backend.null_dispatch()
-                    advanced_options = com_backend.null_dispatch()
-                    saved = doc.Extension.SaveAs3(
-                        sheet_path, int(SwSaveAsVersion.swSaveAsCurrentVersion),
-                        int(SwSaveAsOptions.swSaveAsOptions_Silent),
-                        export_data, advanced_options, errors, warnings,
-                    )
-                    error_code = int(errors.value or 0)
-                    warning_code = int(warnings.value or 0)
-                    decoded = decode_save_error(error_code)
-                    if not saved or error_code != 0:
-                        reason = decoded if error_code != 0 else "SaveAs3 returned false"
-                        return self._result(
-                            False,
-                            f"DXF/DWG export failed for sheet {sheet_name!r}: {reason}",
-                            SwErrors.swFileSaveError,
-                            {
-                                "sheet": sheet_name, "path": sheet_path, "errors": error_code,
-                                "warnings": warning_code, "decoded_errors": decoded,
-                                "files": written_files,
-                            },
-                        )
+                if export_mode in ("combined", "current"):
+                    result = self._save_as3(
+                        doc, output_path, label="DXF/DWG export",
+                        extra_data={"sheets": target_sheets})
+                    if not result["success"]:
+                        return result
                     written_files.append({
-                        "path": sheet_path, "sheet": sheet_name,
-                        "size_bytes": (
-                            os.path.getsize(sheet_path) if os.path.exists(sheet_path) else None
-                        ),
+                        "path": output_path,
+                        "sheet": None if export_mode == "combined" else target_sheets[0],
+                        "size_bytes": result["data"]["size_bytes"],
                     })
+                else:  # per_sheet
+                    for sheet_name in target_sheets:
+                        try:
+                            activated = doc.ActivateSheet(sheet_name)
+                        except Exception as e:
+                            logger.error(f"export_dxf_dwg activate sheet error: {e}")
+                            return self._result(
+                                False, f"Activate sheet error: {e}", SwErrors.swInvalidInput,
+                                {"sheet_name": sheet_name, "files": written_files})
+                        if not activated:
+                            return self._result(
+                                False, f"Sheet {sheet_name!r} not found",
+                                SwErrors.swInvalidInput,
+                                {"sheet_name": sheet_name, "files": written_files})
+
+                        sheet_path = f"{base}_{sheet_name}{ext}"
+                        result = self._save_as3(
+                            doc, sheet_path,
+                            label=f"DXF/DWG export for sheet {sheet_name!r}",
+                            extra_data={"sheet": sheet_name, "files": written_files})
+                        if not result["success"]:
+                            return result
+                        written_files.append({
+                            "path": sheet_path, "sheet": sheet_name,
+                            "size_bytes": result["data"]["size_bytes"],
+                        })
+        except _PreferenceError as e:
+            return self._result(False, str(e), SwErrors.swUnknownError)
         except Exception as e:
             logger.error(f"export_dxf_dwg error: {e}")
             return self._result(
                 False, f"DXF/DWG export error: {e}", SwErrors.swFileSaveError,
                 {"files": written_files})
-        finally:
-            for restore in reversed(restore_actions):
-                try:
-                    restore()
-                except Exception as e:
-                    logger.error(f"export_dxf_dwg restore preference error: {e}")
-
-        missing = [f["path"] for f in written_files if f["size_bytes"] is None]
-        if missing:
-            return self._result(
-                False,
-                f"SaveAs3 reported success but file(s) missing: {missing!r}",
-                SwErrors.swExportError,
-                {"files": written_files, "missing": missing},
-            )
 
         return self._result(
             True, f"Exported {len(written_files)} {fmt.upper()} file(s)", SwErrors.swSuccess,
@@ -1800,50 +1905,24 @@ class DrawingOperations:
                 f"(got {sheets!r})",
                 SwErrors.swInvalidInput,
             )
-        selection_value = int(
+        selection_value = (
             SwEdrawingSaveAsOption.swEdrawingSaveAll if sheets == "all"
             else SwEdrawingSaveAsOption.swEdrawingSaveActive)
 
-        output_path = os.path.abspath(output_path)
-        ext = ".edrw"
-        if os.path.splitext(output_path)[1].lower() != ext:
-            return self._result(
-                False,
-                f"output_path must end with {ext!r} for a drawing eDrawings "
-                f"export, got {output_path!r}",
-                SwErrors.swInvalidInput)
+        output_path, err = self._prepare_output_path(output_path, expected_ext=".edrw")
+        if err:
+            return err
 
-        dir_path = os.path.dirname(output_path)
-        if dir_path and not os.path.exists(dir_path):
-            try:
-                os.makedirs(dir_path)
-            except OSError as e:
-                return self._result(
-                    False, f"Could not create output directory {dir_path!r}: {e}",
-                    SwErrors.swExportError)
-
-        pref_id = int(SwUserPreferenceIntegerValue.swEdrawingsSaveAsSelectionOption)
         try:
-            original_selection = self._sw_app.GetUserPreferenceIntegerValue(pref_id)
-        except Exception as e:
-            logger.error(f"export_edrawings read selection preference error: {e}")
-            return self._result(False, f"Read preference error: {e}", SwErrors.swUnknownError)
-        try:
-            self._sw_app.SetUserPreferenceIntegerValue(pref_id, selection_value)
-        except Exception as e:
-            logger.error(f"export_edrawings set selection preference error: {e}")
-            return self._result(False, f"Set preference error: {e}", SwErrors.swUnknownError)
-
-        errors = com_backend.byref_int()
-        warnings = com_backend.byref_int()
-        try:
-            export_data = com_backend.null_dispatch()
-            advanced_options = com_backend.null_dispatch()
-            saved = doc.Extension.SaveAs3(
-                output_path, int(SwSaveAsVersion.swSaveAsCurrentVersion),
-                int(SwSaveAsOptions.swSaveAsOptions_Silent),
-                export_data, advanced_options, errors, warnings,
-            )
+            with self._user_preference(
+                SwUserPreferenceIntegerValue.swEdrawingsSaveAsSelectionOption,
+                selection_value,
+            ):
+                result = self._save_as3(
+                    doc, output_path, label="eDrawings export",
+                    extra_data={"sheets": sheets}, raise_com_errors=True)
+        except _PreferenceError as e:
+            return self._result(False, str(e), SwErrors.swUnknownError)
         except Exception as e:
             logger.error(f"export_edrawings error: {e}")
             addin_unavailable = _looks_like_missing_addin(str(e))
@@ -1854,44 +1933,26 @@ class DrawingOperations:
             return self._result(
                 False, message, SwErrors.swExportError,
                 {"addin_available": not addin_unavailable})
-        finally:
-            try:
-                self._sw_app.SetUserPreferenceIntegerValue(pref_id, original_selection)
-            except Exception as e:
-                logger.error(f"export_edrawings restore selection preference error: {e}")
 
-        error_code = int(errors.value or 0)
-        warning_code = int(warnings.value or 0)
-        decoded = decode_save_error(error_code)
-        data = {
-            "path": output_path, "sheets": sheets, "errors": error_code,
-            "warnings": warning_code, "decoded_errors": decoded,
-        }
+        data = result["data"]
+        if result["success"]:
+            data["addin_available"] = True
+            return result
 
-        if not saved or error_code != 0:
-            addin_related = bool(error_code & _EDRAWINGS_ADDIN_ERROR_BITS)
-            data["addin_available"] = not addin_related
-            if addin_related:
-                reason = (
-                    f"{decoded} -- this may mean the eDrawings add-in is "
-                    f"not loaded, or (if running SOLIDWORKS Connected) that "
-                    f"eDrawings export is unsupported in that mode"
-                )
-            else:
-                reason = decoded if error_code != 0 else "SaveAs3 returned false"
-            return self._result(
-                False, f"eDrawings export failed: {reason}", SwErrors.swFileSaveError, data)
-
-        if not os.path.exists(output_path):
-            return self._result(
-                False,
-                f"SaveAs3 reported success but no file was written to {output_path!r}",
-                SwErrors.swExportError, data,
+        # A `swFileSaveError_e` bitmask that names one of the eDrawings-specific
+        # failures gets the add-in remediation hint appended to `_save_as3`'s
+        # already-decoded reason, so a caller can tell "eDrawings itself isn't
+        # available" from an ordinary export failure without parsing the text.
+        error_code = data.get("errors") or 0
+        addin_related = bool(error_code & _EDRAWINGS_ADDIN_ERROR_BITS)
+        data["addin_available"] = not addin_related
+        if addin_related:
+            result["message"] = (
+                f"{result['message']} -- this may mean the eDrawings add-in is "
+                f"not loaded, or (if running SOLIDWORKS Connected) that "
+                f"eDrawings export is unsupported in that mode"
             )
-
-        data["size_bytes"] = os.path.getsize(output_path)
-        data["addin_available"] = True
-        return self._result(True, f"Exported eDrawings: {output_path}", SwErrors.swSuccess, data)
+        return result
 
     def get_custom_properties(self, configuration: Optional[str] = None) -> Dict:
         """
@@ -2049,6 +2110,29 @@ class DrawingOperations:
         # not be empty -- it's used directly as a path segment.
         return _sanitize_filename_component(name) or "_"
 
+    def _batch_export_call(self, fmt: str, path: str, sheet_name: Optional[str]):
+        """The zero-argument callable that exports `fmt` to `path` for
+        `batch_export_pack` -- one sheet when `sheet_name` is given, or the
+        whole drawing combined when it is `None`.
+
+        The single place that knows how each format's own export tool spells
+        "just this sheet": PDF takes an explicit name list, while DXF/DWG and
+        eDrawings can only export the *active* sheet (see
+        `_BATCH_EXPORT_NEEDS_ACTIVE_SHEET`), so the caller activates it first
+        and they take `sheets="current"`. Keeping that here means the combined
+        and per-sheet loops in `batch_export_pack` are the same two lines
+        rather than two copies of a per-format `if` ladder.
+        """
+        if fmt == "pdf":
+            sheets: Any = "all" if sheet_name is None else [sheet_name]
+            return lambda: self.export_pdf(path, sheets=sheets)
+
+        sheets = "all" if sheet_name is None else "current"
+        if fmt == "edrawings":
+            return lambda: self.export_edrawings(path, sheets=sheets)
+        return lambda: self.export_dxf_dwg(
+            path, format=fmt, sheets=sheets, multisheet="single_file")
+
     def _save_native_copy(self, doc: Any, path: str) -> Dict:
         """Save a `.SLDDRW` copy of `doc` at `path` for `batch_export_pack`'s
         `include_native`, via `IModelDocExtension::SaveAs3` with
@@ -2058,50 +2142,17 @@ class DrawingOperations:
         re-points the open document at a given `filepath`), the `Copy` bit
         here writes `path` as a side copy and leaves the active document's
         own identity/path untouched -- the behavior an "archive copy" of a
-        drawing that's still being worked on needs. Otherwise mirrors
-        `export_pdf`'s `Errors`/`Warnings` byref decoding and on-disk
-        existence verification.
+        drawing that's still being worked on needs. The option bitmask is the
+        only thing that differs from the export tools; everything else comes
+        from the shared `_save_as3` primitive.
         """
-        errors = com_backend.byref_int()
-        warnings = com_backend.byref_int()
-        try:
-            export_data = com_backend.null_dispatch()
-            advanced_options = com_backend.null_dispatch()
-            options = (
+        return self._save_as3(
+            doc, path, label="Native archive save",
+            options=(
                 int(SwSaveAsOptions.swSaveAsOptions_Silent)
                 | int(SwSaveAsOptions.swSaveAsOptions_Copy)
-            )
-            saved = doc.Extension.SaveAs3(
-                path, int(SwSaveAsVersion.swSaveAsCurrentVersion), options,
-                export_data, advanced_options, errors, warnings,
-            )
-        except Exception as e:
-            logger.error(f"batch_export_pack native archive save error: {e}")
-            return self._result(
-                False, f"Native archive save error: {e}", SwErrors.swFileSaveError)
-
-        error_code = int(errors.value or 0)
-        warning_code = int(warnings.value or 0)
-        decoded = decode_save_error(error_code)
-        data = {
-            "path": path, "errors": error_code, "warnings": warning_code,
-            "decoded_errors": decoded,
-        }
-
-        if not saved or error_code != 0:
-            reason = decoded if error_code != 0 else "SaveAs3 returned false"
-            return self._result(
-                False, f"Native archive save failed: {reason}", SwErrors.swFileSaveError, data)
-
-        if not os.path.exists(path):
-            return self._result(
-                False,
-                f"SaveAs3 reported success but no file was written to {path!r}",
-                SwErrors.swExportError, data,
-            )
-
-        data["size_bytes"] = os.path.getsize(path)
-        return self._result(True, f"Saved native archive: {path}", SwErrors.swSuccess, data)
+            ),
+        )
 
     def batch_export_pack(
         self, output_dir: str, formats: Optional[List[str]] = None,
@@ -2315,60 +2366,52 @@ class DrawingOperations:
                 entry["error"] = result.get("message")
             manifest_entries.append(entry)
 
+        # The base name for anything not tied to one sheet: a combined
+        # per-format file, and the native archive copy in either mode.
+        combined_base = self._resolve_batch_export_filename(
+            filename_pattern, drawing=drawing_name, sheet="all", index=0,
+            date=date_str, rev=rev)
+
         if per_sheet:
+            # Only the formats with no "these specific sheets" mode of their
+            # own need the sheet made active first; `export_pdf` drives
+            # `IExportPdfData::SetSheets` instead. With the default
+            # `formats=["pdf"]` this skips one `ActivateSheet` per sheet --
+            # a sheet switch regenerates its views, the most expensive COM
+            # call in this loop.
+            needs_active_sheet = any(
+                f in _BATCH_EXPORT_NEEDS_ACTIVE_SHEET for f in fmt_list)
             for index, sheet_name in enumerate(available_sheets, start=1):
-                activate_result = self.activate_sheet(sheet_name)
-                activate_ok = bool(activate_result.get("success"))
+                activate_result = (
+                    self.activate_sheet(sheet_name) if needs_active_sheet else None)
+                activate_ok = activate_result is None or bool(activate_result["success"])
                 filename_base = self._resolve_batch_export_filename(
                     filename_pattern, drawing=drawing_name, sheet=sheet_name,
                     index=index, date=date_str, rev=rev)
                 for fmt in fmt_list:
                     path = os.path.join(
                         output_dir, filename_base + _BATCH_EXPORT_FORMAT_EXTENSIONS[fmt])
-                    if fmt == "pdf":
+                    if not activate_ok and fmt in _BATCH_EXPORT_NEEDS_ACTIVE_SHEET:
+                        # Routed through `_attempt` with a pre-failed result
+                        # so the manifest entry is built in exactly one place.
+                        message = (
+                            f"Could not activate sheet {sheet_name!r}: "
+                            f"{activate_result.get('message')}")
                         _attempt(
                             path, fmt, sheet_name,
-                            lambda p=path, s=sheet_name: self.export_pdf(p, sheets=[s]))
-                    elif not activate_ok:
-                        manifest_entries.append({
-                            "path": path, "format": fmt, "sheet": sheet_name,
-                            "success": False, "size_bytes": None,
-                            "error": f"Could not activate sheet {sheet_name!r}: "
-                                     f"{activate_result.get('message')}",
-                            "timestamp": datetime.datetime.now().isoformat(),
-                        })
-                    elif fmt in ("dxf", "dwg"):
-                        _attempt(
-                            path, fmt, sheet_name,
-                            lambda p=path, f=fmt: self.export_dxf_dwg(
-                                p, format=f, sheets="current", multisheet="single_file"))
-                    else:  # edrawings
-                        _attempt(
-                            path, fmt, sheet_name,
-                            lambda p=path: self.export_edrawings(p, sheets="current"))
+                            lambda m=message: {"success": False, "message": m})
+                        continue
+                    _attempt(
+                        path, fmt, sheet_name,
+                        self._batch_export_call(fmt, path, sheet_name))
         else:
-            filename_base = self._resolve_batch_export_filename(
-                filename_pattern, drawing=drawing_name, sheet="all", index=0,
-                date=date_str, rev=rev)
             for fmt in fmt_list:
                 path = os.path.join(
-                    output_dir, filename_base + _BATCH_EXPORT_FORMAT_EXTENSIONS[fmt])
-                if fmt == "pdf":
-                    _attempt(path, fmt, None, lambda p=path: self.export_pdf(p, sheets="all"))
-                elif fmt in ("dxf", "dwg"):
-                    _attempt(
-                        path, fmt, None,
-                        lambda p=path, f=fmt: self.export_dxf_dwg(
-                            p, format=f, sheets="all", multisheet="single_file"))
-                else:  # edrawings
-                    _attempt(
-                        path, fmt, None, lambda p=path: self.export_edrawings(p, sheets="all"))
+                    output_dir, combined_base + _BATCH_EXPORT_FORMAT_EXTENSIONS[fmt])
+                _attempt(path, fmt, None, self._batch_export_call(fmt, path, None))
 
         if include_native:
-            native_base = self._resolve_batch_export_filename(
-                filename_pattern, drawing=drawing_name, sheet="all", index=0,
-                date=date_str, rev=rev)
-            native_path = os.path.join(output_dir, native_base + ".slddrw")
+            native_path = os.path.join(output_dir, combined_base + ".slddrw")
             _attempt(
                 native_path, "native", None,
                 lambda p=native_path: self._save_native_copy(doc, p))
@@ -2387,19 +2430,16 @@ class DrawingOperations:
             logger.error(f"batch_export_pack manifest write error: {e}")
             manifest_path = None
 
+        # At least one entry is guaranteed: the "nothing to export" case
+        # (`formats == []` with `include_native=False`) and the no-sheets case
+        # both fail fast above, so every path through the loops appends.
         failures = [e for e in manifest_entries if not e["success"]]
         succeeded = len(manifest_entries) - len(failures)
-        overall_success = bool(manifest_entries) and not failures
+        overall_success = not failures
 
-        if not manifest_entries:
-            message = "Nothing was exported"
-        elif overall_success:
-            message = f"Exported {succeeded}/{len(manifest_entries)} file(s)"
-        else:
-            message = (
-                f"Exported {succeeded}/{len(manifest_entries)} file(s); "
-                f"{len(failures)} failed"
-            )
+        message = f"Exported {succeeded}/{len(manifest_entries)} file(s)"
+        if failures:
+            message += f"; {len(failures)} failed"
 
         data = {
             "output_dir": output_dir,

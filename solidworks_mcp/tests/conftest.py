@@ -11,6 +11,7 @@ import pytest
 
 from solidworks_mcp.automation import SolidWorksAutomation
 from solidworks_mcp.testing import install_fake_backend
+from solidworks_mcp.tools import sw_automation
 
 
 @pytest.fixture
@@ -43,3 +44,24 @@ def automation(fake_sw):
     result = auto.connect()
     assert result["success"], result
     return auto
+
+
+@pytest.fixture
+def tool_sw(make_sw):
+    """Factory connecting the shared `tools.sw_automation` singleton -- what
+    `dispatch()` actually calls through -- to a fresh fake
+    `SldWorks.Application`, disconnected after the test.
+
+    Defaults to a drawing document, since that's what the drawing tools
+    require; pass `tool_sw("part")` for the wrong-document-type cases. A test
+    module needing a different default can still define its own `tool_sw`,
+    which shadows this one.
+    """
+    def _make(doc_type="drawing", **kwargs):
+        fake = make_sw(doc_type, **kwargs)
+        connected = sw_automation.connect()
+        assert connected["success"], connected
+        return fake
+
+    yield _make
+    sw_automation.disconnect()
