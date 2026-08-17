@@ -66,6 +66,10 @@ class TestInsertBreakViewHappyPath:
         view = _seed_view_and_selection(fake_sw)
         view.set_return("target_view.InsertBreak3", True)
         view.set_return("target_view.GetBreakLineCount2", 1)
+        # Not broken before the call, broken after -- `insert_break_view`
+        # checks `IsBroken` as a precondition and again to confirm
+        # `BreakView` (a void Sub) actually applied the break.
+        view.set_sequence("target_view.IsBroken", [False, True])
 
         result = dispatch("insert_break_view", {
             "view_name": "Drawing View1",
@@ -103,6 +107,7 @@ class TestInsertBreakViewHappyPath:
         fake_sw = tool_sw("drawing")
         view = _seed_view_and_selection(fake_sw)
         view.set_return("target_view.InsertBreak3", True)
+        view.set_sequence("target_view.IsBroken", [False, True])
 
         result = dispatch("insert_break_view", {
             "view_name": "Drawing View1", "position1": 0, "position2": 10,
@@ -117,6 +122,7 @@ class TestInsertBreakViewHappyPath:
         fake_sw = tool_sw("drawing")
         view = _seed_view_and_selection(fake_sw)
         view.set_return("target_view.InsertBreak3", True)
+        view.set_sequence("target_view.IsBroken", [False, True])
 
         result = dispatch("insert_break_view", {
             "view_name": "Drawing View1", "position1": 0, "position2": 10,
@@ -184,10 +190,43 @@ class TestInsertBreakViewValidation:
 
 
 class TestInsertBreakViewFailurePaths:
+    def test_already_broken_view_rejected_without_com_write(self, tool_sw):
+        fake_sw = tool_sw("drawing")
+        view = _seed_view_and_selection(fake_sw)
+        view.set_return("target_view.IsBroken", True)
+
+        result = dispatch("insert_break_view", {
+            "view_name": "Drawing View1", "position1": 0, "position2": 10,
+        })
+
+        assert result["success"] is False
+        assert result["error_name"] == "swFeatureError"
+        assert "already broken" in result["message"]
+        assert not fake_sw.call_log.calls_to("ActivateView")
+        assert not fake_sw.call_log.calls_to("InsertBreak3")
+
+    def test_breakview_silent_noop_reported(self, tool_sw):
+        fake_sw = tool_sw("drawing")
+        view = _seed_view_and_selection(fake_sw)
+        view.set_return("target_view.InsertBreak3", True)
+        # Still not broken after BreakView -- its documented failure mode.
+        view.set_return("target_view.IsBroken", False)
+
+        result = dispatch("insert_break_view", {
+            "view_name": "Drawing View1", "position1": 0, "position2": 10,
+        })
+
+        assert result["success"] is False
+        assert result["error_name"] == "swFeatureError"
+        assert "did not apply the break" in result["message"]
+        assert fake_sw.call_log.calls_to("BreakView")
+
     def test_activate_view_failure_fails_before_insert_break3(self, tool_sw):
         fake_sw = tool_sw("drawing")
         sheet = fake_sw.ActiveDoc.GetCurrentSheet()
-        sheet.set_return("GetViews", [_view(fake_sw, "target_view", "Drawing View1")])
+        view = _view(fake_sw, "target_view", "Drawing View1")
+        view.set_return("target_view.IsBroken", False)
+        sheet.set_return("GetViews", [view])
         fake_sw.ActiveDoc.set_return("ActivateView", False)
 
         result = dispatch("insert_break_view", {
@@ -202,6 +241,7 @@ class TestInsertBreakViewFailurePaths:
         fake_sw = tool_sw("drawing")
         view = _seed_view_and_selection(fake_sw)
         view.set_return("target_view.InsertBreak3", None)
+        view.set_return("target_view.IsBroken", False)
 
         result = dispatch("insert_break_view", {
             "view_name": "Drawing View1", "position1": 0, "position2": 10,
@@ -215,6 +255,7 @@ class TestInsertBreakViewFailurePaths:
         fake_sw = tool_sw("drawing")
         view = _seed_view_and_selection(fake_sw)
         view.set_return("target_view.InsertBreak3", True)
+        view.set_return("target_view.IsBroken", False)
         fake_sw.ActiveDoc.Extension.set_return("SelectByID2", False)
 
         result = dispatch("insert_break_view", {

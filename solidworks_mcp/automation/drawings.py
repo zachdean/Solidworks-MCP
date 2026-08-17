@@ -3989,13 +3989,12 @@ class DrawingOperations:
 
         Both methods respect the `swAutomaticScaling3ViewDrawings` user
         preference rather than taking a scale argument of their own
-        (docs/api/02-views.md's Gotchas on both records). This wrapper
-        snapshots the preference's current value via
-        `ISldWorks::GetUserPreferenceToggle`, writes `auto_scale` via
-        `SetUserPreferenceToggle` for the duration of the call, and restores
-        the original value afterward in a `finally` -- on both the success
-        and the exception path -- so the operator's SolidWorks install
-        setting is never silently left changed by an automation run.
+        (docs/api/02-views.md's Gotchas on both records). `auto_scale` is
+        therefore written through this file's own `_user_preference` context
+        manager, which snapshots the preference on entry and restores exactly
+        the value it read on exit -- on the success, early-return, and
+        exception paths alike -- so the operator's SolidWorks install setting
+        is never silently left changed by an automation run.
 
         Args:
             model_path: Full pathname of the model document to build the
@@ -4009,34 +4008,22 @@ class DrawingOperations:
         if err:
             return err
 
-        toggle = int(SwUserPreferenceToggle.swAutomaticScaling3ViewDrawings)
-        try:
-            original_auto_scale = self._sw_app.GetUserPreferenceToggle(toggle)
-        except Exception as e:
-            logger.error(f"insert_standard_3_view read preference error: {e}")
-            return self._result(False, f"Read preference error: {e}", SwErrors.swUnknownError)
-
-        try:
-            self._sw_app.SetUserPreferenceToggle(toggle, bool(auto_scale))
-        except Exception as e:
-            logger.error(f"insert_standard_3_view set preference error: {e}")
-            return self._result(False, f"Set preference error: {e}", SwErrors.swUnknownError)
-
         data = {"model_path": model_path, "first_angle": first_angle, "auto_scale": auto_scale}
         try:
-            if first_angle:
-                created = doc.Create1stAngleViews2(model_path)
-            else:
-                created = doc.Create3rdAngleViews2(model_path)
-        except Exception as e:
-            logger.error(f"insert_standard_3_view error: {e}")
-            return self._result(False, f"Insert standard 3 view error: {e}",
-                                SwErrors.swFeatureError, data)
-        finally:
-            try:
-                self._sw_app.SetUserPreferenceToggle(toggle, bool(original_auto_scale))
-            except Exception as e:
-                logger.error(f"insert_standard_3_view restore preference error: {e}")
+            with self._user_preference(
+                    SwUserPreferenceToggle.swAutomaticScaling3ViewDrawings, auto_scale):
+                try:
+                    if first_angle:
+                        created = doc.Create1stAngleViews2(model_path)
+                    else:
+                        created = doc.Create3rdAngleViews2(model_path)
+                except Exception as e:
+                    logger.error(f"insert_standard_3_view error: {e}")
+                    return self._result(False, f"Insert standard 3 view error: {e}",
+                                        SwErrors.swFeatureError, data)
+        except _PreferenceError as e:
+            logger.error(f"insert_standard_3_view preference error: {e}")
+            return self._result(False, str(e), SwErrors.swUnknownError)
 
         if not created:
             return self._result(
@@ -4189,9 +4176,9 @@ class DrawingOperations:
 
         Unlike the public `activate_sheet`, this takes an already-resolved
         `doc` and reports `swInvalidInput` (a bad `sheet_name` argument)
-        rather than that tool's own result shape -- the two callers here are
-        validating one of their own parameters, not performing an
-        activation the caller asked for.
+        rather than that tool's own result shape -- every caller here is
+        validating one of its own parameters, not performing an activation
+        the caller asked for.
         """
         try:
             activated = doc.ActivateSheet(sheet_name)
@@ -4514,17 +4501,30 @@ class DrawingOperations:
             )
         dx_sign, dy_sign, not_aligned = mapping
 
+        # `CreateUnfoldedViewAt3` places the projection on whatever sheet is
+        # active, and `SelectByID2` only resolves a view on the active sheet
+        # -- so a named sheet has to be activated first, exactly as
+        # `insert_model_view`/`insert_predefined_views` do, or the parent-view
+        # selection silently misses and the new view lands on the wrong sheet.
+        if sheet_name:
+            activate_err = self._activate_sheet_or_error(
+                doc, sheet_name, "insert_projected_view")
+            if activate_err:
+                return activate_err
+
         parent_view, find_err = self._require_view(
             doc, parent_view_name, sheet_name,
             {"parent_view_name": parent_view_name}, label="parent view")
         if find_err:
             return find_err
 
+        parent_x_m, parent_y_m = 0.0, 0.0
         parent_position = self._read_prop(parent_view, "Position")
         if isinstance(parent_position, (list, tuple)) and len(parent_position) >= 2:
-            parent_x_m, parent_y_m = float(parent_position[0]), float(parent_position[1])
-        else:
-            parent_x_m, parent_y_m = 0.0, 0.0
+            try:
+                parent_x_m, parent_y_m = float(parent_position[0]), float(parent_position[1])
+            except (TypeError, ValueError):
+                parent_x_m, parent_y_m = 0.0, 0.0
 
         create_x_m = parent_x_m + dx_sign * _DEFAULT_PROJECTED_VIEW_STEP_M
         create_y_m = parent_y_m + dy_sign * _DEFAULT_PROJECTED_VIEW_STEP_M
@@ -4737,6 +4737,16 @@ class DrawingOperations:
         doc, err = self.get_drawing_doc()
         if err:
             return err
+
+        # `CreateAuxiliaryViewAt2` places the new view on whatever sheet is
+        # active (and the reference-edge selection below only resolves on the
+        # active sheet), so a named sheet is activated first -- same reason
+        # `insert_model_view`/`insert_projected_view` do it.
+        if sheet_name:
+            activate_err = self._activate_sheet_or_error(
+                doc, sheet_name, "insert_auxiliary_view")
+            if activate_err:
+                return activate_err
 
         parent_view, find_err = self._require_view(
             doc, parent_view_name, sheet_name,
@@ -4997,6 +5007,12 @@ class DrawingOperations:
             sketch_error_message="Sketch cut line error", data=data,
         )
         if sketch_err:
+            # A partially-sketched cut line is never consumed by anything --
+            # only a successful `CreateSectionViewAt5` absorbs the geometry --
+            # so it is cleaned up on every pre-creation failure path, the same
+            # way `insert_detail_view`/`insert_broken_out_section` clean up
+            # theirs. Otherwise a retry re-sketches on top of the leftovers.
+            self._delete_sketch_geometry(doc, segment_midpoints)
             return sketch_err
 
         # Select every cut-line segment atomically before the call, per the
@@ -5004,6 +5020,7 @@ class DrawingOperations:
         with ExitStack() as stack:
             sel_err = self._select_segments(stack, segment_midpoints)
             if sel_err:
+                self._delete_sketch_geometry(doc, segment_midpoints)
                 return sel_err
 
             try:
@@ -5015,10 +5032,12 @@ class DrawingOperations:
                 view = doc.CreateSectionViewAt5(*args)
             except Exception as e:
                 logger.error(f"insert_section_view error: {e}")
+                self._delete_sketch_geometry(doc, segment_midpoints)
                 return self._result(False, f"Insert section view error: {e}",
                                     SwErrors.swFeatureError, data)
 
         if view is None:
+            self._delete_sketch_geometry(doc, segment_midpoints)
             return self._result(
                 False, f"Failed to create section view off {parent_view_name!r}",
                 SwErrors.swFeatureError, data,
@@ -5156,8 +5175,8 @@ class DrawingOperations:
 
     def _delete_sketch_geometry(self, doc, points: List[Tuple[float, float]]) -> None:
         """Best-effort cleanup of construction sketch geometry left behind by a
-        failed `insert_detail_view`/`insert_broken_out_section`/`add_crop_view`
-        call, via
+        failed `insert_section_view`/`insert_detail_view`/
+        `insert_broken_out_section`/`add_crop_view` call, via
         `IModelDocExtension::DeleteSelection2` (docs/api/02-views.md's own
         record, reused here per that record's sw-8ww.4 addendum) -- selects
         every point in `points` (view-local space, caller's default unit) as
@@ -5645,11 +5664,15 @@ class DrawingOperations:
                 values.
 
         Returns:
-            Result dict. On success, `data["break_count"]` is the view's
-            resulting break count, read back via `IView::GetBreakLineCount2`
-            (best-effort -- a read failure doesn't fail the whole call, since
-            the break itself was already successfully applied by that
-            point).
+            Result dict. Fails with `swFeatureError` -- before any COM write
+            -- if the view is already broken (`IView::IsBroken`), the
+            precondition `InsertBreak3`'s own record states, and again after
+            `BreakView` if the view still reports *not* broken (that call is a
+            bare `Sub` whose documented failure mode is a silent no-op). On
+            success, `data["break_count"]` is the view's resulting break
+            count, read back via `IView::GetBreakLineCount2` (best-effort --
+            a read failure leaves it `None` rather than failing the whole
+            call, since the break itself was already applied by that point).
         """
         doc, err = self.get_drawing_doc()
         if err:
@@ -5682,6 +5705,23 @@ class DrawingOperations:
         view, find_err = self._require_view(doc, view_name, None, data)
         if find_err:
             return find_err
+
+        # `InsertBreak3`'s own record: "The view must not already be broken."
+        # It has no failure code of its own (and no documented behavior for a
+        # second break), so the precondition is checked here rather than
+        # relying on the COM call to reject it -- the same proactive guard
+        # `add_crop_view` applies with `IsCropped`. Only a *definite* True
+        # blocks the call (`_com_bool`, since `VARIANT_BOOL` arrives as `bool`
+        # through some interop layers and `0`/`-1` through others); an
+        # unreadable `IsBroken` leaves the COM call to be the thing that
+        # fails.
+        if _com_bool(self._read_prop(view, "IsBroken")):
+            return self._result(
+                False,
+                f"View {view_name!r} is already broken -- remove the existing break "
+                "first (remove_break_view) rather than stacking a new one",
+                SwErrors.swFeatureError, data,
+            )
 
         activate_err = self._activate_view(doc, view_name, "insert_break_view", data)
         if activate_err:
@@ -5729,14 +5769,33 @@ class DrawingOperations:
                     SwErrors.swFeatureError, data,
                 )
 
+        # `BreakView` is a bare `Sub` -- no return value, and its own record
+        # warns its failure mode is a silent no-op rather than a raised error.
+        # `IView::IsBroken` is the only readable signal that the break was
+        # actually applied, so it is checked here the same way
+        # `remove_break_view` checks it after `UnBreakView`. Only a definite
+        # `False` fails the call; an unreadable state is not evidence of a
+        # no-op.
+        if _com_bool(self._read_prop(view, "IsBroken")) is False:
+            return self._result(
+                False,
+                f"Inserted break lines on {view_name!r} but BreakView did not apply "
+                "the break",
+                SwErrors.swFeatureError, data,
+            )
+
+        # `Size` is a ByRef out-parameter (a buffer-sizing hint for
+        # `GetBreakLineInfo2`, not the count) -- it has to be a real VARIANT
+        # box, per this file's `errors`/`warnings` convention, or the call
+        # itself fails on a real interop layer. The break count is the
+        # function's own return value; anything non-numeric coming back is
+        # reported as `None` rather than leaking a raw COM object into `data`.
         try:
-            count = view.GetBreakLineCount2(0)
+            count = view.GetBreakLineCount2(com_backend.byref_int())
         except Exception as e:
             logger.debug(f"insert_break_view GetBreakLineCount2 read failed: {e}")
             count = None
-        data["break_count"] = (
-            int(count) if isinstance(count, (int, float)) and not isinstance(count, bool) else count
-        )
+        data["break_count"] = _com_int(count)
 
         return self._result(True, f"Inserted break on {view_name!r}", SwErrors.swSuccess, data)
 
@@ -5780,7 +5839,7 @@ class DrawingOperations:
                 logger.error(f"remove_break_view UnBreakView error: {e}")
                 return self._result(False, f"Remove break error: {e}", SwErrors.swFeatureError, data)
 
-        if self._read_prop(view, "IsBroken"):
+        if _com_bool(self._read_prop(view, "IsBroken")):
             return self._result(
                 False, f"UnBreakView did not clear the break state on {view_name!r}",
                 SwErrors.swFeatureError, data,
@@ -5843,7 +5902,7 @@ class DrawingOperations:
         if find_err:
             return find_err
 
-        if self._read_prop(view, "IsCropped"):
+        if _com_bool(self._read_prop(view, "IsCropped")):
             return self._result(
                 False,
                 f"View {view_name!r} is already cropped -- remove the existing crop "
@@ -5932,7 +5991,7 @@ class DrawingOperations:
         if find_err:
             return find_err
 
-        if not self._read_prop(view, "IsCropped"):
+        if _com_bool(self._read_prop(view, "IsCropped")) is False:
             return self._result(
                 False, f"View {view_name!r} is not cropped -- nothing to remove",
                 SwErrors.swFeatureError, data,
@@ -5953,7 +6012,7 @@ class DrawingOperations:
                 SwErrors.swFeatureError, data,
             )
 
-        if self._read_prop(view, "IsCropped"):
+        if _com_bool(self._read_prop(view, "IsCropped")):
             return self._result(
                 False, f"Crop was not removed from {view_name!r}",
                 SwErrors.swFeatureError, data,
@@ -5994,12 +6053,11 @@ class DrawingOperations:
         if err:
             return err
 
-        view, find_err = self._require_view(
-            doc, view_name, sheet_name, {"view_name": view_name})
+        data = {"view_name": view_name, "x": x, "y": y, "sheet_name": sheet_name}
+
+        view, find_err = self._require_view(doc, view_name, sheet_name, data)
         if find_err:
             return find_err
-
-        data = {"view_name": view_name, "x": x, "y": y, "sheet_name": sheet_name}
 
         if self._is_alignment_locked(view):
             return self._result(
@@ -6371,7 +6429,10 @@ class DrawingOperations:
                 True: delete every descendant first (deepest first), then
                 `view_name` itself, reporting every view actually removed.
             sheet_name: Sheet `view_name` lives on, resolved the same way
-                `list_views` does.
+                `list_views` does, and activated first: deletion goes through
+                `SelectByID2`, which only resolves a view on the *active*
+                sheet, so without the activation a named non-active sheet's
+                view would validate here and then fail to select.
 
         Returns:
             Result dict. On success, `data["removed"]` lists every view
@@ -6386,6 +6447,11 @@ class DrawingOperations:
             return err
 
         data = {"view_name": view_name, "cascade": cascade, "sheet_name": sheet_name}
+
+        if sheet_name:
+            activate_err = self._activate_sheet_or_error(doc, sheet_name, "delete_view")
+            if activate_err:
+                return activate_err
 
         sheet, sheet_err = self._resolve_sheet(doc, sheet_name)
         if sheet_err:
@@ -6527,13 +6593,20 @@ class DrawingOperations:
             if not isinstance(outline, (list, tuple)) or len(outline) < 4:
                 skipped.append(name)
                 continue
+            # A non-numeric element counts as an unreadable outline (skipped),
+            # not an exception out of the whole tool -- same rule
+            # `_describe_view` applies to `IView::Position`.
+            try:
+                xmin, ymin, xmax, ymax = tuple(float(v) for v in outline[:4])
+            except (TypeError, ValueError):
+                skipped.append(name)
+                continue
             parent_name = self._base_view_name(view)
             locked = self._is_alignment_locked(view)
 
             by_name[name] = {
                 "name": name, "view": view, "parent_name": parent_name, "locked": locked,
-                "xmin": float(outline[0]), "ymin": float(outline[1]),
-                "xmax": float(outline[2]), "ymax": float(outline[3]),
+                "xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax,
             }
 
         data = {"sheet_name": sheet_name, "margin": margin, "skipped": skipped}

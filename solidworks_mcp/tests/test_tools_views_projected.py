@@ -183,6 +183,44 @@ class TestInsertProjectedView:
         assert result["error_name"] == "swSelectionError"
         assert not fake_sw.call_log.calls_to("CreateUnfoldedViewAt3")
 
+    def test_sheet_name_activates_sheet_before_creating(self, tool_sw):
+        """`CreateUnfoldedViewAt3` places the projection on whichever sheet is
+        active, so a named sheet has to be activated before the parent view is
+        selected -- otherwise the new view lands on the wrong sheet."""
+        fake_sw = tool_sw("drawing")
+        sheet = fake_sw.ActiveDoc.GetCurrentSheet()
+        sheet.set_return("GetViews", [_view(fake_sw, "parent_view", "Drawing View1",
+                                             position=[0.1, 0.2])])
+        fake_sw.ActiveDoc.set_return("ActivateSheet", True)
+        fake_sw.ActiveDoc.Extension.set_return("SelectByID2", True)
+        new_view = fake_sw.new_object("proj_view")
+        new_view.set_return("proj_view.GetName2", "Drawing View2")
+        fake_sw.ActiveDoc.set_return("CreateUnfoldedViewAt3", new_view)
+
+        result = dispatch("insert_projected_view", {
+            "parent_view_name": "Drawing View1", "direction": "right",
+            "sheet_name": "Sheet2",
+        })
+
+        assert result["success"] is True, result
+        names = fake_sw.call_log.ordered_names()
+        assert names.index("ActivateSheet") < names.index("SelectByID2")
+        assert names.index("ActivateSheet") < names.index("CreateUnfoldedViewAt3")
+        fake_sw.call_log.assert_called_with("ActivateSheet", "Sheet2")
+
+    def test_unknown_sheet_name_fails_without_creating(self, tool_sw):
+        fake_sw = tool_sw("drawing")
+        fake_sw.ActiveDoc.set_return("ActivateSheet", False)
+
+        result = dispatch("insert_projected_view", {
+            "parent_view_name": "Drawing View1", "direction": "right",
+            "sheet_name": "NoSuchSheet",
+        })
+
+        assert result["success"] is False
+        assert result["error_name"] == "swInvalidInput"
+        assert not fake_sw.call_log.calls_to("CreateUnfoldedViewAt3")
+
     def test_rejects_when_active_document_is_not_a_drawing(self, tool_sw):
         tool_sw("part")
 
@@ -402,6 +440,43 @@ class TestInsertAuxiliaryView:
         log.assert_called_with(
             "CreateAuxiliaryViewAt2", 0.05, 0.025, 0.0, False, "A", True, False,
         )
+
+    def test_sheet_name_activates_sheet_before_creating(self, tool_sw):
+        """`CreateAuxiliaryViewAt2` also places its view on the active sheet,
+        so a named sheet is activated before the reference edge is selected."""
+        fake_sw = tool_sw("drawing")
+        sheet = fake_sw.ActiveDoc.GetCurrentSheet()
+        sheet.set_return("GetViews", [_view(fake_sw, "parent_view", "Drawing View1")])
+        fake_sw.ActiveDoc.set_return("ActivateSheet", True)
+        fake_sw.ActiveDoc.Extension.set_return("SelectByID2", True)
+        new_view = fake_sw.new_object("aux_view")
+        new_view.set_return("aux_view.GetName2", "Drawing View2")
+        fake_sw.ActiveDoc.set_return("CreateAuxiliaryViewAt2", new_view)
+
+        result = dispatch("insert_auxiliary_view", {
+            "parent_view_name": "Drawing View1",
+            "edge_selection": {"x": 1, "y": 1},
+            "x": 0, "y": 0, "sheet_name": "Sheet2",
+        })
+
+        assert result["success"] is True, result
+        names = fake_sw.call_log.ordered_names()
+        assert names.index("ActivateSheet") < names.index("CreateAuxiliaryViewAt2")
+        fake_sw.call_log.assert_called_with("ActivateSheet", "Sheet2")
+
+    def test_unknown_sheet_name_fails_without_creating(self, tool_sw):
+        fake_sw = tool_sw("drawing")
+        fake_sw.ActiveDoc.set_return("ActivateSheet", False)
+
+        result = dispatch("insert_auxiliary_view", {
+            "parent_view_name": "Drawing View1",
+            "edge_selection": {"x": 1, "y": 1},
+            "x": 0, "y": 0, "sheet_name": "NoSuchSheet",
+        })
+
+        assert result["success"] is False
+        assert result["error_name"] == "swInvalidInput"
+        assert not fake_sw.call_log.calls_to("CreateAuxiliaryViewAt2")
 
     def test_unknown_parent_view_errors_listing_available_views(self, tool_sw):
         fake_sw = tool_sw("drawing")

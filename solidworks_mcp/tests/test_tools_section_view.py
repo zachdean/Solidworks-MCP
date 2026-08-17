@@ -391,6 +391,7 @@ class TestInsertSectionViewErrorPaths:
         assert result["success"] is False
         assert result["error_name"] == "swSelectionError"
         assert not fake_sw.call_log.calls_to("CreateSectionViewAt5")
+        assert fake_sw.call_log.calls_to("DeleteSelection2")
 
     def test_activate_view_failure_fails_without_sketching(self, tool_sw):
         fake_sw = tool_sw("drawing")
@@ -422,6 +423,10 @@ class TestInsertSectionViewErrorPaths:
         assert result["success"] is False
         assert result["error_name"] == "swFeatureError"
         assert "Drawing View1" in result["message"]
+        # Only a successful create consumes the cut line, so a failed call
+        # cleans up its own sketch geometry instead of leaving a stray open
+        # sketch that a retry would re-sketch on top of.
+        assert fake_sw.call_log.calls_to("DeleteSelection2")
 
     def test_get_section_returning_none_fails_naming_the_created_view(self, tool_sw):
         fake_sw = tool_sw("drawing")

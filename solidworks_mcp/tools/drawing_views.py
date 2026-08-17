@@ -291,7 +291,7 @@ def insert_auxiliary_view(arguments: dict) -> Dict:
                     "coordinate space, in set_units' unit. 2 points = straight cut; "
                     "3+ = offset/stepped cut."
                 ),
-                "items": {"type": "object"},
+                "items": {"type": ["array", "object"]},
                 "minItems": 2,
             },
             "x": {"type": "number", "description": "Section view placement X on the sheet, in set_units' unit"},
@@ -445,7 +445,7 @@ def insert_detail_view(arguments: dict) -> Dict:
                     "coordinate space, in set_units' unit -- the closed profile "
                     "boundary (auto-closed; a pre-closed chain is also accepted)."
                 ),
-                "items": {"type": "object"},
+                "items": {"type": ["array", "object"]},
                 "minItems": 3,
             },
             "depth": {
@@ -497,7 +497,11 @@ def insert_broken_out_section(arguments: dict) -> Dict:
         "InsertBreak3 parameter); omit to leave the existing gap untouched. "
         "style is straight/zigzag (default)/curve/small_zigzag/jagged, "
         "mapped to swBreakLineStyle_e -- an unknown value fails listing the "
-        "valid values. Returns the resulting break count."
+        "valid values. Fails without touching the view if it is already "
+        "broken (IView::IsBroken) -- call remove_break_view first to "
+        "re-break it -- and fails after BreakView if the view still reports "
+        "not broken, since BreakView's own failure mode is a silent no-op. "
+        "Returns the resulting break count."
     ),
     schema={
         "type": "object",
@@ -594,7 +598,7 @@ def remove_break_view(arguments: dict) -> Dict:
                     "profile boundary (auto-closed; a pre-closed chain is "
                     "also accepted)."
                 ),
-                "items": {"type": "object"},
+                "items": {"type": ["array", "object"]},
                 "minItems": 3,
             },
         },
