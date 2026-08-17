@@ -117,6 +117,12 @@ EXPECTED_TOOL_NAMES = {
     "insert_revision_table",
     "add_revision",
     "insert_weldment_cutlist",
+    "update_table",
+    "get_table_contents",
+    "set_table_cell",
+    "set_table_position",
+    "set_table_anchor",
+    "delete_table",
     # Sketch Tools
     "create_sketch",
     "create_sketch_on_face",

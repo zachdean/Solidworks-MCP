@@ -1,6 +1,6 @@
 ---
 interface: Multiple (IModelDocExtension, IView, IBomTableAnnotation, IDrawingDoc, ISheet, IRevisionTableAnnotation, IWeldmentCutListAnnotation, IHoleTableAnnotation, ITableAnnotation, IAnnotation)
-min_methods: 34
+min_methods: 36
 status: complete
 ---
 
@@ -52,6 +52,17 @@ for a quick scan, following the same honesty convention established in
   self-rebuild automatically whenever a cell's text changes; there is no explicit
   "commit" call. See `ITableAnnotation::Text2`'s Gotchas for the documented
   `IAnnotation::Visible = False` performance workaround for bulk cell edits instead.
+  **sw-mio.4 addendum:** `update_table` therefore does not call any method literally
+  named `Update`. It combines two real levers instead, since they address two
+  different halves of "table contents don't live-sync": `IModelDoc2::ForceRebuild3`
+  (documented in `01-documents-and-sheets.md`) is called once per `update_table`
+  invocation to force the document — and hence every view/BOM feature a table reads
+  from — to recompute, addressing staleness after component/view changes; then, per
+  table in scope, `IAnnotation::Visible` (documented below) is toggled
+  `swAnnotationHidden` → `swAnnotationVisible` to force that table's own re-render,
+  the same lever `Text2`'s Gotchas already document for bulk-edit performance. A
+  table already hidden by the user (`Visible != swAnnotationVisible` on entry) is
+  left alone rather than toggled — see that record's Gotchas for why.
 - `ITableAnnotation::SetPosition` does not exist — confirmed by direct 404 fetch. Table
   position is set through the base annotation interface,
   `IAnnotation::SetPosition` (obtained via `ITableAnnotation::GetAnnotation`), not a
@@ -1389,6 +1400,119 @@ use `ITableAnnotation::DisplayedText` for the rendered text.
 
 ---
 
+### ITableAnnotation::IsCellTextEditable
+
+- **Interface:** ITableAnnotation
+- **Method:** IsCellTextEditable (function)
+- **Minimum SW version:** SOLIDWORKS 2004 FCS, Revision Number 12.0
+
+Added by sw-mio.4. `set_table_cell`'s read-only guard — confirmed present by direct
+fetch (real page, distinct from the confirmed-absent `GetCellText`/`SetCellText`
+above).
+
+**Signature:**
+
+```vb
+Function IsCellTextEditable( _
+   ByVal Row As System.Integer, _
+   ByVal Column As System.Integer _
+) As System.Boolean
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| Row | Integer | n/a | Yes | 0-based row index | |
+| Column | Integer | n/a | Yes | 0-based column index | |
+
+**Returns:** `Boolean` — `True` if the cell's text can be edited, `False` if not.
+
+**Prior selection required:** None beyond holding the `ITableAnnotation` (or derived
+interface) reference.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.ITableAnnotation~IsCellTextEditable.html
+
+**status:** verified
+
+**Gotchas:**
+- The index base and per-table-type editability rules are identical to `Text2`'s own
+  Gotchas (same page's Remarks table, reproduced there): BOM and General tables have
+  every cell editable; Hole tables only allow editing the header row and custom
+  columns (auto-generated columns answer `False`); Revision tables have every cell
+  editable.
+- `set_table_cell` calls this **before** calling `Text` to write, and refuses with
+  `swInvalidInput` on a definite `False` rather than attempting the write and letting
+  it silently no-op — the working agreement's read-only guard for this issue. If the
+  call itself raises (unexpected on a real install; possible against an older
+  interop layer), `set_table_cell` does not treat that as "not editable" — it
+  proceeds to the write and instead verifies success by reading the cell back
+  afterward via `Text2`, since a raised exception here is not evidence one way or
+  the other about editability.
+
+---
+
+### IAnnotation::Visible
+
+- **Interface:** IAnnotation
+- **Method:** Visible (property, read/write)
+- **Minimum SW version:** Not stated on the fetched page as a distinct "Minimum SW
+  version" callout; treated as long-standing (same era as `SetPosition` above,
+  unverified for this specific member).
+
+Added by sw-mio.4. `update_table`'s per-table forced-refresh lever, and the
+mechanism `ITableAnnotation::Text2`'s Gotchas already reference by name for its bulk-
+edit performance workaround, given its own record here since sw-mio.4 is the first
+issue to actually call it.
+
+**Signature:**
+
+```vb
+Property Visible As System.Integer
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| (none — set via assignment) | Integer | n/a | Yes (on set) | Visibility state | `swAnnotationVisibilityState_e` |
+
+**Returns:** `Integer` — current visibility state, as `swAnnotationVisibilityState_e`
+(see the Enums section below).
+
+**Prior selection required:** None beyond holding the `IAnnotation` reference,
+reached from a table annotation via `ITableAnnotation::GetAnnotation` like
+`SetPosition` above.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IAnnotation~Visible.html
+
+**status:** verified
+
+**Gotchas:**
+- **Not a Boolean.** The page's own "Visual Basic (Declaration)" block reads
+  `Property Visible As System.Integer`, and its Property Value text names
+  `swAnnotationVisibilityState_e` explicitly — assigning a Python `True`/`False`
+  here would rely on `bool`-is-`int` coercion landing on `1`/`0`, and `0`
+  (`swAnnotationVisibilityUnknown`) is not the same state as `3`
+  (`swAnnotationHidden`). `update_table` writes the named enum members
+  (`swAnnotationHidden`/`swAnnotationVisible`), not `False`/`True`.
+- Per the page's own Remarks, this property "cannot determine whether an annotation
+  is hidden if it is on a layer that is hidden ... or if the feature that the
+  annotation is attached to is suppressed" — a table can still be invisible on
+  screen for a reason this property doesn't report, and does not report back
+  through `update_table`'s result either.
+- **Side-effect discipline:** `update_table` reads a table's `Visible` state before
+  touching it and restores that same state afterward (toggle-and-restore, not
+  toggle-and-leave) — a table the user deliberately hid must not come back visible
+  as a side effect of a "refresh" call. Only a table already at
+  `swAnnotationVisible` is toggled `swAnnotationHidden` → `swAnnotationVisible`;
+  anything else (`swAnnotationHidden`, `swAnnotationHalfHidden`, or an unreadable/
+  `swAnnotationVisibilityUnknown` state) is left untouched.
+
+---
+
 ### ITableAnnotation::RowCount
 
 - **Interface:** ITableAnnotation
@@ -1941,6 +2065,64 @@ reference (the return value of `InsertWeldmentTable`).
   is this wrapper's own convention, not a documented SolidWorks contract, flagged
   here rather than asserted as fact.
 
+## Generic table update/read/edit tools (sw-mio.4)
+
+Added by sw-mio.4: `update_table`, `get_table_contents`, `set_table_cell`,
+`set_table_position`, `set_table_anchor`, `delete_table` — generic tools that work
+across every table type (BOM, hole, revision, weldment cut list, general, title
+block) rather than one bespoke tool per table type. All six are thin wrappers over
+members already documented above (`Text`/`Text2`, `IsCellTextEditable`, `RowCount`/
+`ColumnCount`/`TotalRowCount`/`TotalColumnCount`, `IAnnotation::Visible`/
+`SetPosition`, `ITableAnnotation::Anchored`/`AnchorType`) plus two additions:
+
+- **`update_table`'s `ForceRebuild3` + `Visible` toggle** — see the intro's
+  `ITableAnnotation::Update` bullet's sw-mio.4 addendum, and the `IAnnotation::
+  Visible` record above, for the full reasoning. No new COM member beyond
+  `IAnnotation::Visible` (documented above) and `IModelDoc2::ForceRebuild3`
+  (`01-documents-and-sheets.md`).
+- **`delete_table`'s select-then-delete idiom.** There is no `ITableAnnotation::
+  DeleteTable` (the member index has `DeleteRow`/`DeleteRow2`/`DeleteColumn`/
+  `DeleteColumn2` — row/column deletion *within* a table — but nothing that deletes
+  the table annotation itself). `delete_table` therefore uses the same
+  `ISelectionMgr`-based select-then-`IModelDocExtension::DeleteSelection2` idiom
+  `remove_center_marks`/`remove_balloons` (`03-annotations.md`) already use for
+  annotation types with no dedicated per-object delete method, selecting by the
+  table's own name (`IAnnotation::GetName`) via `swSelectType_e`'s
+  `swSelANNOTATIONTABLES` → `"ANNOTATIONTABLES"` `Type` string
+  (`03-annotations.md`'s Type-string table), documented there as mapping to
+  `ITableAnnotation` / `ITitleBlockTableAnnotation` generically — i.e. one select
+  type string for every concrete table kind, not a per-type string. **Unverified:**
+  whether `"ANNOTATIONTABLES"` actually resolves a hole table (which also has its
+  own, narrower `swSelHOLETABLEFEATS` → `"HOLETABLE"` select type in that same
+  table) or a revision table (`swSelREVISIONTABLE` → `"REVISIONTABLE"`) against a
+  real SolidWorks install, or whether one of those narrower strings is required
+  instead for those two table kinds specifically — not independently confirmed in
+  this pass; `delete_table` uses the generic `"ANNOTATIONTABLES"` string for every
+  table type on the strength of the `swSelectType_e` page's own "Underlying
+  interface" column, and a caller hitting a real-install failure on a hole/revision
+  table should treat that as this Gotcha's predicted risk, not a new bug.
+- **`set_table_cell`'s write call.** Per this dossier's existing (already-flagged-
+  unverified) convention — `add_revision` writing `table.Text(row, col, value)`,
+  three positional arguments, index(es)-then-value — `set_table_cell` writes through
+  the same predecessor property, `Text`, not `Text2` (whose real 4-argument setter
+  shape, `IncludeHidden` ahead of or behind the value, is unconfirmed against a real
+  install; see `Text2`'s own Gotchas). Reads (`get_table_contents`, and
+  `set_table_cell`'s own post-write verification) use `Text2(row, col, True)`,
+  matching `get_bom_contents`.
+- **`set_table_position` vs. `Anchored`.** `ITableAnnotation::Anchored`'s own Remarks
+  (see that record above) state an anchored table's origin snaps back to the sheet
+  anchor point, overriding an explicit `SetPosition`. Rather than relying on
+  undocumented call-order behavior, `set_table_position` reads `Anchored` first and
+  refuses with `swInvalidInput` if it is `True`, telling the caller to call
+  `set_table_anchor(anchored=False)` first — an explicit two-step sequence instead
+  of a silent one-call override.
+- **`set_table_anchor`'s no-anchor-point case.** `Anchored`'s own Remarks state that
+  setting `Anchored = True` when the sheet format has no anchor point defined for
+  that table type "has no effect" — a silent no-op at the COM layer.
+  `set_table_anchor` reads `Anchored` back after setting it and reports a
+  `swFeatureError` mismatch (requested `True`, read back `False`) rather than a
+  false success, per this project's `f9970617` silent-success-fix precedent.
+
 ## Enums
 
 #### swBomType_e
@@ -2147,6 +2329,20 @@ Added by sw-mio.3. Consumed by `ISheet::InsertRevisionTable2`'s `Shape` paramete
 | swRevisionTable_HexagonSymbol | 4 | Hexagon |
 
 Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swRevisionTableSymbolShape_e.html
+
+#### swAnnotationVisibilityState_e
+
+Added by sw-mio.4. Consumed by `IAnnotation::Visible` (documented above) —
+`update_table`'s per-table forced-refresh lever.
+
+| Value | Number | Meaning |
+| --- | --- | --- |
+| swAnnotationVisibilityUnknown | 0 | Annotation visibility is not known |
+| swAnnotationVisible | 1 | Annotation is visible |
+| swAnnotationHalfHidden | 2 | Annotation is half-hidden (grayed out) or hidden depending on the interactive user's actions — not a permanent state; see `IAnnotation::Visible`'s Gotchas |
+| swAnnotationHidden | 3 | Annotation is hidden |
+
+Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swAnnotationVisibilityState_e.html
 
 #### Enums requested but not found in the current API
 

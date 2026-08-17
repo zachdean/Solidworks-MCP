@@ -1184,6 +1184,25 @@ class SwRevisionTableSymbolShape(IntEnum):
     swRevisionTable_HexagonSymbol = 4
 
 
+class SwAnnotationVisibilityState(IntEnum):
+    """Annotation visibility state for IAnnotation::Visible
+    (swAnnotationVisibilityState_e).
+
+    Added by sw-mio.4 -- update_table's per-table forced-refresh lever, since
+    there is no ITableAnnotation::Update (see docs/api/04-tables.md's intro
+    discrepancy list and its sw-mio.4 addendum). Fetched directly from
+    help.solidworks.com/2025/.../swAnnotationVisibilityState_e.html (same
+    curl-with-browser-User-Agent technique as SwHoleTableTagStyle above).
+
+    Source: docs/api/04-tables.md (Enums section, sw-mio.4 addendum).
+    """
+
+    swAnnotationVisibilityUnknown = 0
+    swAnnotationVisible = 1
+    swAnnotationHalfHidden = 2
+    swAnnotationHidden = 3
+
+
 # ============================================================================
 # 05-export-and-layers.md
 # ============================================================================

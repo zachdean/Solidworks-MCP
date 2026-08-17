@@ -23,6 +23,7 @@ from ..constants import SwErrors, SwDocumentTypes, SwFileTypes
 from ..constants_drawing import (
     SwAddOrdinateDims,
     SwAlignViewTypes,
+    SwAnnotationVisibilityState,
     SwArrowStyle,
     SwAutodimEntities,
     SwAutodimHorizontalPlacement,
@@ -10547,17 +10548,26 @@ class DrawingOperations:
             SwErrors.swSuccess, {"sheet_name": sheet_name, "tables": tables},
         )
 
-    def _find_table_by_name(self, doc, table_name: str) -> Tuple[Any, Optional[str], Optional[Dict]]:
+    def _find_table_by_name(self, doc, table_name: str, op: str = "get_bom_contents",
+                             label: str = "Get BOM contents") -> Tuple[Any, Optional[str], Optional[Dict]]:
         """Find the table annotation named `table_name` anywhere in the
-        document -- `get_bom_contents`'s lookup, walking every view the same
-        way `list_tables` does with no `sheet_name` scope.
+        document -- `get_bom_contents`'s lookup (and, since sw-mio.4, every
+        other by-name table tool's), walking every view the same way
+        `list_tables` does with no `sheet_name` scope.
+
+        Args:
+            op, label: Forwarded to `_scoped_views` so a walk failure's log
+                line/error message names the actual calling tool instead of
+                always saying "get_bom_contents" -- `op`/`label` default to
+                this method's original caller so that one call site needs no
+                change.
 
         Returns:
             `(table, view_name, None)` on a hit; `(None, None, None)` on a
             clean miss (no table has that name); `(None, None, error_dict)`
             if the walk itself failed.
         """
-        scoped, err = self._scoped_views(doc, None, "get_bom_contents", "Get BOM contents")
+        scoped, err = self._scoped_views(doc, None, op, label)
         if err:
             return None, None, err
 
@@ -10832,18 +10842,50 @@ class DrawingOperations:
                 SwErrors.swInvalidInput, {"table_name": table_name, "type": type_name},
             )
 
+        rows, row_count, column_count, grid_err = self._read_table_grid(
+            table, table_name, f"get_bom_contents({table_name!r})",
+        )
+        if grid_err:
+            return grid_err
+
+        return self._result(
+            True,
+            f"{row_count} row(s) x {column_count} column(s) in table {table_name!r}",
+            SwErrors.swSuccess,
+            {
+                "table_name": table_name, "view_name": view_name,
+                "row_count": row_count, "column_count": column_count, "rows": rows,
+            },
+        )
+
+    def _read_table_grid(
+        self, table: Any, table_name: str, context: str,
+    ) -> Tuple[Optional[List[List[Optional[str]]]], Optional[int], Optional[int], Optional[Dict]]:
+        """Read every cell of `table` into a rectangular grid via
+        `ITableAnnotation::Text2(row, col, IncludeHidden=True)`, bounded by
+        `TotalRowCount`/`TotalColumnCount` (visible + hidden -- see
+        `ColumnCount`'s dossier Gotcha) with a fallback to the visible-only
+        `ColumnCount` if `TotalColumnCount` itself is unreadable. Shared by
+        `get_bom_contents` (which additionally restricts to BOM tables) and
+        `get_table_contents` (which works across every table type).
+
+        Args:
+            context: Caller identification for `Text2` per-cell error log
+                lines (e.g. `"get_bom_contents('BomTable1')"`).
+
+        Returns:
+            `(rows, row_count, column_count, None)` on success -- `rows`
+            includes the header row at index 0 -- or `(None, None, None,
+            error_dict)` if the row/column counts themselves could not be
+            read. A per-cell `Text2` failure is never fatal: that cell reads
+            back `None` and the walk continues.
+        """
         row_count = _com_int(self._read_prop(table, "TotalRowCount"))
-        # `TotalColumnCount` (visible + hidden), not the plain `ColumnCount`
-        # (visible only) -- the same visible/total split `RowCount`/
-        # `TotalRowCount` documents, per this dossier's `ColumnCount` Gotcha.
-        # Falling back to `ColumnCount` only if `TotalColumnCount` itself is
-        # unreadable keeps a hidden `insert_bom_table` column from silently
-        # truncating out of a `Text2(..., IncludeHidden=True)` read.
         column_count = _com_int(self._read_prop(table, "TotalColumnCount"))
         if column_count is None:
             column_count = _com_int(self._read_prop(table, "ColumnCount"))
         if row_count is None or column_count is None:
-            return self._result(
+            return None, None, None, self._result(
                 False, f"Could not read row/column count for table {table_name!r}",
                 SwErrors.swFeatureError, {"table_name": table_name},
             )
@@ -10855,22 +10897,12 @@ class DrawingOperations:
                 try:
                     text = table.Text2(row_index, col_index, True)
                 except Exception as e:
-                    logger.warning(
-                        f"get_bom_contents({table_name!r}) Text2({row_index},{col_index}) error: {e}"
-                    )
+                    logger.warning(f"{context} Text2({row_index},{col_index}) error: {e}")
                     text = None
                 row.append(text if isinstance(text, str) else (None if text is None else str(text)))
             rows.append(row)
 
-        return self._result(
-            True,
-            f"{row_count} row(s) x {column_count} column(s) in table {table_name!r}",
-            SwErrors.swSuccess,
-            {
-                "table_name": table_name, "view_name": view_name,
-                "row_count": row_count, "column_count": column_count, "rows": rows,
-            },
-        )
+        return rows, row_count, column_count, None
 
     # ========================================================================
     # Balloon tools
@@ -12232,3 +12264,563 @@ class DrawingOperations:
             + f" in view {view_name!r}",
             SwErrors.swSuccess, data,
         )
+
+    # ========================================================================
+    # Generic table update/read/edit tools (sw-mio.4)
+    # ========================================================================
+    #
+    # Work across every table type (BOM, hole, revision, weldment cut list,
+    # general, title block) rather than one bespoke tool per type -- see
+    # docs/api/04-tables.md's "Generic table update/read/edit tools (sw-mio.4)"
+    # section for the full reasoning behind each of the choices below.
+
+    def update_table(self, table_name: Optional[str] = None, all_tables: bool = False) -> Dict:
+        """
+        Force a table (or every table on the active sheet) to reflect the
+        document's current state.
+
+        There is no `ITableAnnotation::Update` (confirmed absent -- see this
+        dossier's intro discrepancy list and its sw-mio.4 addendum).
+        SolidWorks tables self-rebuild automatically whenever a cell's own
+        text changes, but that does not cover staleness from *upstream*
+        changes (a batch view update, a swapped/edited component) the way a
+        forced update is expected to. This combines the two real levers that
+        actually address that:
+
+        1. `IModelDoc2::ForceRebuild3(False)`, called once regardless of
+           scope, forces the whole document -- and everything its tables
+           read from -- to recompute.
+        2. Each table in scope then has its `IAnnotation::Visible` toggled
+           `swAnnotationHidden` -> `swAnnotationVisible` to force that
+           table's own re-render (the same lever `ITableAnnotation::Text2`'s
+           Gotchas already document for bulk-edit performance) -- but only
+           if it was already `swAnnotationVisible`; a table the caller
+           deliberately hid is left alone rather than coming back visible as
+           a side effect of a "refresh".
+
+        Args:
+            table_name: Update exactly this one table, searched across every
+                view in the document. Mutually exclusive with `all_tables`.
+            all_tables: `True` to update every table on the active sheet
+                (`IDrawingDoc::GetCurrentSheet`) and report each one.
+                Mutually exclusive with `table_name`.
+
+        Returns:
+            Result dict. Fails with `swInvalidInput`, before any COM call,
+            unless exactly one of `table_name`/`all_tables` is given, or if
+            `table_name` does not resolve to a real table. `data["tables"]`
+            lists each table's `name`/`view_name`/`row_count`/
+            `column_count`/`refreshed` (`refreshed` is `True` only when that
+            table's own `Visible` toggle actually ran -- see step 2 above;
+            an already-hidden or visibility-unreadable table is honestly
+            reported as not refreshed rather than folded into a count it
+            didn't earn). `data["count"]` is how many tables were in scope;
+            `data["refreshed_count"]` is how many were actually toggled.
+            `data["rebuilt"]` is `ForceRebuild3`'s own return value -- that
+            call itself always runs once whenever `data["count"] > 0`,
+            independent of any table's `refreshed` state. An
+            `all_tables=True` sheet with no tables is a warned success with
+            `count: 0` and no `ForceRebuild3` call.
+        """
+        if bool(table_name) == bool(all_tables):
+            return self._result(
+                False, "Pass exactly one of table_name or all_tables=True",
+                SwErrors.swInvalidInput, {"table_name": table_name, "all_tables": all_tables},
+            )
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        targets: List[Tuple[Any, Optional[str]]] = []
+        sheet_name: Optional[str] = None
+
+        if table_name:
+            table, view_name, find_err = self._find_table_by_name(
+                doc, table_name, op="update_table", label="Update table",
+            )
+            if find_err:
+                return find_err
+            if table is None:
+                return self._result(
+                    False, f"Unknown table {table_name!r}", SwErrors.swInvalidInput,
+                    {"table_name": table_name},
+                )
+            targets = [(table, view_name)]
+        else:
+            sheet, sheet_err = self._resolve_sheet(doc, None)
+            if sheet_err:
+                return sheet_err
+            sheet_name = self._sheet_name(sheet)
+            scoped, scoped_err = self._scoped_views(doc, sheet_name, "update_table", "Update table")
+            if scoped_err:
+                return scoped_err
+            for view, v_name in scoped:
+                for table in self._iter_view_tables(view):
+                    targets.append((table, v_name))
+
+        if not targets:
+            return self._result(
+                True,
+                "No tables found" + (f" on sheet {sheet_name!r}" if sheet_name else "")
+                + " -- 0 updated",
+                SwErrors.swSuccess,
+                {"table_name": table_name, "all_tables": all_tables, "count": 0, "tables": []},
+            )
+
+        try:
+            rebuilt = doc.ForceRebuild3(False)
+        except Exception as e:
+            logger.error(f"update_table ForceRebuild3 error: {e}")
+            return self._result(
+                False, f"Update table error: {e}", SwErrors.swFeatureError,
+                {"table_name": table_name, "all_tables": all_tables},
+            )
+
+        visible_code = int(SwAnnotationVisibilityState.swAnnotationVisible)
+        hidden_code = int(SwAnnotationVisibilityState.swAnnotationHidden)
+
+        updated: List[Dict] = []
+        refreshed_count = 0
+        for table, v_name in targets:
+            annotation = self._table_annotation(table)
+            name = self._read_prop(annotation, "GetName") if annotation is not None else None
+
+            # `refreshed` is only `True` when the `Visible` toggle actually
+            # ran -- a table already hidden, or whose `Visible` could not be
+            # read as a definite `swAnnotationVisible`, is reported honestly
+            # as not refreshed rather than folded into an "updated" count it
+            # didn't earn (the toggle is the only per-table lever this tool
+            # has beyond the one document-wide `ForceRebuild3` call above).
+            refreshed = False
+            if annotation is not None:
+                visibility = _com_int(self._read_prop(annotation, "Visible"))
+                if visibility == visible_code:
+                    try:
+                        annotation.Visible = hidden_code
+                        annotation.Visible = visible_code
+                        refreshed = True
+                    except Exception as e:
+                        logger.warning(f"update_table({name!r}) Visible toggle error: {e}")
+
+            if refreshed:
+                refreshed_count += 1
+            updated.append({
+                "name": name, "view_name": v_name, "refreshed": refreshed,
+                "row_count": _com_int(self._read_prop(table, "RowCount")),
+                "column_count": _com_int(self._read_prop(table, "ColumnCount")),
+            })
+
+        data = {
+            "table_name": table_name, "all_tables": all_tables, "rebuilt": bool(rebuilt),
+            "count": len(updated), "refreshed_count": refreshed_count, "tables": updated,
+        }
+        if table_name:
+            table_display = repr(updated[0]["name"])
+            message = (
+                f"Rebuilt document and refreshed table {table_display}" if refreshed_count else
+                f"Rebuilt document; table {table_display} was not refreshed (already "
+                "hidden, or its visibility could not be confirmed)"
+            )
+        else:
+            message = (
+                f"Rebuilt document; refreshed {refreshed_count} of {len(updated)} "
+                f"table(s) on sheet {sheet_name!r}"
+            )
+
+        return self._result(True, message, SwErrors.swSuccess, data)
+
+    def get_table_contents(self, table_name: str) -> Dict:
+        """
+        Read any table's cell text back via `ITableAnnotation::Text2` -- the
+        generic counterpart of `get_bom_contents`, working for BOM, hole,
+        revision, weldment cut list, general, and title block tables alike
+        (no `Type` restriction).
+
+        Args:
+            table_name: `IAnnotation::GetName` value, as returned by any
+                `insert_*_table` tool's `data["name"]` or `list_tables`'
+                `data["tables"][i]["name"]`. Searched across every view in
+                the document (not scoped to one sheet).
+
+        Returns:
+            Result dict. `data["rows"]` is a list of rows (including the
+            header row at index 0), each a list of `row_count` x
+            `column_count` cell strings, read via `Text2(row, col,
+            IncludeHidden=True)` so hidden columns/rows are still reported.
+            `data["type"]` is the table's readable `swTableAnnotationType_e`
+            name. Fails with `swInvalidInput` if no table has that name.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        table, view_name, err = self._find_table_by_name(
+            doc, table_name, op="get_table_contents", label="Get table contents",
+        )
+        if err:
+            return err
+        if table is None:
+            return self._result(
+                False, f"Unknown table {table_name!r}", SwErrors.swInvalidInput,
+                {"table_name": table_name},
+            )
+
+        type_code = _com_int(self._read_prop(table, "Type"))
+        type_name = _enum_name(SwTableAnnotationType, type_code) if type_code is not None else None
+
+        rows, row_count, column_count, grid_err = self._read_table_grid(
+            table, table_name, f"get_table_contents({table_name!r})",
+        )
+        if grid_err:
+            return grid_err
+
+        return self._result(
+            True,
+            f"{row_count} row(s) x {column_count} column(s) in table {table_name!r}",
+            SwErrors.swSuccess,
+            {
+                "table_name": table_name, "view_name": view_name, "type": type_name,
+                "row_count": row_count, "column_count": column_count, "rows": rows,
+            },
+        )
+
+    def set_table_cell(self, table_name: str, row: int, column: int, text: str) -> Dict:
+        """
+        Overwrite one table cell's driving text via `ITableAnnotation::Text`
+        -- the write half of the `Text`/`Text2` pair (see that record's
+        Gotchas for why the write goes through the 3-argument `Text`
+        predecessor rather than an unconfirmed 4-argument `Text2` setter
+        shape), refusing the write outright if `ITableAnnotation::
+        IsCellTextEditable` reports the cell read-only.
+
+        Args:
+            table_name: `IAnnotation::GetName` value. Searched across every
+                view in the document.
+            row, column: 0-based cell indices -- the same indexing
+                `Text2`/`IsCellTextEditable` document, so no conversion
+                happens at this boundary.
+            text: New driving text for the cell.
+
+        Returns:
+            Result dict. Fails with `swInvalidInput` before any write COM
+            call if `table_name` is unknown, `row`/`column` are out of range
+            (checked against `TotalRowCount`/`TotalColumnCount`), or
+            `IsCellTextEditable` returns a definite `False`. If
+            `IsCellTextEditable` itself raises, the write is attempted
+            anyway (a raise is not evidence one way or the other about
+            editability). The write is always verified afterward by reading
+            the cell back via `Text2`: `data["verified"]` is `True` when the
+            read-back matches (the normal case), and a read-back that
+            succeeds but *disagrees* fails with `swFeatureError` rather than
+            reporting a false success. A read-back that itself raises is
+            treated differently from a disagreement -- it is not evidence
+            the write failed, only that it could not be confirmed -- so that
+            case still succeeds, with `data["verified"] = False` and the
+            raised error named in the message.
+        """
+        if not isinstance(table_name, str) or not table_name:
+            return self._result(
+                False, f"table_name must be a non-empty string, got {table_name!r}",
+                SwErrors.swInvalidInput, {"table_name": table_name},
+            )
+        if isinstance(row, bool) or not isinstance(row, int) or row < 0 \
+                or isinstance(column, bool) or not isinstance(column, int) or column < 0:
+            return self._result(
+                False,
+                f"row/column must be non-negative integers, got row={row!r}, column={column!r}",
+                SwErrors.swInvalidInput, {"row": row, "column": column},
+            )
+        if not isinstance(text, str):
+            return self._result(
+                False, f"text must be a string, got {text!r}", SwErrors.swInvalidInput, {"text": text},
+            )
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        table, view_name, err = self._find_table_by_name(
+            doc, table_name, op="set_table_cell", label="Set table cell",
+        )
+        if err:
+            return err
+        if table is None:
+            return self._result(
+                False, f"Unknown table {table_name!r}", SwErrors.swInvalidInput,
+                {"table_name": table_name},
+            )
+
+        row_count = _com_int(self._read_prop(table, "TotalRowCount"))
+        column_count = _com_int(self._read_prop(table, "TotalColumnCount"))
+        if column_count is None:
+            column_count = _com_int(self._read_prop(table, "ColumnCount"))
+        if row_count is None or column_count is None:
+            return self._result(
+                False, f"Could not read row/column count for table {table_name!r}",
+                SwErrors.swFeatureError, {"table_name": table_name},
+            )
+        if row >= row_count or column >= column_count:
+            return self._result(
+                False,
+                f"row={row}, column={column} out of range for table {table_name!r} "
+                f"({row_count} row(s) x {column_count} column(s))",
+                SwErrors.swInvalidInput,
+                {"table_name": table_name, "row": row, "column": column,
+                 "row_count": row_count, "column_count": column_count},
+            )
+
+        data = {
+            "table_name": table_name, "view_name": view_name,
+            "row": row, "column": column, "text": text,
+        }
+
+        try:
+            editable = table.IsCellTextEditable(row, column)
+        except Exception as e:
+            logger.warning(
+                f"set_table_cell({table_name!r}) IsCellTextEditable({row},{column}) error: {e}"
+            )
+            editable = None
+        if _com_bool(editable) is False:
+            return self._result(
+                False,
+                f"Cell ({row}, {column}) of table {table_name!r} is read-only "
+                "(IsCellTextEditable returned False)",
+                SwErrors.swInvalidInput, data,
+            )
+
+        try:
+            table.Text(row, column, text)
+        except Exception as e:
+            logger.error(f"set_table_cell({table_name!r}) Text({row},{column}) error: {e}")
+            return self._result(False, f"Set table cell error: {e}", SwErrors.swFeatureError, data)
+
+        try:
+            written = table.Text2(row, column, True)
+        except Exception as e:
+            # A raised read-back is not evidence the *write* failed -- only a
+            # read-back that succeeds and disagrees is. Treating a raise the
+            # same as a definite mismatch would report `swFeatureError` on
+            # every successful write against an interop layer where `Text2`
+            # itself is flaky/unavailable, which is exactly the false-failure
+            # mirror image of the silent-success bug this verification step
+            # exists to catch.
+            logger.warning(f"set_table_cell({table_name!r}) Text2({row},{column}) error: {e}")
+            data["verified"] = False
+            return self._result(
+                True,
+                f"Set cell ({row}, {column}) of table {table_name!r} (could not verify "
+                f"via read-back: {e})",
+                SwErrors.swSuccess, data,
+            )
+
+        if not isinstance(written, str) or written != text:
+            return self._result(
+                False,
+                f"Cell ({row}, {column}) of table {table_name!r} did not read back the "
+                f"written text (wrote {text!r}, read back {written!r})",
+                SwErrors.swFeatureError, data,
+            )
+
+        data["verified"] = True
+        return self._result(
+            True, f"Set cell ({row}, {column}) of table {table_name!r}", SwErrors.swSuccess, data,
+        )
+
+    def set_table_position(self, table_name: str, x: float, y: float) -> Dict:
+        """
+        Move a table to an explicit sheet-space position via the base
+        `IAnnotation::SetPosition` (reached through `ITableAnnotation::
+        GetAnnotation` -- `ITableAnnotation::SetPosition` itself does not
+        exist, see this dossier's intro).
+
+        Args:
+            table_name: `IAnnotation::GetName` value. Searched across every
+                view in the document.
+            x, y: New position, caller's default unit -- converted to
+                meters. Z is always `0.0` (2D sheet space).
+
+        Returns:
+            Result dict. Fails with `swInvalidInput` if the table is
+            currently anchored (`ITableAnnotation::Anchored = True`) -- per
+            that property's own Remarks, an anchored table's origin snaps
+            back to the sheet anchor point and would immediately override an
+            explicit `SetPosition` -- call `set_table_anchor(table_name,
+            anchored=False)` first.
+        """
+        xy_err = self._validate_xy(x, y)
+        if xy_err:
+            return xy_err
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        table, view_name, err = self._find_table_by_name(
+            doc, table_name, op="set_table_position", label="Set table position",
+        )
+        if err:
+            return err
+        if table is None:
+            return self._result(
+                False, f"Unknown table {table_name!r}", SwErrors.swInvalidInput,
+                {"table_name": table_name},
+            )
+
+        data = {"table_name": table_name, "view_name": view_name, "x": x, "y": y}
+
+        if _com_bool(self._read_prop(table, "Anchored")) is True:
+            return self._result(
+                False,
+                f"Table {table_name!r} is anchored -- call set_table_anchor(table_name, "
+                "anchored=False) before setting an explicit position",
+                SwErrors.swInvalidInput, data,
+            )
+
+        annotation = self._table_annotation(table)
+        if annotation is None:
+            return self._result(
+                False,
+                f"Table {table_name!r} has no IAnnotation wrapper (GetAnnotation "
+                "returned nothing) -- cannot set position",
+                SwErrors.swFeatureError, data,
+            )
+
+        try:
+            x_m, y_m = self._units.to_meters(x), self._units.to_meters(y)
+            positioned = annotation.SetPosition(x_m, y_m, 0.0)
+        except Exception as e:
+            logger.error(f"set_table_position({table_name!r}) SetPosition error: {e}")
+            return self._result(False, f"Set table position error: {e}", SwErrors.swFeatureError, data)
+
+        if positioned is False:
+            return self._result(
+                False,
+                f"Could not set table {table_name!r}'s position (SetPosition returned False)",
+                SwErrors.swFeatureError, data,
+            )
+
+        return self._result(True, f"Moved table {table_name!r} to ({x}, {y})", SwErrors.swSuccess, data)
+
+    def set_table_anchor(self, table_name: str, anchored: bool = True) -> Dict:
+        """
+        Set a table's anchored state via `ITableAnnotation::Anchored`.
+
+        Args:
+            table_name: `IAnnotation::GetName` value. Searched across every
+                view in the document.
+            anchored: `True` (default) to snap the table to its type's sheet
+                anchor point (per `AnchorType`); `False` to release it for
+                explicit `set_table_position` control.
+
+        Returns:
+            Result dict. Per `Anchored`'s own Remarks, setting
+            `anchored=True` when the sheet format has no anchor point
+            defined for this table's type "has no effect" -- a silent no-op
+            at the COM layer -- so this reads `Anchored` back after setting
+            it and fails with `swFeatureError` (rather than a false success)
+            if the read-back value does not match what was requested.
+        """
+        if not isinstance(anchored, bool):
+            return self._result(
+                False, f"anchored must be a boolean, got {anchored!r}", SwErrors.swInvalidInput,
+                {"anchored": anchored},
+            )
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        table, view_name, err = self._find_table_by_name(
+            doc, table_name, op="set_table_anchor", label="Set table anchor",
+        )
+        if err:
+            return err
+        if table is None:
+            return self._result(
+                False, f"Unknown table {table_name!r}", SwErrors.swInvalidInput,
+                {"table_name": table_name},
+            )
+
+        data = {"table_name": table_name, "view_name": view_name, "anchored": anchored}
+
+        try:
+            table.Anchored = anchored
+        except Exception as e:
+            logger.error(f"set_table_anchor({table_name!r}) Anchored error: {e}")
+            return self._result(False, f"Set table anchor error: {e}", SwErrors.swFeatureError, data)
+
+        read_back = _com_bool(self._read_prop(table, "Anchored"))
+        if read_back is not None and read_back != anchored:
+            return self._result(
+                False,
+                f"Table {table_name!r}'s Anchored did not change to {anchored} (reads back "
+                f"{read_back} -- the sheet format most likely has no anchor point defined "
+                "for this table's type)",
+                SwErrors.swFeatureError, {**data, "anchored": read_back},
+            )
+
+        data["anchored"] = read_back if read_back is not None else anchored
+        return self._result(
+            True, f"Set table {table_name!r}'s anchored state to {data['anchored']}",
+            SwErrors.swSuccess, data,
+        )
+
+    def delete_table(self, table_name: str) -> Dict:
+        """
+        Delete a table annotation via select (`ISelectionMgr`, `Type=
+        "ANNOTATIONTABLES"`) + `IModelDocExtension::DeleteSelection2` --
+        there is no `ITableAnnotation::DeleteTable` (see this dossier's
+        sw-mio.4 addendum), so this uses the same select-then-delete idiom
+        `remove_center_marks`/`remove_balloons` already use for annotation
+        types with no dedicated per-object delete method.
+
+        Args:
+            table_name: `IAnnotation::GetName` value. Searched across every
+                view in the document before any selection is attempted.
+
+        Returns:
+            Result dict. Fails with `swInvalidInput` if no table has that
+            name (before any select/delete COM call), or `swFeatureError` if
+            the select or `DeleteSelection2` call itself fails.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        table, view_name, err = self._find_table_by_name(
+            doc, table_name, op="delete_table", label="Delete table",
+        )
+        if err:
+            return err
+        if table is None:
+            return self._result(
+                False, f"Unknown table {table_name!r}", SwErrors.swInvalidInput,
+                {"table_name": table_name},
+            )
+
+        data = {"table_name": table_name, "view_name": view_name}
+
+        try:
+            extension = doc.Extension
+        except Exception as e:
+            logger.error(f"delete_table({table_name!r}) error: {e}")
+            return self._result(False, f"Delete table error: {e}", SwErrors.swSelectionError, data)
+
+        with self.selected(table_name, "ANNOTATIONTABLES", 0, 0, 0, doc=doc) as sel:
+            if not sel["success"]:
+                return sel
+            try:
+                deleted = extension.DeleteSelection2(0)
+            except Exception as e:
+                logger.error(f"delete_table({table_name!r}) DeleteSelection2 error: {e}")
+                return self._result(False, f"Delete table error: {e}", SwErrors.swFeatureError, data)
+
+        if not deleted:
+            return self._result(
+                False, f"Could not delete table {table_name!r} (DeleteSelection2 returned False)",
+                SwErrors.swFeatureError, data,
+            )
+
+        return self._result(True, f"Deleted table {table_name!r}", SwErrors.swSuccess, data)
