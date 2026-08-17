@@ -12,5 +12,6 @@ PY=.venv/bin/python
 "$PY" -m compileall -q solidworks_mcp
 "$PY" -m ruff check solidworks_mcp scripts
 "$PY" scripts/check_api_docs.py
+"$PY" scripts/gen_tools_doc.py --check
 
 "$PY" -m pytest -q

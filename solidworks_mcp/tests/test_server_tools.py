@@ -30,6 +30,8 @@ from solidworks_mcp.tools.registry import UnknownToolError
 from solidworks_mcp.utils import units as units_module
 
 EXPECTED_TOOL_NAMES = {
+    # Capabilities Tools
+    "get_capabilities",
     # Connection Tools
     "connect_solidworks",
     "get_solidworks_info",

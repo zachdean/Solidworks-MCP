@@ -28,6 +28,7 @@ class SwErrors(IntEnum):
     swInvalidInput = 107
     swSimulationError = 108
     swExportError = 109
+    swVersionUnsupported = 110
     swUnknownError = 999
 
 

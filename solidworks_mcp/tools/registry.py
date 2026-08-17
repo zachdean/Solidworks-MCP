@@ -24,13 +24,16 @@ from typing import Any, Callable, Dict, List, Optional
 
 from mcp.types import Tool
 
+from .. import version_gate
 from ..automation.com_params import ComSignature
+from ._automation import sw_automation
 
 __all__ = [
     "tool",
     "build_tool_list",
     "dispatch",
     "registered_names",
+    "describe_tools",
     "schema_from_signature",
     "UnknownToolError",
 ]
@@ -41,14 +44,16 @@ class UnknownToolError(KeyError):
 
 
 class _RegisteredTool:
-    __slots__ = ("name", "description", "schema", "handler")
+    __slots__ = ("name", "description", "schema", "handler", "min_release")
 
     def __init__(self, name: str, description: str, schema: Dict[str, Any],
-                 handler: Callable[[dict], Dict[str, Any]]):
+                 handler: Callable[[dict], Dict[str, Any]],
+                 min_release: Optional[int] = None):
         self.name = name
         self.description = description
         self.schema = schema
         self.handler = handler
+        self.min_release = min_release
 
 
 # Order matters for `build_tool_list()` -- tools are listed in the order
@@ -59,8 +64,22 @@ class _RegisteredTool:
 _TOOLS: Dict[str, _RegisteredTool] = {}
 
 
-def tool(name: str, description: str, schema: Dict[str, Any]) -> Callable:
+def tool(name: str, description: str, schema: Dict[str, Any], *,
+         min_release: Optional[int] = None) -> Callable:
     """Decorator: register `handler` as the MCP tool `name`.
+
+    Args:
+        min_release: the SOLIDWORKS release year (e.g. `2025`) this tool's
+            COM calls require, if higher than the project-wide floor
+            (`config.min_release`). `dispatch()` checks this -- via
+            `version_gate.require_version` -- before invoking `handler`, so
+            a handler never runs against a release too old for the overload
+            it calls. Omit for tools that need nothing beyond the project
+            floor, which is nearly all of them. Pass `0` (not `None`) to
+            exempt a tool from the gate entirely -- see
+            `version_gate.effective_min_release`; reserved for discovery
+            tools like `get_capabilities` that must stay callable on an
+            unsupported release precisely to report that fact.
 
     Raises:
         ValueError: if `name` is already registered -- at import time, since
@@ -69,7 +88,7 @@ def tool(name: str, description: str, schema: Dict[str, Any]) -> Callable:
     def decorator(handler: Callable[[dict], Dict[str, Any]]) -> Callable[[dict], Dict[str, Any]]:
         if name in _TOOLS:
             raise ValueError(f"Tool '{name}' is already registered")
-        _TOOLS[name] = _RegisteredTool(name, description, schema, handler)
+        _TOOLS[name] = _RegisteredTool(name, description, schema, handler, min_release)
         return handler
     return decorator
 
@@ -113,11 +132,38 @@ def registered_names() -> List[str]:
     return list(_TOOLS)
 
 
+def describe_tools() -> List[Dict[str, Any]]:
+    """Every registered tool's static metadata, in registration order: name,
+    description, schema, declared `min_release`, and the *effective*
+    `min_release` (`version_gate.effective_min_release`, folding in the
+    project-wide floor). Used by the `get_capabilities` tool and
+    `scripts/gen_tools_doc.py` -- neither invokes a handler, so this is safe
+    to call with nothing connected."""
+    return [
+        {
+            "name": entry.name,
+            "description": entry.description,
+            "schema": entry.schema,
+            "min_release": entry.min_release,
+            "effective_min_release": version_gate.effective_min_release(entry.min_release),
+        }
+        for entry in _TOOLS.values()
+    ]
+
+
 def dispatch(name: str, arguments: dict) -> Dict[str, Any]:
     """Invoke the registered handler for `name` with `arguments`.
 
+    Checks `version_gate.require_version` first -- if the connected
+    SOLIDWORKS release is older than the tool's effective `min_release`, the
+    handler never runs and the gate's error result (naming the tool, the
+    connected version, and the required version) is returned instead. A
+    handler that has never called `automation.connect()` is not gated (see
+    `version_gate.require_version`); the handler's own connection attempt
+    surfaces its own error in that case.
+
     Returns:
-        The handler's standard result dict.
+        The handler's standard result dict, or the gate's error result.
 
     Raises:
         UnknownToolError: if no tool named `name` is registered.
@@ -125,4 +171,7 @@ def dispatch(name: str, arguments: dict) -> Dict[str, Any]:
     entry = _TOOLS.get(name)
     if entry is None:
         raise UnknownToolError(name)
+    gate_error = version_gate.require_version(sw_automation, name, entry.min_release)
+    if gate_error is not None:
+        return gate_error
     return entry.handler(arguments)

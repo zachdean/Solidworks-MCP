@@ -45,7 +45,15 @@ class SolidWorksConfig:
     
     # Units
     default_unit: str = "mm"
-    
+
+    # Version gate: the SOLIDWORKS release year (see `version_gate.SwRelease.year`)
+    # every tool call is enforced against by default. This project's `docs/api/`
+    # dossier is researched against SOLIDWORKS 2025, so silently running an older
+    # release risks a deprecated/renamed COM overload with confusing behavior.
+    # Lower deliberately (e.g. to test against an older install) rather than
+    # letting a tool's `min_release` argument go unenforced by accident.
+    min_release: int = 2025
+
     # Logging
     log_level: str = "INFO"
     log_file: str = "solidworks_mcp.log"

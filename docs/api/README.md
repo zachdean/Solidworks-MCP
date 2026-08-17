@@ -73,5 +73,6 @@ than its declared `min_methods`.
 | [`03-annotations.md`](03-annotations.md) | IModelDocExtension, ISelectionMgr, IModelDoc2, IDrawingDoc, IView, IDisplayDimension, IDimension, IGtol, IGtolFrame, IDatumTag, IWeldSymbol, IAnnotation | complete |
 | [`04-tables.md`](04-tables.md) | IModelDocExtension, IView, IBomTableAnnotation, IDrawingDoc, ISheet, IRevisionTableAnnotation, IWeldmentCutListAnnotation, IHoleTableAnnotation, ITableAnnotation, IAnnotation | complete |
 | [`05-export-and-layers.md`](05-export-and-layers.md) | IModelDocExtension, ISldWorks, IExportPdfData, IPartDoc, IDrawingDoc, ILayerMgr, ILayer | complete |
+| [`06-versioning.md`](06-versioning.md) | ISldWorks | complete |
 
 Rows are added here by each research issue as it lands its dossier under `docs/api/`.

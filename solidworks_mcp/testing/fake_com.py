@@ -529,6 +529,15 @@ def FakeSldWorks(doc_type: str = "part", *, sheet_names: Optional[List[str]] = N
     # immediately unless a test scripts one, same as the feature walk below.
     app.set_return("GetFirstDocument", None)
 
+    # A real, parseable version string -- "33.0.0" is SOLIDWORKS 2025 FCS per
+    # `docs/api/06-versioning.md` (major 33 = 2025 - 1992, sp 0, hotfix 0) --
+    # so `version_gate.require_version` (wired into every `dispatch()` call)
+    # passes by default against this project's own `config.min_release`
+    # floor (2025) without every existing test needing to know about it.
+    # Override with `app.set_return("RevisionNumber", "<older>.0.0")` to
+    # simulate an unsupported connected release.
+    app.set_return("RevisionNumber", "33.0.0")
+
     doc = app.ActiveDoc
     doc.tag(com_type)
     doc.set_return("GetType", sw_doc_type)

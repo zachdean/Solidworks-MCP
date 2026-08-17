@@ -2,12 +2,12 @@
 SolidWorks MCP Tools
 ---------------------
 Declarative tool registry (`registry.py`) plus one module per tool area:
-`connection.py`, `documents.py`, `drawing_documents.py`, `drawing_sheets.py`,
-`drawing_views.py`, `drawing_view_layout.py`, `drawing_annotations.py`,
-`drawing_tables.py`, `drawing_layers.py`, `drawing_line_format.py`,
-`drawing_pack.py`, `sketches.py`, `features.py`, `utility.py`. Importing
-this package registers every tool as a side effect of importing its
-submodules.
+`capabilities.py`, `connection.py`, `documents.py`, `drawing_documents.py`,
+`drawing_sheets.py`, `drawing_views.py`, `drawing_view_layout.py`,
+`drawing_annotations.py`, `drawing_tables.py`, `drawing_layers.py`,
+`drawing_line_format.py`, `drawing_pack.py`, `sketches.py`, `features.py`,
+`utility.py`. Importing this package registers every tool as a side effect
+of importing its submodules.
 
 The shared `sw_automation` instance lives in `_automation.py` and is
 re-exported here for `server.py`'s convenience; submodules import it from
@@ -18,12 +18,14 @@ from ._automation import sw_automation
 from .registry import (
     UnknownToolError,
     build_tool_list,
+    describe_tools,
     dispatch,
     registered_names,
     schema_from_signature,
     tool,
 )
 
+from . import capabilities  # noqa: F401
 from . import connection  # noqa: F401
 from . import documents  # noqa: F401
 from . import drawing_documents  # noqa: F401
@@ -43,6 +45,7 @@ __all__ = [
     "sw_automation",
     "tool",
     "build_tool_list",
+    "describe_tools",
     "dispatch",
     "registered_names",
     "schema_from_signature",
