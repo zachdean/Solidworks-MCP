@@ -549,6 +549,17 @@ def FakeSldWorks(doc_type: str = "part", *, sheet_names: Optional[List[str]] = N
         names = list(sheet_names) if sheet_names else ["Sheet1"]
         sheet = doc.new_object(f"{doc._path}.<{names[0]}>")
         sheet.tag("ISheet")
+        # A real `str`, for the same reason `GetTitle` above is one: the
+        # active sheet's name reaches JSON-serialized tool results and is
+        # passed back into `ActivateSheet`. Scripted as `ISheet::GetName`
+        # (type-scoped, so it can't shadow another interface's member)
+        # because that -- not a bare `Name` property -- is what the real
+        # `ISheet` member index has, per
+        # docs/api/01-documents-and-sheets.md's `ISheet::SetName` record.
+        # Without this the current sheet's name auto-vivified to a truthy
+        # wrapper that every read accepted, which is exactly what hid the
+        # `_read_prop(sheet, "Name")` defect this harness now models away.
+        sheet.set_return("ISheet.GetName", names[0])
         doc.set_return("GetCurrentSheet", sheet)
         doc.set_return("GetSheetNames", names)
         doc.set_return("IGetViews", [])

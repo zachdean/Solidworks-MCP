@@ -227,6 +227,24 @@ class TestDeleteSheet:
         assert select_call.args[:7] == ("Sheet1", "SHEET", 0.0, 0.0, 0.0, False, 0)
         fake_sw.call_log.assert_called_with("DeleteSelection2", 0)
 
+    def test_sheet_still_present_after_a_successful_delete_fails_the_guard(self, tool_sw):
+        # DeleteSelection2 reports success but the sheet is still there --
+        # SelectByID2 resolves by name and nothing guarantees the "SHEET"
+        # selection landed on this sheet, so the post-delete re-read (which
+        # delete_sheet performs anyway to report data["sheets"]) is checked
+        # rather than ignored.
+        fake_sw = tool_sw("drawing")
+        fake_sw.ActiveDoc.set_return("GetSheetNames", ("Sheet1", "Sheet2"))
+        fake_sw.ActiveDoc.Extension.set_return("SelectByID2", True)
+        fake_sw.ActiveDoc.Extension.set_return("DeleteSelection2", True)
+
+        result = dispatch("delete_sheet", {"name": "Sheet1"})
+
+        assert result["success"] is False
+        assert result["error_name"] == "swFeatureError"
+        assert result["data"]["sheets"] == ["Sheet1", "Sheet2"]
+        assert "still appears" in result["message"]
+
     def test_deleting_the_only_sheet_errors_without_com_call(self, tool_sw):
         fake_sw = tool_sw("drawing")
         fake_sw.ActiveDoc.set_return("GetSheetNames", ("Sheet1",))

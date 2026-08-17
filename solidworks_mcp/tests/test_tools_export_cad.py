@@ -110,7 +110,11 @@ class TestExportDxfDwgSheetSelection:
         assert files[0]["size_bytes"] == 3
         assert files[1]["size_bytes"] == 6
         log = fake_sw.call_log
-        assert [c.args[0] for c in log.calls_to("ActivateSheet")] == ["Sheet1", "Sheet2"]
+        # Trailing "Sheet1" is `_active_sheet_restored` putting the sheet that
+        # was current on entry back after the walk left "Sheet2" active.
+        assert [c.args[0] for c in log.calls_to("ActivateSheet")] == [
+            "Sheet1", "Sheet2", "Sheet1",
+        ]
         assert [c.args[0] for c in log.calls_to("SaveAs3")] == [
             str(tmp_path / "out_Sheet1.dxf"), str(tmp_path / "out_Sheet2.dxf"),
         ]

@@ -1412,7 +1412,7 @@ class DrawingOperations:
                 current_sheet = doc.GetCurrentSheet()
             except Exception:
                 current_sheet = None
-            current_name = self._read_prop(current_sheet, "Name") if current_sheet else None
+            current_name = self._sheet_name(current_sheet) if current_sheet else None
             if not current_name:
                 return [], "current", self._result(
                     False, "Could not determine the active sheet's name",
@@ -1586,14 +1586,14 @@ class DrawingOperations:
         try:
             current_sheet = doc.GetCurrentSheet()
             if current_sheet is not None:
-                original_name = self._read_prop(current_sheet, "Name")
+                original_name = self._sheet_name(current_sheet)
         except Exception as e:
             logger.error(f"read active sheet for restore error: {e}")
 
         try:
             yield
         finally:
-            if isinstance(original_name, str) and original_name:
+            if original_name:
                 try:
                     doc.ActivateSheet(original_name)
                 except Exception as e:
@@ -3044,7 +3044,7 @@ class DrawingOperations:
         if not sheet:
             return self._result(False, "No active sheet", SwErrors.swFeatureError)
 
-        name = self._read_prop(sheet, "Name")
+        name = self._sheet_name(sheet)
         data = {"name": name, **self._sheet_properties(sheet)}
         message = f"Active sheet: {name!r}" if name else "Active sheet"
         return self._result(True, message, SwErrors.swSuccess, data)
@@ -3088,7 +3088,7 @@ class DrawingOperations:
                 False, f"Resolve sheet error: {e}", SwErrors.swUnknownError)
         if not sheet:
             return None, None, self._result(False, "No active sheet", SwErrors.swFeatureError)
-        return sheet, self._read_prop(sheet, "Name"), None
+        return sheet, self._sheet_name(sheet), None
 
     def _read_sheet_setup_state(self, sheet: Any) -> Optional[Dict[str, Any]]:
         """Raw `ISheet::GetProperties2`/`GetTemplateName` fields needed to
@@ -3183,8 +3183,10 @@ class DrawingOperations:
                 silently replace the sheet's actual current sheet-format
                 file (per the dossier's SetupSheet5 Gotchas).
             scale_num, scale_denom: Scale numerator/denominator. Omitted:
-                keeps the sheet's current scale. `scale_denom=0` fails with
-                `swInvalidInput` without touching COM.
+                keeps the sheet's current scale. Either given as `0` fails
+                with `swInvalidInput` without touching COM -- a `0`
+                numerator is as degenerate a sheet scale as a `0`
+                denominator, and `SetupSheet5` reports neither.
             first_angle: `True` for first-angle projection, `False` for
                 third-angle. Omitted: keeps the sheet's current projection.
                 Per the dossier's SetupSheet5 Gotchas, a projection change
@@ -3213,6 +3215,9 @@ class DrawingOperations:
             returns `False` -- its own dossier record documents no specific
             failure cause for that.
         """
+        if scale_num is not None and scale_num == 0:
+            return self._result(
+                False, "scale_num must be nonzero", SwErrors.swInvalidInput)
         if scale_denom is not None and scale_denom == 0:
             return self._result(
                 False, "scale_denom must be nonzero", SwErrors.swInvalidInput)
@@ -3337,11 +3342,21 @@ class DrawingOperations:
             # Per docs/api/01-documents-and-sheets.md's SetupSheet5 Gotchas:
             # a projection change needs a rebuild to actually show up in the
             # drawing views. Best-effort -- SetupSheet5 itself already
-            # succeeded, so a rebuild failure here doesn't fail the call.
+            # succeeded, so a rebuild failure here doesn't fail the call. Its
+            # Boolean return is logged rather than discarded, though: a
+            # `False` there means the views still show the old projection, and
+            # silently dropping it is the same discarded-COM-status defect the
+            # sw-ja0 review pass fixed on the export paths.
             try:
-                doc.ForceRebuild3(False)
+                rebuilt = doc.ForceRebuild3(False)
             except Exception as e:
                 logger.warning(f"set_sheet_properties: post-update rebuild failed: {e}")
+            else:
+                if not rebuilt:
+                    logger.warning(
+                        f"set_sheet_properties: ForceRebuild3 returned false after the "
+                        f"projection change on sheet {name!r} -- the drawing views may "
+                        "still show the previous projection until it is rebuilt")
 
         return self._result(True, f"Updated sheet {name!r}", SwErrors.swSuccess, data)
 
@@ -3617,7 +3632,8 @@ class DrawingOperations:
             before attempting anything). Fails with `swInvalidInput` if
             `name` doesn't exist or is the only remaining sheet -- neither
             makes a `DeleteSelection2` call. Fails with `swFeatureError` if
-            `DeleteSelection2` itself returns `False`.
+            `DeleteSelection2` itself returns `False`, or if it returns
+            `True` but `name` is still in the re-read sheet list afterward.
         """
         doc, err = self.get_drawing_doc()
         if err:
@@ -3664,6 +3680,20 @@ class DrawingOperations:
             return self._result(
                 False, f"Deleted {name!r} but could not re-read sheet names: {e}",
                 SwErrors.swUnknownError, {"name": name},
+            )
+
+        # Same "never guess what happened" check `copy_sheet` and
+        # `rename_sheet` already apply to their own re-reads: this list was
+        # fetched anyway, so confirm the sheet is really gone rather than
+        # trusting DeleteSelection2's Boolean alone. It can report success
+        # having deleted something else -- SelectByID2 resolves by name, and
+        # nothing guarantees the "SHEET" selection landed on this sheet.
+        if name in after_names:
+            return self._result(
+                False,
+                f"DeleteSelection2 reported success, but {name!r} still appears in "
+                f"the sheet list afterward: {after_names!r}",
+                SwErrors.swFeatureError, {"name": name, "sheets": after_names},
             )
 
         return self._result(
@@ -3778,6 +3808,39 @@ class DrawingOperations:
             except Exception:
                 return None
         return value
+
+    def _sheet_name(self, sheet: Any) -> Optional[str]:
+        """An `ISheet`'s own name -- `ISheet::GetName` first, falling back to
+        the `Name` property, and `None` (never raising) if neither answers a
+        non-empty string.
+
+        `GetName` is deliberately first. docs/api/01-documents-and-sheets.md's
+        `ISheet::SetName` record fetched the real `ISheet` member index and
+        found `GetName`/`SetName` -- and *no* bare `Name` property -- so this
+        file's original `_read_prop(sheet, "Name")` (inferred in
+        docs/api/02-views.md from a third-party Java type-library mirror, and
+        flagged there as unverified) would read `None` off a real interop
+        layer. That silently turned `get_active_sheet` into a nameless result
+        and made `set_sheet_properties`/`set_sheet_scale`/`get_sheet_properties`
+        fail outright in their no-`sheet_name` default mode -- invisible in
+        tests, because the fake harness auto-vivified a truthy stand-in for
+        any unscripted member. `FakeSldWorks` now pre-scripts the current
+        sheet's `ISheet::GetName` to a real string instead, so the harness
+        models the interface the member index actually documents.
+
+        The `Name` fallback is kept rather than dropped: it costs one failed
+        read, and it keeps working against any interop layer that really does
+        expose the property (the source of the original inference). Both reads
+        go through `_read_prop`, so either spelling may be a property or a
+        zero-arg method. Only a non-empty `str` counts as an answer -- against
+        the fake harness an unscripted `GetName` auto-vivifies to a truthy
+        stand-in, and accepting that would shadow a scripted `Name`.
+        """
+        for member in ("GetName", "Name"):
+            value = self._read_prop(sheet, member)
+            if isinstance(value, str) and value:
+                return value
+        return None
 
     def _resolve_model_view_name(self, view_name: str) -> Tuple[Optional[str], Optional[str]]:
         """Map a friendly orientation name to the `*Name` form
@@ -4046,8 +4109,7 @@ class DrawingOperations:
                 sheet = doc.GetCurrentSheet()
                 if not sheet:
                     return self._result(False, "No active sheet", SwErrors.swFeatureError)
-                raw_name = self._read_prop(sheet, "Name")
-                sheet_name = raw_name if isinstance(raw_name, str) else None
+                sheet_name = self._sheet_name(sheet)
 
             views_raw = sheet.GetViews()
         except Exception as e:

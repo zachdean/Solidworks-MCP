@@ -277,6 +277,20 @@ class TestGetActiveSheet:
         assert result["data"]["width"] == pytest.approx(297.0)
         assert result["data"]["height"] == pytest.approx(210.0)
 
+    def test_name_comes_from_isheet_getname_when_no_name_property_exists(self, tool_sw):
+        # A real ISheet exposes GetName, not a `Name` property (see
+        # docs/api/01-documents-and-sheets.md's ISheet::SetName record), so
+        # get_active_sheet must still report a name when only GetName answers.
+        fake_sw = tool_sw("drawing")
+        sheet = fake_sw.ActiveDoc.GetCurrentSheet()
+        sheet.set_return("ISheet.GetName", "Sheet1")
+        sheet.set_return("Name", None)
+
+        result = dispatch("get_active_sheet", {})
+
+        assert result["success"] is True, result
+        assert result["data"]["name"] == "Sheet1"
+
     def test_no_active_sheet_fails(self, tool_sw):
         fake_sw = tool_sw("drawing")
         fake_sw.ActiveDoc.set_return("GetCurrentSheet", None)

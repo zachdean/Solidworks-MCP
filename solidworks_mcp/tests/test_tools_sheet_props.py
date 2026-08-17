@@ -222,6 +222,10 @@ class TestSetSheetProperties:
     def test_missing_sheet_name_errors_without_calling_setup_sheet5(self, tool_sw):
         fake_sw = tool_sw("drawing")
         sheet = _script_current_sheet(fake_sw.ActiveDoc.GetCurrentSheet())
+        # Both spellings `_sheet_name` tries: `ISheet::GetName` (the real
+        # member, pre-scripted by the harness) and the `Name` property it
+        # falls back to.
+        sheet.set_return("ISheet.GetName", "")
         sheet.set_return("Name", "")
 
         result = dispatch("set_sheet_properties", {"scale_num": 1, "scale_denom": 2})
@@ -311,6 +315,36 @@ class TestSetSheetScale:
 
         assert result["success"] is False
         assert result["error_name"] == "swInvalidInput"
+
+    def test_zero_scale_num_errors_without_touching_com(self, tool_sw):
+        # A 0 numerator is as degenerate a sheet scale as a 0 denominator,
+        # and SetupSheet5 reports neither -- so it's rejected pre-COM the
+        # same way rather than sent through as a "successful" update.
+        fake_sw = tool_sw("drawing")
+
+        result = dispatch("set_sheet_scale", {"scale_num": 0, "scale_denom": 1})
+
+        assert result["success"] is False
+        assert result["error_name"] == "swInvalidInput"
+        assert not fake_sw.call_log.calls_to("SetupSheet5")
+
+    def test_resolves_the_active_sheet_name_via_isheet_getname(self, tool_sw):
+        # The real ISheet member index has GetName/SetName and no bare `Name`
+        # property (docs/api/01-documents-and-sheets.md's ISheet::SetName
+        # record), so the no-sheet_name default mode has to work with only
+        # GetName answering -- reading `Name` alone made it fail outright
+        # against a real interop layer.
+        fake_sw = tool_sw("drawing")
+        sheet = _script_current_sheet(fake_sw.ActiveDoc.GetCurrentSheet())
+        sheet.set_return("ISheet.GetName", "Sheet1")
+        sheet.set_return("Name", None)
+        fake_sw.ActiveDoc.set_return("SetupSheet5", True)
+
+        result = dispatch("set_sheet_scale", {"scale_num": 1, "scale_denom": 4})
+
+        assert result["success"] is True, result
+        assert result["data"]["name"] == "Sheet1"
+        assert fake_sw.call_log.calls_to("SetupSheet5")[0].args[0] == "Sheet1"
 
 
 class TestGetSheetProperties:

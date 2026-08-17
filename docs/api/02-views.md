@@ -1903,6 +1903,14 @@ other; help page body itself inaccessible)
   that one really is a VB `Function`, not a property). Not independently verified
   against a fetchable help page; low-stakes enough (display-only) not to block this
   issue on it.
+  **Superseded — do not code against `ISheet::Name` alone.** `sw-kzy.3` fetched the
+  real `ISheet` member index (see `01-documents-and-sheets.md`'s `ISheet::SetName`
+  record) and it lists `GetName`/`SetName` with **no** bare `Name` property. The
+  inference above was wrong, and it was not display-only: reading `Name` alone
+  returns nothing off a real interop layer, which left `get_active_sheet` nameless
+  and broke `set_sheet_properties`/`set_sheet_scale`/`get_sheet_properties` in their
+  no-`sheet_name` default mode. `DrawingOperations._sheet_name` now tries `GetName`
+  first and keeps `Name` only as a fallback.
 
 ### IView::ReferencedDocument
 

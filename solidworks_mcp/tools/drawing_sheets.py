@@ -139,7 +139,7 @@ def get_active_sheet(arguments: dict) -> Dict:
                     "Omitted: keeps the sheet's current template."
                 ),
             },
-            "scale_num": {"type": "number", "description": "Scale numerator"},
+            "scale_num": {"type": "number", "description": "Scale numerator; must be nonzero"},
             "scale_denom": {
                 "type": "number",
                 "description": "Scale denominator; must be nonzero",
@@ -183,7 +183,7 @@ def set_sheet_properties(arguments: dict) -> Dict:
     schema={
         "type": "object",
         "properties": {
-            "scale_num": {"type": "number", "description": "Scale numerator"},
+            "scale_num": {"type": "number", "description": "Scale numerator; must be nonzero"},
             "scale_denom": {
                 "type": "number",
                 "description": "Scale denominator; must be nonzero",
@@ -268,8 +268,10 @@ def copy_sheet(arguments: dict) -> Dict:
     description=(
         "Remove a sheet. WORKAROUND: SolidWorks has no direct DeleteSheet API "
         "-- this selects the sheet via IModelDocExtension::SelectByID2 and "
-        "deletes it via IModelDocExtension::DeleteSelection2. Refuses to "
-        "delete the last remaining sheet, making no COM call in that case."
+        "deletes it via IModelDocExtension::DeleteSelection2, then re-reads "
+        "the sheet list to confirm the sheet is actually gone rather than "
+        "trusting DeleteSelection2's return value alone. Refuses to delete "
+        "the last remaining sheet, making no COM call in that case."
     ),
     schema={
         "type": "object",
