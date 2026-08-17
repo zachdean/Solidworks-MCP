@@ -94,6 +94,30 @@ class SwDrawingProjectionType(IntEnum):
     swDrawing3rdAngleProjection = 2
 
 
+class SwInsertOptions(IntEnum):
+    """Where to insert a pasted sheet relative to the selected sheet
+    (swInsertOptions_e), used by IDrawingDoc::PasteSheet.
+
+    Source: docs/api/01-documents-and-sheets.md (Enums section).
+    """
+
+    swInsertOption_BeforeSelectedSheet = 0
+    swInsertOption_AfterSelectedSheet = 1
+    swInsertOption_MoveToEnd = 2
+
+
+class SwRenameOptions(IntEnum):
+    """Whether IDrawingDoc::PasteSheet renames duplicate section/detail/
+    auxiliary view names on the pasted sheet (swRenameOptions_e) -- not the
+    sheet's own name.
+
+    Source: docs/api/01-documents-and-sheets.md (Enums section).
+    """
+
+    swRenameOption_Yes = 1
+    swRenameOption_No = 2
+
+
 class SwSaveAsOptions(IntEnum):
     """Bitmask options for IModelDoc2::Save3 / IModelDocExtension::SaveAs3 (swSaveAsOptions_e).
 

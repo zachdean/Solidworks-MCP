@@ -61,6 +61,9 @@ EXPECTED_TOOL_NAMES = {
     "set_sheet_properties",
     "set_sheet_scale",
     "get_sheet_properties",
+    "copy_sheet",
+    "delete_sheet",
+    "rename_sheet",
     # Drawing View Creation & Discovery Tools
     "insert_model_view",
     "insert_standard_3_view",

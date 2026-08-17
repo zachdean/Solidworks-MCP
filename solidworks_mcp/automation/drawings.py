@@ -51,7 +51,9 @@ from ..constants_drawing import (
     SwImportModelItemsSource,
     SwInConfigurationOpts,
     SwInsertAnnotation,
+    SwInsertOptions,
     SwLeaderStyle,
+    SwRenameOptions,
     SwSaveAsOptions,
     SwSaveAsVersion,
     SwSetValueInConfiguration,
@@ -3371,6 +3373,393 @@ class DrawingOperations:
             "template_path": current["template_path"],
         }
         return self._result(True, f"Sheet {name!r} properties", SwErrors.swSuccess, data)
+
+    def copy_sheet(self, source_sheet: str, new_name: Optional[str] = None,
+                    count: int = 1) -> Dict:
+        """
+        Duplicate a sheet via the select + `IModelDoc2::EditCopy` +
+        `IDrawingDoc::PasteSheet` workaround -- `IDrawingDoc` has no direct
+        `CopySheet` API (docs/api/01-documents-and-sheets.md's `PasteSheet`
+        record: confirmed absent from the `IDrawingDoc` member index, same
+        as `DeleteSheet`).
+
+        Per this issue's acceptance criteria, this workaround is guarded
+        rather than looped blindly: after each copy, the sheet list is
+        re-read and the copy is refused/reported as failed unless exactly
+        one new sheet name actually appears (`PasteSheet`'s own `Boolean`
+        return has no documented failure cause to rely on alone).
+
+        Args:
+            source_sheet: Name of the sheet to copy. Re-selected fresh
+                before each copy (matching SolidWorks' own worked example)
+                -- never consumed, renamed, or itself modified.
+            new_name: Rename the single created copy to this name. Only
+                valid with `count=1`: `PasteSheet` has no name parameter
+                (SolidWorks auto-names each copy, e.g. `"Sheet1(2)"`), and
+                this tool does not guess a naming pattern for multiple
+                copies -- `new_name` with `count != 1` fails with
+                `swInvalidInput` before any COM call.
+            count: Number of copies to create. Must be a positive integer.
+
+        Returns:
+            Result dict. `data["created"]` lists the new sheet name(s), in
+            creation order; `data["sheets"]` is the full sheet list
+            re-read after the last copy. Fails with `swInvalidInput` if
+            `source_sheet` doesn't exist, `new_name` already exists, or
+            `count`/`new_name` are combined invalidly -- none of these make
+            any COM call. Fails with `swFeatureError` if `PasteSheet`
+            itself returns `False`, or if the sheet count doesn't actually
+            increase by one after a `PasteSheet` that returned `True`.
+        """
+        if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+            return self._result(
+                False, f"count must be a positive integer (got {count!r})",
+                SwErrors.swInvalidInput,
+            )
+        if new_name is not None and count != 1:
+            return self._result(
+                False,
+                "new_name is only valid with count=1 -- PasteSheet has no name "
+                "parameter (SolidWorks auto-names each copy) and this tool "
+                "doesn't guess a naming pattern for multiple copies",
+                SwErrors.swInvalidInput,
+            )
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        try:
+            before_names = _normalize_sheet_names(doc.GetSheetNames())
+        except Exception as e:
+            logger.error(f"copy_sheet error: {e}")
+            return self._result(False, f"Could not read sheet names: {e}", SwErrors.swUnknownError)
+
+        if source_sheet not in before_names:
+            return self._result(
+                False,
+                f"Sheet {source_sheet!r} not found; available sheets: {before_names!r}",
+                SwErrors.swInvalidInput,
+                {"name": source_sheet, "available_sheets": before_names},
+            )
+        if new_name is not None and new_name in before_names:
+            return self._result(
+                False, f"Sheet {new_name!r} already exists", SwErrors.swInvalidInput,
+                {"new_name": new_name, "available_sheets": before_names},
+            )
+
+        try:
+            before_count = int(doc.GetSheetCount())
+        except Exception as e:
+            logger.error(f"copy_sheet error: {e}")
+            return self._result(False, f"Could not read sheet count: {e}", SwErrors.swUnknownError)
+
+        seen = set(before_names)
+        created: List[str] = []
+
+        for i in range(count):
+            with self.selected(source_sheet, "SHEET", 0, 0, 0) as sel:
+                if not sel["success"]:
+                    return self._result(
+                        False,
+                        f"Created {created!r} but could not select {source_sheet!r} "
+                        f"to copy: {sel['message']}",
+                        SwErrors.swSelectionError, {"created": created},
+                    )
+                try:
+                    doc.EditCopy()
+                    # swInsertOption_MoveToEnd, not *_AfterSelectedSheet: since
+                    # source_sheet is re-selected fresh before every copy (see
+                    # this method's own docstring), *_AfterSelectedSheet would
+                    # insert each new copy immediately after source_sheet,
+                    # pushing every earlier copy further along -- reversing
+                    # tab order relative to data["created"]'s creation order
+                    # for count>1. MoveToEnd keeps both orders the same.
+                    pasted = doc.PasteSheet(
+                        int(SwInsertOptions.swInsertOption_MoveToEnd),
+                        int(SwRenameOptions.swRenameOption_No),
+                    )
+                except Exception as e:
+                    logger.error(f"copy_sheet error: {e}")
+                    return self._result(
+                        False, f"Created {created!r} but copy {i + 1} failed: {e}",
+                        SwErrors.swUnknownError, {"created": created},
+                    )
+
+            if not pasted:
+                return self._result(
+                    False,
+                    f"Created {created!r} but PasteSheet returned false for copy {i + 1}",
+                    SwErrors.swFeatureError, {"created": created},
+                )
+
+            # The guard this issue's acceptance criteria calls for: don't
+            # trust PasteSheet's own Boolean alone -- confirm the sheet
+            # count (IDrawingDoc::GetSheetCount) actually went up by
+            # exactly one before treating this copy as real.
+            try:
+                after_count = int(doc.GetSheetCount())
+            except Exception as e:
+                return self._result(
+                    False,
+                    f"Created {created!r}, but could not re-read the sheet count "
+                    f"after copy {i + 1}: {e}",
+                    SwErrors.swUnknownError, {"created": created},
+                )
+
+            if after_count != before_count + 1:
+                return self._result(
+                    False,
+                    f"Created {created!r}, but the sheet count did not increase by "
+                    f"one after copy {i + 1} (was {before_count}, now {after_count}) "
+                    "-- PasteSheet reported success but no new sheet appeared",
+                    SwErrors.swFeatureError, {"created": created},
+                )
+
+            try:
+                after_names = _normalize_sheet_names(doc.GetSheetNames())
+            except Exception as e:
+                return self._result(
+                    False,
+                    f"Created {created!r}, but could not re-read sheet names after "
+                    f"copy {i + 1}: {e}",
+                    SwErrors.swUnknownError, {"created": created},
+                )
+
+            new_names = [n for n in after_names if n not in seen]
+            if len(new_names) != 1:
+                return self._result(
+                    False,
+                    f"Created {created!r}, and the sheet count increased after copy "
+                    f"{i + 1}, but the new sheet's name could not be identified "
+                    f"unambiguously: {new_names!r}",
+                    SwErrors.swUnknownError, {"created": created},
+                )
+
+            pasted_name = new_names[0]
+            seen.add(pasted_name)
+            created.append(pasted_name)
+            before_count = after_count
+
+        if new_name is not None:
+            [only] = created
+            try:
+                sheet = doc.Sheet(only)
+            except Exception as e:
+                return self._result(
+                    False, f"Created {only!r} but could not resolve it to rename: {e}",
+                    SwErrors.swUnknownError, {"created": created},
+                )
+            if not sheet:
+                return self._result(
+                    False, f"Created {only!r} but could not resolve it to rename",
+                    SwErrors.swUnknownError, {"created": created},
+                )
+            try:
+                sheet.SetName(new_name)
+            except Exception as e:
+                return self._result(
+                    False, f"Created {only!r} but rename to {new_name!r} failed: {e}",
+                    SwErrors.swUnknownError, {"created": created},
+                )
+
+        try:
+            final_names = _normalize_sheet_names(doc.GetSheetNames())
+        except Exception as e:
+            return self._result(
+                False,
+                f"Copies created ({created!r}) but could not re-read the final "
+                f"sheet list: {e}",
+                SwErrors.swUnknownError, {"created": created},
+            )
+
+        if new_name is not None:
+            # SetName is a bare Sub with no return value/failure signal
+            # (docs/api/01-documents-and-sheets.md's SetName record) -- same
+            # "confirm what actually happened" check rename_sheet does.
+            if new_name not in final_names:
+                return self._result(
+                    False,
+                    f"SetName({new_name!r}) did not raise, but {new_name!r} does "
+                    f"not appear in the sheet list afterward: {final_names!r}",
+                    SwErrors.swUnknownError, {"created": created, "sheets": final_names},
+                )
+            created = [new_name]
+
+        return self._result(
+            True, f"Created {len(created)} sheet(s): {created!r}", SwErrors.swSuccess,
+            {"created": created, "sheets": final_names},
+        )
+
+    def delete_sheet(self, name: str) -> Dict:
+        """
+        Delete a sheet via the select + `IModelDocExtension::DeleteSelection2`
+        workaround -- `IDrawingDoc` has no direct `DeleteSheet` API (this
+        dossier's own `DeleteSheet` record: confirmed absent from the
+        `IDrawingDoc` member index).
+
+        Refuses to delete the last remaining sheet -- a drawing with zero
+        sheets is not a state any other tool in this project expects --
+        without making any COM call.
+
+        Args:
+            name: Sheet to delete.
+
+        Returns:
+            Result dict. `data["sheets"]` is the sheet list re-read after
+            the deletion (or, on a refusal/failure, the sheet list as read
+            before attempting anything). Fails with `swInvalidInput` if
+            `name` doesn't exist or is the only remaining sheet -- neither
+            makes a `DeleteSelection2` call. Fails with `swFeatureError` if
+            `DeleteSelection2` itself returns `False`.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        try:
+            before_names = _normalize_sheet_names(doc.GetSheetNames())
+        except Exception as e:
+            logger.error(f"delete_sheet error: {e}")
+            return self._result(False, f"Could not read sheet names: {e}", SwErrors.swUnknownError)
+
+        if name not in before_names:
+            return self._result(
+                False,
+                f"Sheet {name!r} not found; available sheets: {before_names!r}",
+                SwErrors.swInvalidInput,
+                {"name": name, "available_sheets": before_names},
+            )
+        if len(before_names) <= 1:
+            return self._result(
+                False,
+                f"Cannot delete {name!r} -- it is the only remaining sheet",
+                SwErrors.swInvalidInput,
+                {"name": name, "sheets": before_names},
+            )
+
+        with self.selected(name, "SHEET", 0, 0, 0) as sel:
+            if not sel["success"]:
+                return self._result(
+                    False, f"Could not select {name!r} to delete: {sel['message']}",
+                    SwErrors.swSelectionError, {"name": name, "sheets": before_names},
+                )
+            try:
+                deleted = doc.Extension.DeleteSelection2(0)
+            except Exception as e:
+                logger.error(f"delete_sheet error: {e}")
+                return self._result(
+                    False, f"Delete sheet error: {e}", SwErrors.swUnknownError,
+                    {"name": name, "sheets": before_names},
+                )
+
+        if not deleted:
+            return self._result(
+                False, f"Failed to delete sheet {name!r}",
+                SwErrors.swFeatureError, {"name": name, "sheets": before_names},
+            )
+
+        try:
+            after_names = _normalize_sheet_names(doc.GetSheetNames())
+        except Exception as e:
+            return self._result(
+                False, f"Deleted {name!r} but could not re-read sheet names: {e}",
+                SwErrors.swUnknownError, {"name": name},
+            )
+
+        return self._result(
+            True, f"Deleted sheet {name!r}", SwErrors.swSuccess,
+            {"name": name, "sheets": after_names},
+        )
+
+    def rename_sheet(self, old_name: str, new_name: str) -> Dict:
+        """
+        Rename a sheet via `ISheet::SetName` -- a bare `Sub` with no return
+        value or documented failure signal (this dossier's own `SetName`
+        record), so this wrapper checks for a name collision itself before
+        calling it and re-reads `GetSheetNames` afterward to confirm what
+        actually happened rather than trusting the call silently worked.
+
+        Args:
+            old_name: Sheet to rename.
+            new_name: New name. Fails with `swInvalidInput` (no COM call)
+                if a sheet with this name already exists.
+
+        Returns:
+            Result dict. `data["sheets"]` is the sheet list re-read after
+            the rename. Fails with `swInvalidInput` if `old_name` doesn't
+            exist or `new_name` collides with an existing sheet. Fails
+            with `swUnknownError` if, after calling `SetName`, `new_name`
+            doesn't actually appear in the re-read sheet list -- `SetName`
+            gives no other way to detect that.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        try:
+            before_names = _normalize_sheet_names(doc.GetSheetNames())
+        except Exception as e:
+            logger.error(f"rename_sheet error: {e}")
+            return self._result(False, f"Could not read sheet names: {e}", SwErrors.swUnknownError)
+
+        if old_name not in before_names:
+            return self._result(
+                False,
+                f"Sheet {old_name!r} not found; available sheets: {before_names!r}",
+                SwErrors.swInvalidInput,
+                {"name": old_name, "available_sheets": before_names},
+            )
+        if new_name in before_names:
+            return self._result(
+                False, f"Sheet {new_name!r} already exists", SwErrors.swInvalidInput,
+                {"new_name": new_name, "available_sheets": before_names},
+            )
+
+        try:
+            sheet = doc.Sheet(old_name)
+        except Exception as e:
+            logger.error(f"rename_sheet error: {e}")
+            return self._result(False, f"Resolve sheet error: {e}", SwErrors.swUnknownError)
+        if not sheet:
+            return self._result(
+                False, f"Sheet {old_name!r} not found; available sheets: {before_names!r}",
+                SwErrors.swInvalidInput,
+                {"name": old_name, "available_sheets": before_names},
+            )
+
+        try:
+            sheet.SetName(new_name)
+        except Exception as e:
+            logger.error(f"rename_sheet error: {e}")
+            return self._result(
+                False, f"Rename sheet error: {e}", SwErrors.swUnknownError,
+                {"name": old_name, "new_name": new_name},
+            )
+
+        try:
+            after_names = _normalize_sheet_names(doc.GetSheetNames())
+        except Exception as e:
+            return self._result(
+                False,
+                f"Renamed {old_name!r} to {new_name!r} but could not re-read sheet "
+                f"names: {e}",
+                SwErrors.swUnknownError, {"name": old_name, "new_name": new_name},
+            )
+
+        if new_name not in after_names:
+            return self._result(
+                False,
+                f"SetName({new_name!r}) did not raise, but {new_name!r} does not "
+                f"appear in the sheet list afterward: {after_names!r}",
+                SwErrors.swUnknownError,
+                {"name": old_name, "new_name": new_name, "sheets": after_names},
+            )
+
+        return self._result(
+            True, f"Renamed sheet {old_name!r} to {new_name!r}", SwErrors.swSuccess,
+            {"name": old_name, "new_name": new_name, "sheets": after_names},
+        )
 
     # ========================================================================
     # View creation / discovery tools

@@ -2,10 +2,12 @@
 Drawing Sheet Management Tools
 --------------------------------
 add_sheet, activate_sheet, list_sheets, get_active_sheet, set_sheet_properties,
-set_sheet_scale, get_sheet_properties.
+set_sheet_scale, get_sheet_properties, copy_sheet, delete_sheet, rename_sheet.
 
 Backed by `DrawingOperations` (solidworks_mcp/automation/drawings.py), per
-docs/api/01-documents-and-sheets.md.
+docs/api/01-documents-and-sheets.md. `copy_sheet`/`delete_sheet` are both
+select-then-act *workarounds* -- `IDrawingDoc` has no direct `CopySheet` or
+`DeleteSheet` API (confirmed against its member index in the dossier).
 """
 
 from typing import Dict
@@ -222,3 +224,82 @@ def set_sheet_scale(arguments: dict) -> Dict:
 )
 def get_sheet_properties(arguments: dict) -> Dict:
     return sw_automation.get_sheet_properties(arguments.get("sheet_name"))
+
+
+@tool(
+    name="copy_sheet",
+    description=(
+        "Duplicate a sheet, optionally N times. WORKAROUND: SolidWorks has no "
+        "direct CopySheet API -- this selects the sheet, calls "
+        "IModelDoc2::EditCopy, then IDrawingDoc::PasteSheet (inserted at the "
+        "end of the sheet list, so tab order matches the returned creation "
+        "order), verifying the sheet count actually increased after each "
+        "copy rather than trusting PasteSheet's return value alone. "
+        "new_name is only valid with count=1 since PasteSheet auto-names "
+        "each copy (e.g. 'Sheet1(2)') and this tool doesn't guess a naming "
+        "pattern for multiple copies."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "source_sheet": {"type": "string", "description": "Sheet to copy"},
+            "new_name": {
+                "type": "string",
+                "description": "Rename the created copy to this name. Only valid with count=1.",
+            },
+            "count": {
+                "type": "integer", "default": 1,
+                "description": "Number of copies to create",
+            },
+        },
+        "required": ["source_sheet"],
+    },
+)
+def copy_sheet(arguments: dict) -> Dict:
+    return sw_automation.copy_sheet(
+        arguments.get("source_sheet", ""),
+        arguments.get("new_name"),
+        arguments.get("count", 1),
+    )
+
+
+@tool(
+    name="delete_sheet",
+    description=(
+        "Remove a sheet. WORKAROUND: SolidWorks has no direct DeleteSheet API "
+        "-- this selects the sheet via IModelDocExtension::SelectByID2 and "
+        "deletes it via IModelDocExtension::DeleteSelection2. Refuses to "
+        "delete the last remaining sheet, making no COM call in that case."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Sheet to delete"},
+        },
+        "required": ["name"],
+    },
+)
+def delete_sheet(arguments: dict) -> Dict:
+    return sw_automation.delete_sheet(arguments.get("name", ""))
+
+
+@tool(
+    name="rename_sheet",
+    description=(
+        "Rename a sheet via ISheet::SetName. Rejects a name collision with an "
+        "existing sheet before calling COM, and re-reads the sheet list "
+        "afterward to confirm the rename actually took effect -- SetName has "
+        "no return value of its own to check."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "old_name": {"type": "string", "description": "Sheet to rename"},
+            "new_name": {"type": "string", "description": "New name for the sheet"},
+        },
+        "required": ["old_name", "new_name"],
+    },
+)
+def rename_sheet(arguments: dict) -> Dict:
+    return sw_automation.rename_sheet(
+        arguments.get("old_name", ""), arguments.get("new_name", ""))

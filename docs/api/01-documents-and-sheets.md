@@ -1,6 +1,6 @@
 ---
 interface: Multiple (ISldWorks, IModelDoc2, IModelDocExtension, IDrawingDoc, ISheet, ICustomPropertyManager)
-min_methods: 17
+min_methods: 21
 status: complete
 ---
 
@@ -22,6 +22,14 @@ Two requested names from the source research issue turned out not to exist in th
 `IDrawingDoc::DeleteSheet` also does not exist as a direct API method — confirmed
 against the `IDrawingDoc` member index, not just a missing page. Its record below
 documents the real selection-based workaround instead of inventing a signature.
+
+`IDrawingDoc` likewise has no direct `CopySheet` method — confirmed against the same
+member index reproduced in the deletion record below (`PasteSheet` is listed;
+`CopySheet` is not). Copying a sheet is a select + `IModelDoc2::EditCopy` +
+`IDrawingDoc::PasteSheet` workaround, added to this dossier for `sw-kzy.3`
+(`copy_sheet`/`delete_sheet`/`rename_sheet`) — see `IDrawingDoc::PasteSheet`,
+`IModelDoc2::EditCopy`, `IDrawingDoc::GetSheetCount`, and `ISheet::SetName` below,
+plus the `swInsertOptions_e`/`swRenameOptions_e` enums in the Enums section.
 
 ## Session & document lifecycle
 
@@ -845,6 +853,255 @@ The ones actually used above, from the real `SelectByID2` and `DeleteSelection2`
 - `DeleteSelection2` does not prompt for confirmation (explicitly stated on its help page) — unlike deleting via the UI, this is a silent, irreversible-in-that-macro-run operation; callers should implement their own confirmation/undo strategy.
 - Because there is no dedicated `DeleteSheet` call, there's also no dedicated way to delete a sheet *by object reference* (e.g. from an `ISheet` obtained via `GetCurrentSheet`) without first re-selecting it by name through `SelectByID2` — a caller holding an `ISheet` reference must still know/retrieve its name string to delete it via this pattern.
 
+### IDrawingDoc::PasteSheet (sheet copy workaround — no direct CopySheet API)
+
+- **Interface:** IDrawingDoc (workaround also uses IModelDocExtension/IModelDoc2)
+- **Method:** PasteSheet — real method (unlike `DeleteSheet`, this one exists); paired
+  with `IModelDocExtension::SelectByID2` + `IModelDoc2::EditCopy` to actually copy a
+  sheet, since `PasteSheet` itself only pastes whatever is already on the clipboard.
+- **Minimum SW version:** SOLIDWORKS 2011 FCS (Revision Number 19.0)
+
+Added for `sw-kzy.3` (`copy_sheet`), which needs a bulk sheet-duplication API.
+`IDrawingDoc`'s member index (reproduced in the `DeleteSheet` record above) has no
+`CopySheet` member — `PasteSheet` is the real, current member covering this, and per
+its own Remarks section it requires the selection + `EditCopy` sequence below before
+it can be called at all.
+
+**Signature:**
+
+```vb
+Function PasteSheet( _
+   ByVal InsertOption As System.Integer, _
+   ByVal RenameOption As System.Integer _
+) As System.Boolean
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| InsertOption | Integer | n/a | Yes | Where to insert the pasted sheet relative to the currently-selected sheet | `swInsertOptions_e` |
+| RenameOption | Integer | n/a | Yes | `1` to rename duplicate section/detail/auxiliary **view** names on the pasted sheet, `2` to not rename | `swRenameOptions_e` |
+
+**Returns:** `Boolean`. "True if successful, false if not" — the page states no more
+specific failure cause than that.
+
+**Prior selection required:** Yes — per the page's own "Remarks" section verbatim:
+"Before calling this method, you must: 1. Select a sheet. 2. Call
+`IModelDoc2::EditCopy`." I.e. `PasteSheet` copies whatever sheet is currently
+selected+copied to the clipboard; it does not take a source-sheet argument itself.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IDrawingDoc~PasteSheet.html — fetched directly via the `curl` + browser `User-Agent` workaround this dossier's `GetProperties2`/`GetTemplateName` records above document (the bare `WebFetch` tool 403s on `help.solidworks.com`; the SPA shell's embedded `helpContentData.helpText` JSON payload holds the real page body, title `"PasteSheet Method (IDrawingDoc)"`).
+- https://help.solidworks.com/2025/english/api/sldworksapi/Copy_and_Paste_Drawing_Sheet_Example_VB.htm — worked VBA macro (fetched the same way), used below as the two-source corroboration of the full call sequence and its argument values.
+
+**status:** verified
+
+**Gotchas:**
+- **The worked example's exact sequence** (renamed here to this project's own
+  variable names), confirming both the `SelectByID2` selection-type string and the
+  `swInsertOptions_e`/`swRenameOptions_e` member spelling:
+  ```vb
+  boolstatus = Part.Extension.SelectByID2("Sheet1", "SHEET", x, y, 0, False, 0, Nothing, 0)
+  swModel.EditCopy
+  boolstatus = Part.PasteSheet(swInsertOption_BeforeSelectedSheet, swRenameOption_No)
+  ```
+  Same `"SHEET"` selection-type string this dossier's `DeleteSheet` workaround record
+  above already documents (`swSelSHEETS`'s Type-string). The example's `x`/`y` are
+  nonzero (`0.09205356547875, 0.10872368523`) — real coordinates picked from an
+  interactive selection — but `DeleteSheet`'s own record above selects the same way
+  with `0, 0, 0` when selecting purely by name, and the example gives no indication
+  the coordinate matters when a `Name` is supplied; treat `0, 0, 0` as the safe
+  by-name convention consistent with the rest of this dossier's `SelectByID2` uses,
+  not independently reverified against a live session.
+  Also note: `EditCopy` is called on the **document** (`swModel`, an `IModelDoc2`),
+  not on `IDrawingDoc` — `IDrawingDoc` doesn't redeclare it, since a `DrawingDoc` COM
+  object already implements `IModelDoc2` (the same dual-interface pattern this
+  project's other tools already rely on, e.g. `doc.ForceRebuild3` called directly on
+  a `get_drawing_doc()` result elsewhere in this dossier's `SetupSheet5` record).
+- **No source-sheet or new-name parameter.** `PasteSheet` acts on whatever was
+  selected+copied, and does not accept a name for the pasted sheet — SolidWorks
+  auto-names it (the worked example's own Postconditions comment: pasting `Sheet1`
+  produces `Sheet1(2)`, then `Sheet1(3)` on a second paste). A caller wanting a
+  specific name for the copy must rename it afterward via `ISheet::SetName` (below).
+- **Repeated copies re-select the same source sheet.** The worked example calls
+  `SelectByID2("Sheet1", ...)` fresh before *each* `EditCopy`/`PasteSheet` pair, even
+  on the second copy — i.e. the *original* sheet name, not the sheet created by the
+  first paste. `Sheet1` itself is never consumed, renamed, or need re-selecting by a
+  different name to produce multiple copies. The example also calls
+  `GetCurrentSheet`/`ActivateSheet` after each `PasteSheet` to report the pasted
+  sheet's own auto-generated name — not strictly necessary to reproduce the copy
+  itself, but the only way the example demonstrates reading that name back.
+- `RenameOption` only affects **derived view** names (section/detail/auxiliary views
+  that exist on the copied sheet), not the sheet's own name — do not confuse this
+  with the sheet-naming behavior in the point above.
+- `InsertOption`/`RenameOption` are raw `Integer`s per the syntax block, but the
+  worked example passes the named `swInsertOptions_e`/`swRenameOptions_e` constants
+  directly (VBA's late-bound `Long`-as-enum-member idiom) — this dossier's Enums
+  section below records their numeric values for a typed wrapper.
+- Same `IModelDoc2`/`IDrawingDoc` dual-interface note as `ForceRebuild3` elsewhere in
+  this dossier applies to `EditCopy` — call it directly on the resolved drawing
+  document object, not through a separate `.Extension` or model accessor.
+- **`copy_sheet` (`sw-kzy.3`) deliberately uses `swInsertOption_MoveToEnd`, not the
+  worked example's `swInsertOption_BeforeSelectedSheet`/`AfterSelectedSheet`.**
+  Since `copy_sheet` re-selects the *original* `source_sheet` fresh before every
+  paste (per this record's point above), `AfterSelectedSheet` would insert each new
+  copy immediately after `source_sheet` itself — pushing every earlier copy further
+  along and reversing sheet-tab order relative to `copy_sheet`'s own returned
+  creation order for `count > 1`. `MoveToEnd` keeps both orders the same. This is
+  this project's own tool-design choice, not a dossier-documented behavior
+  difference between the three `swInsertOptions_e` members beyond their literal
+  descriptions.
+
+### IModelDoc2::EditCopy
+
+- **Interface:** IModelDoc2
+- **Method:** EditCopy
+- **Minimum SW version:** Not stated on the SOLIDWORKS 2025 help page (no
+  Availability section present — same omission pattern as several other
+  long-standing core members elsewhere in this dossier).
+
+**Signature:**
+
+```vb
+Sub EditCopy()
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| (none) | n/a | n/a | n/a | Method takes no arguments | |
+
+**Returns:** None (`Sub`).
+
+**Prior selection required:** Yes — copies whatever is currently selected (via
+`ISelectionMgr`) onto the clipboard; for the `PasteSheet` workaround above, that
+selection is a single sheet, selected via `SelectByID2("<name>", "SHEET", ...)`.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IModelDoc2~EditCopy.html — fetched directly, same method as `PasteSheet` above. Page content confirmed authentic via its own embedded `helpContentData` JSON payload (title `"EditCopy Method (IModelDoc2)"`).
+
+**status:** verified
+
+**Gotchas:**
+- No return value and no documented failure signal at all — a call with nothing
+  selected is not stated to raise or to leave the clipboard unchanged; not
+  independently verified against a live session. The `copy_sheet` wrapper this
+  record supports treats a subsequent `PasteSheet` returning `False`, or the sheet
+  count not increasing, as the only failure signals available for this whole
+  sequence — see this issue's acceptance criteria for that guard.
+- Real clipboard side effect (not an in-memory SolidWorks-only operation per the
+  page's own description, "places them in the clipboard") — irrelevant to an
+  unattended macro/automation context beyond the `PasteSheet` pairing itself, but
+  worth flagging as a documented characteristic rather than an inferred one.
+
+### IDrawingDoc::GetSheetCount
+
+- **Interface:** IDrawingDoc
+- **Method:** GetSheetCount
+- **Minimum SW version:** Not stated on the SOLIDWORKS 2025 help page (no
+  Availability section present).
+
+Added for `sw-kzy.3`'s `copy_sheet` guard requirement ("verify the sheet count
+actually increased after each copy") — an explicit sheet-count read distinct from
+counting `GetSheetNames`'s own returned array length, in case a caller wants the two
+compared independently. Also documented on its own page as the recommended
+precursor to sizing an `IGetSheetNames` return buffer, though this project's
+`GetSheetNames` (not `IGetSheetNames`) needs no such sizing call.
+
+**Signature:**
+
+```vb
+Function GetSheetCount() As System.Integer
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| (none) | n/a | n/a | n/a | Method takes no arguments | |
+
+**Returns:** `Integer`. Number of drawing sheets in the drawing.
+
+**Prior selection required:** None.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IDrawingDoc~GetSheetCount.html — fetched directly, same method as `PasteSheet`/`EditCopy` above. Page content confirmed authentic via its own embedded `helpContentData` JSON payload (title `"GetSheetCount Method (IDrawingDoc)"`).
+
+**status:** verified
+
+**Gotchas:**
+- Per the page's own Remarks: "Call this method before call `IDrawingDoc::IGetSheetNames` to determine the size of that method's return array" — a hint about its intended companion call, not a functional restriction on calling it standalone.
+- No documented failure/edge case (e.g. a drawing with zero sheets, which shouldn't
+  be reachable given `delete_sheet`'s own last-sheet guard below, but is not
+  independently verified here).
+
+### ISheet::SetName (sheet rename — paired with ISheet::GetName)
+
+- **Interface:** ISheet
+- **Method:** SetName
+- **Minimum SW version:** Not stated on the SOLIDWORKS 2025 help page (no
+  Availability section present).
+
+Added for `sw-kzy.3`'s `rename_sheet` and the `new_name` option on `copy_sheet` —
+`IDrawingDoc::SetupSheet5`'s own `Name` parameter identifies *which* sheet to
+configure (this dossier's existing `set_sheet_properties`/`set_sheet_scale` tools
+always pass the sheet's own current name there, per its own record above), it is not
+documented anywhere as a rename mechanism. `ISheet::SetName` is `IDrawingDoc`'s
+actual, dedicated rename member — found via the `ISheet` member index
+(`SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.ISheet_members.html`,
+fetched directly), which lists `GetName`/`SetName` as a real property-style
+getter/setter pair, not the `ISheet::Name` property this dossier's `02-views.md`
+speculatively inferred from a third-party Java type-library mirror (that record
+flags itself as "not independently verified... low-stakes enough not to block").
+This record supersedes that inference for anything sheet-name-related in
+`sw-kzy.3`'s scope specifically: `GetName`/`SetName` are the primary-sourced,
+directly-fetched pair, confirmed further by the `PasteSheet` worked example above,
+which reads a sheet's name back via `currentsheet.GetName` (called, not a bare
+property access, in that VBA snippet).
+
+**Signature:**
+
+```vb
+Sub SetName( _
+   ByVal NameIn As System.String _
+)
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| NameIn | String | n/a | Yes | Name for the sheet | |
+
+**Returns:** None (`Sub`).
+
+**Prior selection required:** None — called directly on an already-resolved `ISheet`
+reference (e.g. from `IDrawingDoc::Sheet`), same as `ISheet::GetProperties2`/
+`GetTemplateName` above.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.ISheet~SetName.html — fetched directly, same method as this record's siblings above. Page content confirmed authentic via its own embedded `helpContentData` JSON payload (title `"SetName Method (ISheet)"`).
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.ISheet_members.html — fetched directly (member index), confirms `GetName`/`SetName` are real current `ISheet` members and that no bare `Name` property exists in the index (only `GetName`, matching this record's supersession claim above).
+
+**status:** verified
+
+**Gotchas:**
+- **No return value and no documented failure signal** — unlike `ActivateSheet`/
+  `NewSheet4`/`SetupSheet5`'s `Boolean` returns elsewhere in this dossier, `SetName`
+  is a bare `Sub`. A caller cannot tell from this call alone whether renaming to a
+  name that collides with an existing sheet succeeds, silently no-ops, or produces
+  some SolidWorks-side auto-disambiguation — unverified against a live session.
+  `rename_sheet` (this issue) works around this by checking for a name collision
+  itself *before* calling `SetName` (`swInvalidInput` on collision, no COM call
+  made) and by re-reading `GetSheetNames` afterward to report what actually
+  happened, per this issue's own working agreement ("never guess what happened").
+- No documented interaction with any of `SetupSheet5`'s parameters (e.g. whether a
+  concurrent paper-size/template change survives a rename, or vice versa) — out of
+  scope for `sw-kzy.3`, which only renames via this dedicated call, never combines a
+  rename with a `SetupSheet5` call in the same tool invocation.
+
 ## Custom properties
 
 ### ICustomPropertyManager::Get6
@@ -1080,6 +1337,29 @@ The task's requested enum name, `swDwgProjectionType_e`, does not exist. Fetchin
 Note: this enum is a separate, independent representation of the projection-angle concept from the raw `FirstAngle As Boolean` parameter on `IDrawingDoc::SetupSheet4`/`SetupSheet5`/`NewSheet4` documented above (`True` = first angle, `False` = third angle on that Boolean parameter, matching `swDrawing1stAngleProjection`/`swDrawing3rdAngleProjection` semantically but not passed as this enum type in those specific method calls).
 
 Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swDrawingProjectionType_e.html
+
+#### swInsertOptions_e
+
+Added for `sw-kzy.3`'s `copy_sheet` (`IDrawingDoc::PasteSheet`'s `InsertOption` parameter, above). "Options for pasting a sheet into a drawing document," per the page's own description.
+
+| Value | Number | Meaning |
+| --- | --- | --- |
+| swInsertOption_BeforeSelectedSheet | 0 | Insert the pasted sheet before the currently-selected sheet |
+| swInsertOption_AfterSelectedSheet | 1 | Insert the pasted sheet after the currently-selected sheet |
+| swInsertOption_MoveToEnd | 2 | Move the pasted sheet to the end of the drawing |
+
+Source: https://help.solidworks.com/2025/english/api/swconst/SOLIDWORKS.Interop.swconst~SOLIDWORKS.Interop.swconst.swInsertOptions_e.html
+
+#### swRenameOptions_e
+
+Added for `sw-kzy.3`'s `copy_sheet` (`IDrawingDoc::PasteSheet`'s `RenameOption` parameter, above) — governs renaming of duplicate section/detail/auxiliary **view** names on a pasted sheet, not the sheet's own name (see that record's Gotchas).
+
+| Value | Number | Meaning |
+| --- | --- | --- |
+| swRenameOption_Yes | 1 | Rename duplicate section/detail/auxiliary view names |
+| swRenameOption_No | 2 | Do not rename them |
+
+Source: https://help.solidworks.com/2025/english/api/swconst/SOLIDWORKS.Interop.swconst~SOLIDWORKS.Interop.swconst.swRenameOptions_e.html
 
 #### swSaveAsOptions_e
 
