@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from math import radians
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from .. import com_backend
 from ..utils import UnitConverter
 
 __all__ = [
@@ -36,6 +37,7 @@ __all__ = [
     "to_radians",
     "enum_to_int",
     "to_bool",
+    "to_optional_object",
 ]
 
 
@@ -89,6 +91,24 @@ def enum_to_int(value: Any, units: Optional[UnitConverter] = None) -> int:
 def to_bool(value: Any, units: Optional[UnitConverter] = None) -> bool:
     """Coerce a value to the `bool` COM expects."""
     return bool(value)
+
+
+def to_optional_object(value: Any, units: Optional[UnitConverter] = None) -> Any:
+    """Coerce an optional COM object argument (`SelectByID2`'s `Callout`,
+    `SaveAs3`'s `ExportData`, ...): `None` becomes a null `VT_DISPATCH`
+    VARIANT, anything else passes through.
+
+    A bare Python `None` is *not* what these arguments want -- SolidWorks'
+    COM layer raises a type mismatch for it (the same failure
+    `save_document` documents working around in SW 2025), which is why every
+    hand-written `SelectByID2` call site in this package builds
+    `com_backend.null_dispatch()` first. Declaring the param with this
+    converter keeps that requirement in the signature rather than leaving it
+    for each call site to remember.
+    """
+    if value is None:
+        return com_backend.null_dispatch()
+    return value
 
 
 # JSON-schema `type` implied by a converter, used by `ComSignature.describe`.

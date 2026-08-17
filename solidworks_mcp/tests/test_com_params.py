@@ -12,9 +12,11 @@ from solidworks_mcp.automation.com_params import (
     enum_to_int,
     to_bool,
     to_meters,
+    to_optional_object,
     to_radians,
 )
 from solidworks_mcp.constants_drawing import SwDwgPaperSizes
+from solidworks_mcp.testing.fake_backend import FakePythonCom
 from solidworks_mcp.utils import UnitConverter
 
 
@@ -127,6 +129,25 @@ class TestConverters:
         assert sig.bind(flag=1) == (True,)
         assert sig.bind(flag=0) == (False,)
         assert sig.bind(flag="") == (False,)
+
+    def test_to_optional_object_turns_none_into_a_null_vt_dispatch(self, fake_sw):
+        """A bare Python `None` in an optional-object COM argument is a type
+        mismatch on a real connection (the SW 2025 failure `save_document`
+        documents working around); COM wants a null `VT_DISPATCH` VARIANT."""
+        sig = ComSignature("SelectByID2", [
+            Param("callout", None, to_optional_object)])
+
+        (callout,) = sig.bind()
+
+        assert callout.vt == FakePythonCom.VT_DISPATCH
+        assert callout.value is None
+
+    def test_to_optional_object_passes_a_real_pointer_through(self, fake_sw):
+        sig = ComSignature("SelectByID2", [
+            Param("callout", None, to_optional_object)])
+        pointer = fake_sw.new_object("callout")
+
+        assert sig.bind(callout=pointer) == (pointer,)
 
 
 class TestUnknownKwarg:

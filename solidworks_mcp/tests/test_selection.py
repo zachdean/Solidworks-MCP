@@ -6,6 +6,21 @@ exercised through `SolidWorksAutomation` bound to the fake COM harness.
 import pytest
 
 from solidworks_mcp.automation import SelectionOperations, SolidWorksAutomation
+from solidworks_mcp.testing.fake_backend import FakePythonCom
+
+
+class NullDispatch:
+    """Matches the null `VT_DISPATCH` VARIANT `SelectByID2`'s `Callout`
+    argument requires -- a bare Python `None` there is a COM type mismatch on
+    a real connection, and the fake harness accepts anything, so the
+    assertion has to name the VARIANT rather than the value."""
+
+    def __eq__(self, other) -> bool:
+        return (getattr(other, "vt", None) == FakePythonCom.VT_DISPATCH
+                and getattr(other, "value", "unset") is None)
+
+    def __repr__(self) -> str:
+        return "<null VT_DISPATCH VARIANT>"
 
 
 class TestMixinWiring:
@@ -27,7 +42,7 @@ class TestSelectById:
         log.assert_called_with(
             "SelectByID2",
             "D1@Sketch2@Part1.SLDPRT", "DIMENSION", 0.05, 0.025, 0.0,
-            True, 4, None, 1,
+            True, 4, NullDispatch(), 1,
         )
         # Pinned to IModelDocExtension -- 03-annotations.md documents several
         # methods that look plausible on the wrong interface and don't exist.
@@ -44,7 +59,7 @@ class TestSelectById:
         fake_sw.call_log.assert_called_with(
             "SelectByID2", "", "EDGE",
             pytest.approx(0.0254), pytest.approx(0.0508), pytest.approx(0.0762),
-            False, 0, None, 0,
+            False, 0, NullDispatch(), 0,
         )
 
     def test_default_args_produce_select_exactly_this_one_behavior(self, automation, fake_sw):
@@ -55,7 +70,8 @@ class TestSelectById:
         automation.select_by_id("", "EDGE", 1, 2, 3)
 
         log = fake_sw.call_log
-        log.assert_called_with("SelectByID2", "", "EDGE", 0.001, 0.002, 0.003, False, 0, None, 0)
+        log.assert_called_with("SelectByID2", "", "EDGE", 0.001, 0.002, 0.003,
+                               False, 0, NullDispatch(), 0)
 
     def test_records_what_was_selected_in_result_data(self, automation, fake_sw):
         fake_sw.ActiveDoc.Extension.set_return("SelectByID2", True)
@@ -154,6 +170,39 @@ class TestSelectedContextManager:
         clears = fake_sw.call_log.calls_to("ClearSelection2")
         assert len(clears) == 2
 
+    def test_append_block_neither_clears_on_entry_nor_on_exit(self, automation, fake_sw):
+        """An appending block joins an enclosing selection rather than
+        owning one. Clearing on entry would discard whatever the enclosing
+        block just selected; clearing on exit would discard the combined
+        selection before the enclosing body ever ran."""
+        fake_sw.ActiveDoc.Extension.set_return("SelectByID2", True)
+
+        with automation.selected("", "EDGE", 1, 2, 3, append=True) as result:
+            assert result["success"] is True
+
+        assert fake_sw.call_log.calls_to("ClearSelection2") == []
+
+    def test_nesting_builds_a_multi_entity_marked_selection(self, automation, fake_sw):
+        """The shape `AddDimension2`/`InsertGtol` need: two entities selected
+        at once, each with its own mark, cleared exactly once by the
+        outermost block."""
+        fake_sw.ActiveDoc.Extension.set_return("SelectByID2", True)
+
+        with automation.selected("", "EDGE", 1, 2, 3, mark=1) as first:
+            with automation.selected("", "EDGE", 4, 5, 6, append=True, mark=2) as second:
+                assert first["success"] is True
+                assert second["success"] is True
+                # Only the outer block's entry clear ran -- the inner one
+                # did not wipe the edge the outer block just selected, so
+                # the body sees both edges at once.
+                assert len(fake_sw.call_log.calls_to("ClearSelection2")) == 1
+                selects = fake_sw.call_log.calls_to("SelectByID2")
+                assert [call.args[6] for call in selects] == [1, 2]
+                assert [call.args[5] for call in selects] == [False, True]
+
+        # Entry + the outer block's exit. The inner block contributed none.
+        assert len(fake_sw.call_log.calls_to("ClearSelection2")) == 2
+
 
 class TestSelectViewByName:
     def test_selects_a_known_view(self, make_sw):
@@ -202,7 +251,10 @@ class TestListViewEntities:
         vertex = fake_sw.new_object("vertex1")
         vertex.set_return("GetPoint", [0.0254, 0.0508, 0.0])  # meters
         edge = fake_sw.new_object("edge1")
-        edge.set_return("GetStartPoint", [0.0254, 0.0254, 0.0])
+        # GetCurveParams2 elements 0-2 are the start point; the trailing
+        # end-point/parameter/sense elements are ignored by _entity_point.
+        edge.set_return("GetCurveParams2",
+                        [0.0254, 0.0254, 0.0, 0.0508, 0.0254, 0.0, 0.0, 1.0, 1])
         face = fake_sw.new_object("face1")
         face.set_return("GetBox", [0.0, 0.0, 0.0, 0.0508, 0.1016, 0.0])
 
@@ -218,6 +270,31 @@ class TestListViewEntities:
         assert entities["edge"]["y"] == pytest.approx(1.0)
         assert entities["face"]["x"] == pytest.approx(1.0)
         assert entities["face"]["y"] == pytest.approx(2.0)
+
+    def test_one_unreadable_entity_does_not_fail_the_whole_enumeration(self, make_sw):
+        """Point extraction is a best-effort convention over geometry
+        interfaces the dossier doesn't cover, so an entity that doesn't
+        answer costs its own point -- not every other entity in the view."""
+        fake_sw = make_sw("drawing")
+        auto = SolidWorksAutomation()
+        assert auto.connect()["success"]
+        fake_sw.ActiveDoc.set_return("ActivateView", True)
+
+        view = fake_sw.ActiveDoc.ActiveDrawingView
+        bad_edge = fake_sw.new_object("edge1")
+        bad_edge.set_raises("GetCurveParams2", AttributeError("GetCurveParams2"))
+        bad_edge.set_raises("GetStartVertex", AttributeError("GetStartVertex"))
+        good_vertex = fake_sw.new_object("vertex1")
+        good_vertex.set_return("GetPoint", [0.001, 0.002, 0.0])
+
+        view.set_sequence("GetVisibleEntities2", [[bad_edge], [], [good_vertex]])
+
+        result = auto.list_view_entities("Drawing View1")
+
+        assert result["success"] is True
+        entities = {e["kind"]: e for e in result["data"]["entities"]}
+        assert entities["edge"]["x"] is None
+        assert entities["vertex"]["x"] == pytest.approx(1.0)
 
     def test_unknown_view_name_returns_clear_error(self, make_sw):
         fake_sw = make_sw("drawing")

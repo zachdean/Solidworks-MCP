@@ -18,7 +18,10 @@ import logging
 from contextlib import contextmanager
 from typing import Any, Dict
 
-from .com_params import ComSignature, Param, REQUIRED, enum_to_int, to_bool, to_meters
+from .com_params import (
+    ComSignature, Param, REQUIRED,
+    enum_to_int, to_bool, to_meters, to_optional_object,
+)
 from ..constants import SwErrors
 
 logger = logging.getLogger(__name__)
@@ -59,7 +62,7 @@ class SelectionOperations:
         Param("z", REQUIRED, to_meters),
         Param("append", False, to_bool),
         Param("mark", 0, enum_to_int),
-        Param("callout", None),
+        Param("callout", None, to_optional_object),
         Param("sel_option", 0, enum_to_int),
     ])
 
@@ -86,7 +89,8 @@ class SelectionOperations:
                 existing selection list -- see SelectByID2's Append truth
                 table in the dossier before using `True`.
             mark: Caller-chosen tag consumed by mark-aware downstream calls.
-            callout: `ICallout` pointer, or `None` for none.
+            callout: `ICallout` pointer, or `None` for none -- `None` is
+                converted to the null `VT_DISPATCH` VARIANT COM wants.
             sel_option: `swSelectOptionDefault` (0) or `swSelectOptionExtensive`.
 
         Returns:
@@ -206,6 +210,22 @@ class SelectionOperations:
         `Insert*`/`Add*` call in this rather than calling `select_by_id` and
         the downstream method separately, so a failure partway through can
         never leave stale selection state for the next tool call.
+
+        `append=True` suppresses *both* clears, which is what makes the
+        multi-entity selections `AddDimension2`/`InsertGtol` need
+        expressible: nest an appending block inside a plain one, tagging
+        each entity with its own `mark`, and the outer (non-appending) block
+        owns the whole selection's lifecycle::
+
+            with self.selected("", "EDGE", x1, y1, z1, mark=1) as first:
+                with self.selected("", "EDGE", x2, y2, z2,
+                                   append=True, mark=2) as second:
+                    ...                       # both edges selected here
+            # outer block's exit clears both
+
+        Clearing on entry to an appending block would discard the entity the
+        enclosing block just selected; clearing on its exit would discard the
+        selection before the enclosing block's body ever ran.
         """
         doc, err = self.get_active_doc()
         if err:
@@ -215,13 +235,15 @@ class SelectionOperations:
         # One document resolution for all three COM calls; composing the
         # public `clear_selection`/`select_by_id` would re-resolve it three
         # times, and this primitive fronts every annotation tool.
-        self._clear_selection(doc)
+        if not append:
+            self._clear_selection(doc)
         result = self._select_by_id(doc, name, type_str, x, y, z,
                                     append, mark, callout, sel_option)
         try:
             yield result
         finally:
-            self._clear_selection(doc)
+            if not append:
+                self._clear_selection(doc)
 
     # ========================================================================
     # View selection / discovery
@@ -265,8 +287,20 @@ class SelectionOperations:
         Point extraction is this wrapper's own convention, not documented in
         docs/api/03-annotations.md (that dossier's `GetVisibleEntities2`
         record only covers enumeration, not per-entity geometry access):
-        vertex -> `IVertex::GetPoint`, edge -> `IEdge::GetStartPoint`,
-        face -> the center of `IFace2::GetBox`'s bounding box.
+        vertex -> `IVertex::GetPoint`, edge -> `IEdge::GetCurveParams2`'s
+        start point (falling back to `IEdge::GetStartVertex`), face -> the
+        center of `IFace2::GetBox`'s bounding box. An entity whose point
+        can't be read is still listed, with `x`/`y`/`z` of `None`, rather
+        than failing the whole call.
+
+        Caveat: these are the *model's* coordinates, since that is the space
+        the underlying geometry interfaces report in. A drawing's
+        `select_by_id` resolves an empty `name` against **sheet** space, so
+        a point from here is not directly round-trippable into
+        `select_by_id` -- it has to go through the view's own
+        position/scale transform first. Treat the coordinates as
+        informational (which entities exist, and roughly where) until a
+        model-to-sheet transform helper exists.
         """
         # Activate via `select_view_by_name` rather than repeating its
         # `ActivateView` call, so the two tools report a missing view
@@ -286,12 +320,19 @@ class SelectionOperations:
             for kind, entity_type in _VIEW_ENTITY_TYPES.items():
                 found = view.GetVisibleEntities2(component, entity_type) or []
                 for entity in found:
-                    x, y, z = self._entity_point(entity, kind)
+                    # Per-entity, so one geometry interface that doesn't
+                    # expose the accessor this convention expects costs its
+                    # own point rather than the whole enumeration.
+                    try:
+                        point = self._entity_point(entity, kind)
+                    except Exception as e:
+                        logger.warning(f"list_view_entities: no point for {kind}: {e}")
+                        point = None
                     entities.append({
                         "kind": kind,
-                        "x": self._units.from_meters(x),
-                        "y": self._units.from_meters(y),
-                        "z": self._units.from_meters(z),
+                        "x": self._units.from_meters(point[0]) if point else None,
+                        "y": self._units.from_meters(point[1]) if point else None,
+                        "z": self._units.from_meters(point[2]) if point else None,
                     })
         except Exception as e:
             logger.error(f"list_view_entities error: {e}")
@@ -310,7 +351,16 @@ class SelectionOperations:
         if kind == "vertex":
             point = entity.GetPoint()
         elif kind == "edge":
-            point = entity.GetStartPoint()
+            # `IEdge` has no single "give me a point" accessor.
+            # `GetCurveParams2` is the one that works for every edge:
+            # elements 0-2 are the start point in model space. Its
+            # `GetStartVertex` alternative returns null for closed edges
+            # (circles, full ellipses) -- which is most of what a drawing
+            # view of a machined part contains -- so it is only the fallback.
+            params = entity.GetCurveParams2()
+            if params:
+                return params[0], params[1], params[2]
+            point = entity.GetStartVertex().GetPoint()
         elif kind == "face":
             box = entity.GetBox()
             return (

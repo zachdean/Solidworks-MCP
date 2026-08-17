@@ -61,6 +61,36 @@ class TestNewDrawingFromTemplate:
             int(SwDwgPaperSizes.swDwgPaperA3size), 0, 0,
         )
 
+    def test_orientation_is_case_insensitive_like_paper_size(self, tool_sw):
+        """`paper_size` is uppercased before lookup, so `orientation` has to
+        be normalized too -- otherwise "Portrait" silently produces the
+        landscape sheet while `data` echoes back "Portrait"."""
+        fake_sw = tool_sw("part")
+        new_doc = fake_sw.new_object("new_drawing")
+        new_doc.set_return("GetTitle", "Draw1")
+        fake_sw.set_return("NewDocument", new_doc)
+
+        result = dispatch("new_drawing_from_template", {
+            "template_path": "/templates/Drawing.drwdot",
+            "paper_size": "a4",
+            "orientation": "Portrait",
+        })
+
+        assert result["success"] is True
+        assert fake_sw.call_log.arg_of("NewDocument", 1) == int(
+            SwDwgPaperSizes.swDwgPaperA4sizeVertical)
+
+    def test_unknown_orientation_is_rejected_not_silently_landscaped(self, tool_sw):
+        tool_sw("part")
+
+        result = dispatch("new_drawing_from_template", {
+            "template_path": "/templates/Drawing.drwdot",
+            "orientation": "sideways",
+        })
+
+        assert result["success"] is False
+        assert result["error_name"] == "swInvalidInput"
+
     def test_falls_back_to_template_discovery_and_errors_when_none_found(
         self, tool_sw, monkeypatch,
     ):
@@ -124,6 +154,8 @@ class TestOpenOrActivateDocument:
         filepath.write_text("stub")
         existing = fake_sw.new_object("existing")
         existing.set_return("GetTitle", "Bracket.SLDPRT")
+        existing.set_return("GetPathName", str(filepath))
+        existing.GetNext = None
         fake_sw.set_return("GetFirstDocument", existing)
         fake_sw.set_return("ActivateDoc3", existing)
 
@@ -136,6 +168,59 @@ class TestOpenOrActivateDocument:
         assert log.arg_of("ActivateDoc3", 0) == "Bracket.SLDPRT"
         assert log.arg_of("ActivateDoc3", 1) is True
         assert not log.calls_to("OpenDoc6")
+
+    def test_same_name_in_another_directory_is_not_the_same_document(
+            self, tool_sw, tmp_path):
+        """A title is only a basename. Activating `rev_a/Bracket.sldprt`
+        when the caller asked for `rev_b/Bracket.sldprt` would report
+        success against rev_b's path while the caller edits and saves
+        rev_a."""
+        fake_sw = tool_sw("part")
+        rev_a = tmp_path / "rev_a"
+        rev_b = tmp_path / "rev_b"
+        rev_a.mkdir()
+        rev_b.mkdir()
+        (rev_a / "Bracket.sldprt").write_text("stub")
+        wanted = rev_b / "Bracket.sldprt"
+        wanted.write_text("stub")
+
+        open_in_rev_a = fake_sw.new_object("existing")
+        open_in_rev_a.set_return("GetTitle", "Bracket.SLDPRT")
+        open_in_rev_a.set_return("GetPathName", str(rev_a / "Bracket.sldprt"))
+        open_in_rev_a.GetNext = None
+        fake_sw.set_return("GetFirstDocument", open_in_rev_a)
+
+        opened = fake_sw.new_object("opened")
+        opened.set_return("GetTitle", "Bracket.SLDPRT")
+        fake_sw.set_return("OpenDoc6", opened)
+
+        result = dispatch("open_or_activate_document", {"filepath": str(wanted)})
+
+        assert result["success"] is True
+        assert result["data"]["activated"] is False
+        log = fake_sw.call_log
+        assert not log.calls_to("ActivateDoc3")
+        assert log.arg_of("OpenDoc6", 0) == str(wanted)
+
+    def test_nonzero_load_error_fails_even_with_a_document_handle(
+            self, tool_sw, tmp_path):
+        """`OpenDoc6` can return a document *and* a nonzero
+        `swFileLoadError_e` (partial load, repair required). Reporting plain
+        success would bury the diagnosis."""
+        fake_sw = tool_sw("part")
+        filepath = tmp_path / "Bracket.sldprt"
+        filepath.write_text("stub")
+        opened_doc = fake_sw.new_object("opened")
+        opened_doc.set_return("GetTitle", "Bracket.SLDPRT")
+        fake_sw.set_return("OpenDoc6", opened_doc)
+        # OpenDoc6's Errors out-param is positional arg 4.
+        fake_sw.set_byref("OpenDoc6", {4: 2})
+
+        result = dispatch("open_or_activate_document", {"filepath": str(filepath)})
+
+        assert result["success"] is False
+        assert result["error_name"] == "swFileLoadError"
+        assert "2" in result["message"]
 
     def test_file_not_found_fails(self, tool_sw, tmp_path):
         tool_sw("part")

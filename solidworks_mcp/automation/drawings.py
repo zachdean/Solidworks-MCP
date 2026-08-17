@@ -145,9 +145,11 @@ class DrawingOperations:
             paper_size: One of `"A"`, `"B"`, `"C"`, `"D"`, `"E"`, `"A0"`-`"A4"`
                 (case-insensitive) -- resolved to `swDwgPaperSizes_e` and
                 passed as `NewDocument`'s `PaperSize` argument.
-            orientation: `"landscape"` (default) or `"portrait"`. Only `"A"`
-                and `"A4"` have a documented vertical/portrait paper-size
-                variant; other sizes ignore this and use the landscape value.
+            orientation: `"landscape"` (default) or `"portrait"`
+                (case-insensitive; anything else fails with
+                `swInvalidInput`). Only `"A"` and `"A4"` have a documented
+                vertical/portrait paper-size variant; other sizes ignore
+                this and use the landscape value.
             scale_num, scale_denom: `NewDocument` has no scale parameter --
                 sheet scale is a `SetupSheet5`/`SetupSheet6` concern (a later
                 sheet-management tool), not this one. Echoed back in `data`
@@ -181,8 +183,19 @@ class DrawingOperations:
                 SwErrors.swInvalidInput,
             )
         landscape_size, portrait_size = sizes
+        # Normalized like `paper_size` above -- a caller passing "Portrait"
+        # would otherwise silently get the landscape size, with `data`
+        # echoing back the requested "Portrait" and hiding the mismatch.
+        orientation_key = orientation.lower()
+        if orientation_key not in ("landscape", "portrait"):
+            return self._result(
+                False,
+                f"Unknown orientation {orientation!r}; expected "
+                "'landscape' or 'portrait'",
+                SwErrors.swInvalidInput,
+            )
         paper_size_value = (
-            portrait_size if orientation == "portrait" and portrait_size is not None
+            portrait_size if orientation_key == "portrait" and portrait_size is not None
             else landscape_size
         )
 
@@ -222,8 +235,8 @@ class DrawingOperations:
     def open_or_activate_document(self, filepath: str, read_only: bool = False,
                                    lightweight: bool = False) -> Dict:
         """
-        Open `filepath` via `ISldWorks::OpenDoc6`, or -- if a document with
-        that name is already loaded -- bring it to the foreground via
+        Open `filepath` via `ISldWorks::OpenDoc6`, or -- if *this same file*
+        is already loaded -- bring it to the foreground via
         `ISldWorks::ActivateDoc3` instead (`OpenDoc6` does not activate an
         already-loaded document, per the dossier's Gotchas).
         """
@@ -236,7 +249,7 @@ class DrawingOperations:
             return self._result(False, f"File not found: {filepath}", SwErrors.swFileNotFoundError)
 
         title = os.path.basename(filepath)
-        existing, existing_title = self._find_open_document(title)
+        existing, existing_title = self._find_open_document(title, filepath)
 
         if existing is not None:
             errors = com_backend.byref_int()
@@ -273,7 +286,11 @@ class DrawingOperations:
             logger.error(f"open_or_activate_document open error: {e}")
             return self._result(False, f"Open error: {e}", SwErrors.swFileLoadError)
 
-        if doc is None:
+        # `OpenDoc6` can hand back a document *and* a nonzero
+        # `swFileLoadError_e` bitmask (partial load, repair required,
+        # future-version file). Reporting plain success there would hide a
+        # diagnosis `DocumentOperations.open_document` already surfaces.
+        if doc is None or errors.value != 0:
             return self._result(
                 False, f"Failed to open {filepath} (error {errors.value})",
                 SwErrors.swFileLoadError,
@@ -285,19 +302,28 @@ class DrawingOperations:
             {"name": opened_title, "path": filepath, "activated": False},
         )
 
-    def _find_open_document(self, title: str) -> Tuple[Any, Optional[str]]:
-        """First already-open document (per `ISldWorks::GetFirstDocument`/
-        `IModelDoc2::GetNext`) whose title case-insensitively matches
-        `title`, or `(None, None)`.
+    def _find_open_document(self, title: str, path: str) -> Tuple[Any, Optional[str]]:
+        """The already-open document (per `ISldWorks::GetFirstDocument`/
+        `IModelDoc2::GetNext`) that *is* the file at `path`, or
+        `(None, None)`.
 
-        Case-insensitive because `IModelDoc2::GetTitle` returns SolidWorks'
-        own casing for the file extension (e.g. `"Bracket.SLDPRT"`), which
-        won't exactly match a caller-supplied path's casing (e.g.
-        `"Bracket.sldprt"`). Returns the *matched* title (not the input
-        `title`) so the caller passes `ActivateDoc3` the exact string
-        SolidWorks itself reported.
+        Both a title and a path, because neither alone is enough. Titles are
+        compared case-insensitively, since `IModelDoc2::GetTitle` returns
+        SolidWorks' own casing for the file extension (e.g.
+        `"Bracket.SLDPRT"`), which won't match a caller-supplied path's
+        casing (e.g. `"Bracket.sldprt"`) -- and the matched title is what
+        gets returned, so the caller passes `ActivateDoc3` the exact string
+        SolidWorks itself reported. But a title is only a basename:
+        `rev_a\\Bracket.slddrw` and `rev_b\\Bracket.slddrw` share one, so
+        matching on it alone would activate whichever revision happened to
+        be open while reporting success against the path the caller asked
+        for -- and the caller would go on to edit and save the wrong file.
+        Hence the `IModelDoc2::GetPathName` confirmation. A document
+        reporting no path (never saved, still "Draw1") never matches a file
+        on disk.
         """
         target = title.lower()
+        target_path = os.path.normcase(os.path.abspath(path))
         try:
             doc = self._sw_app.GetFirstDocument()
         except Exception:
@@ -306,7 +332,9 @@ class DrawingOperations:
         while doc:
             doc_title = self._get_doc_title(doc)
             if doc_title and str(doc_title).lower() == target:
-                return doc, doc_title
+                doc_path = self._get_doc_path(doc)
+                if doc_path and os.path.normcase(os.path.abspath(str(doc_path))) == target_path:
+                    return doc, doc_title
 
             try:
                 doc = doc.GetNext()
