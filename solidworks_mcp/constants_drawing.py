@@ -380,16 +380,20 @@ class SwUserPreferenceToggle(IntEnum):
     This enum has hundreds of members and its own help.solidworks.com
     enumeration page publishes no numeric values for any of them (confirmed
     directly, and independently again in docs/api/05-export-and-layers.md's own
-    curated subset of this same enum). Only the one member this issue's
-    insert_standard_3_view needs was tracked down -- via a third-party compiled
-    SwConst.tlb transcription, not an official source -- so this class carries
-    just that member rather than the whole enum. See that record's "status" line
-    in docs/api/02-views.md's Enums section for the sourcing caveat.
+    curated subset of this same enum). Members here were tracked down via a
+    third-party compiled SwConst.tlb transcription, not an official source --
+    see docs/api/02-views.md's Enums section (swAutomaticScaling3ViewDrawings)
+    and docs/api/05-export-and-layers.md's Enums section
+    (swPDFExportHighQuality, cross-corroborated against
+    swAutomaticScaling3ViewDrawings's already-trusted value from the same
+    file) for the sourcing caveats.
 
-    Source: docs/api/02-views.md (Enums section, swUserPreferenceToggle_e).
+    Source: docs/api/02-views.md and docs/api/05-export-and-layers.md
+    (Enums sections, swUserPreferenceToggle_e).
     """
 
     swAutomaticScaling3ViewDrawings = 86
+    swPDFExportHighQuality = 325
 
 
 class SwBreakLineOrientation(IntEnum):

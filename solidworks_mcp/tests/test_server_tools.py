@@ -47,6 +47,7 @@ EXPECTED_TOOL_NAMES = {
     "open_or_activate_document",
     "rebuild_document",
     "save_drawing",
+    "export_pdf",
     "get_custom_properties",
     "set_custom_properties",
     # Drawing View Creation & Discovery Tools

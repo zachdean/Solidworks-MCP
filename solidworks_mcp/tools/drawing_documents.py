@@ -2,7 +2,8 @@
 Drawing Document & Session Tools
 ---------------------------------
 new_drawing_from_template, get_document_type, open_or_activate_document,
-rebuild_document, save_drawing, get_custom_properties, set_custom_properties.
+rebuild_document, save_drawing, export_pdf, get_custom_properties,
+set_custom_properties.
 
 Backed by `DrawingOperations` (solidworks_mcp/automation/drawings.py), per
 docs/api/01-documents-and-sheets.md.
@@ -132,6 +133,61 @@ def rebuild_document(arguments: dict) -> Dict:
 )
 def save_drawing(arguments: dict) -> Dict:
     return sw_automation.save_drawing(arguments.get("filepath"))
+
+
+@tool(
+    name="export_pdf",
+    description=(
+        "Export the active drawing to PDF via IModelDocExtension::SaveAs3 + "
+        "IExportPdfData, decoding swFileSaveError_e in the result message. "
+        "Verifies the output file actually exists on disk afterward and "
+        "reports its size."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "output_path": {
+                "type": "string",
+                "description": "Destination .pdf path; parent directory is created if missing",
+            },
+            "sheets": {
+                "default": "all",
+                "description": (
+                    "'all', 'current', or an explicit list of sheet names "
+                    "(validated against GetSheetNames before any COM call)"
+                ),
+                "oneOf": [
+                    {"type": "string", "enum": ["all", "current"]},
+                    {"type": "array", "items": {"type": "string"}},
+                ],
+            },
+            "open_after": {
+                "type": "boolean", "default": False,
+                "description": "Open the PDF after saving (IExportPdfData::ViewPdfAfterSaving)",
+            },
+            "keep_invisible_layers": {
+                "type": "boolean", "default": False,
+                "description": (
+                    "Temporarily show every hidden layer for the export, "
+                    "then restore each to hidden afterward"
+                ),
+            },
+            "high_quality": {
+                "type": "boolean", "default": True,
+                "description": "swPDFExportHighQuality user preference, saved and restored around the call",
+            },
+        },
+        "required": ["output_path"],
+    },
+)
+def export_pdf(arguments: dict) -> Dict:
+    return sw_automation.export_pdf(
+        arguments.get("output_path", ""),
+        arguments.get("sheets", "all"),
+        arguments.get("open_after", False),
+        arguments.get("keep_invisible_layers", False),
+        arguments.get("high_quality", True),
+    )
 
 
 @tool(

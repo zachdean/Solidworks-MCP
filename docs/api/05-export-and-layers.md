@@ -1261,6 +1261,32 @@ Sources:
 - https://help.solidworks.com/2025/English/api/swconst/FileSaveAsDXFOptions.htm (DXF/DWG members, dialog bindings)
 - https://help.solidworks.com/2025/english/api/swconst/FileSaveAseDrawingsOptions.htm (eDrawings members, dialog bindings; also the source of the `swEdrawingsSaveAsSelectionOption`-is-Obsolete finding noted in this dossier's intro)
 
+**Numeric values for `export_pdf`'s `high_quality`/`keep_invisible_layers` params (sw-jcq.1):**
+- `swPDFExportHighQuality = 325 (0x145)`, sourced from a third-party compiled
+  `SwConst_TLB.pas` transcription
+  (https://github.com/pisfu/API/blob/master/LabRabKompas/Sample2/SwConst_TLB.pas,
+  same class of source `constants_drawing.py::SwUserPreferenceToggle`'s existing
+  `swAutomaticScaling3ViewDrawings = 86` already relies on) — that same file
+  independently transcribes `swAutomaticScaling3ViewDrawings` as `$00000056` = 86,
+  matching this project's already-trusted value exactly, which is the corroboration
+  used to accept `swPDFExportHighQuality`'s value from the same file. Neighboring
+  members in that file (`swPDFExportInColor = $143`, `swPDFExportEmbedFonts = $144`,
+  `swPDFExportHighQuality = $145`, `swPDFExportPrintHeaderFooter = $146`,
+  `swPDFExportUseCurrentPrintLineWeights = $147`) form a contiguous run, consistent
+  with a real, ordered enum block rather than a transcription error.
+- `swPDFExportIncludeLayersNotToPrint` has **no numeric value published or found
+  anywhere** in this research pass (absent from the same third-party TLB file, which
+  predates this member — likely added in a newer SOLIDWORKS version than that file's
+  source). It is also semantically distinct from "invisible" — it governs layers
+  marked **not to print** (`ILayer::Printable = False`), not layers marked **hidden**
+  (`ILayer::Visible = False`); `export_pdf`'s `keep_invisible_layers` parameter is
+  about the latter. For both reasons (no numeric value, wrong semantics),
+  `export_pdf` does not use this preference at all — it implements
+  `keep_invisible_layers` by temporarily flipping each hidden layer's `ILayer::Visible`
+  to `True` for the duration of the export via `ILayerMgr::GetLayerList`/`GetLayer`
+  (both fully documented above), then restoring each layer's prior value afterward.
+  This uses only numerically-unambiguous, already-verified API surface.
+
 #### swUserPreferenceIntegerValue_e (export-relevant members)
 
 Same "no published numeric values on the enum's own page" situation as
