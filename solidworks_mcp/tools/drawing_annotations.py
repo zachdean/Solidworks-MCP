@@ -16,12 +16,18 @@ from typing import Dict
 from ._automation import sw_automation
 from .registry import tool
 
+# Every entity-taking tool below resolves its reference through the same
+# `_parse_entity_ref`, which accepts the same four kinds regardless of which
+# tool asked -- so they all advertise one schema rather than drifting copies.
 _ENTITY_REF_SCHEMA = {
     "type": "object",
     "properties": {
         "kind": {
             "type": "string",
-            "description": "Entity kind: 'edge', 'vertex', or 'face' (as returned by list_view_entities).",
+            "description": (
+                "Entity kind: 'edge', 'vertex', 'face', or 'dimension' "
+                "(as returned by list_view_entities)."
+            ),
         },
         "x": {"type": "number", "description": "Caller's default unit."},
         "y": {"type": "number", "description": "Caller's default unit."},
@@ -495,20 +501,6 @@ def edit_note(arguments: dict) -> Dict:
     )
 
 
-_GTOL_ENTITY_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "kind": {
-            "type": "string",
-            "description": "Entity kind: 'edge', 'face', 'dimension', or 'vertex'.",
-        },
-        "x": {"type": "number", "description": "Caller's default unit."},
-        "y": {"type": "number", "description": "Caller's default unit."},
-        "z": {"type": "number", "description": "Caller's default unit. Defaults to 0."},
-    },
-    "required": ["kind", "x", "y"],
-}
-
 _DATUM_REF_SCHEMA = {
     "oneOf": [
         {"type": "string", "description": "Bare datum letter, e.g. 'A'."},
@@ -560,7 +552,7 @@ def list_datums(arguments: dict) -> Dict:
         "type": "object",
         "properties": {
             "view_name": {"type": "string", "description": "Drawing view the entity lives in."},
-            "entity": {**_GTOL_ENTITY_SCHEMA, "description": "Entity to attach the datum feature to."},
+            "entity": {**_ENTITY_REF_SCHEMA, "description": "Entity to attach the datum feature to."},
             "label": {"type": "string", "description": "Datum letter. Omit to auto-assign."},
             "x": {"type": "number", "description": "Placement, caller's default unit."},
             "y": {"type": "number", "description": "Placement, caller's default unit."},
@@ -606,7 +598,7 @@ def add_datum_feature(arguments: dict) -> Dict:
         "type": "object",
         "properties": {
             "view_name": {"type": "string", "description": "Drawing view the entity lives in."},
-            "entity": {**_GTOL_ENTITY_SCHEMA, "description": "Entity to attach the GTol to."},
+            "entity": {**_ENTITY_REF_SCHEMA, "description": "Entity to attach the GTol to."},
             "symbol": {"type": "string", "description": "One of the 14 geometric characteristics."},
             "tolerance": {"type": "number", "description": "Tolerance zone value, caller's default unit."},
             "datums": {
@@ -659,7 +651,7 @@ def add_gtol(arguments: dict) -> Dict:
         "type": "object",
         "properties": {
             "view_name": {"type": "string", "description": "Drawing view the entity lives in."},
-            "entity": {**_GTOL_ENTITY_SCHEMA, "description": "Entity (typically a face) to attach the target to."},
+            "entity": {**_ENTITY_REF_SCHEMA, "description": "Entity (typically a face) to attach the target to."},
             "label": {"type": "string", "description": "Datum target label, e.g. 'a1'."},
             "area_type": {"type": "string", "description": "'point', 'circle', or 'rectangle'."},
             "size": {"type": "number", "description": "Target area diameter/width, caller's default unit."},
@@ -699,7 +691,7 @@ def add_datum_target(arguments: dict) -> Dict:
         "type": "object",
         "properties": {
             "view_name": {"type": "string", "description": "Drawing view the entity lives in."},
-            "entity": {**_GTOL_ENTITY_SCHEMA, "description": "Edge/face/vertex to attach the symbol to."},
+            "entity": {**_ENTITY_REF_SCHEMA, "description": "Edge/face/vertex to attach the symbol to."},
             "x": {"type": "number", "description": "Placement, caller's default unit."},
             "y": {"type": "number", "description": "Placement, caller's default unit."},
             "symbol_type": {
@@ -761,7 +753,7 @@ def add_surface_finish(arguments: dict) -> Dict:
         "type": "object",
         "properties": {
             "view_name": {"type": "string", "description": "Drawing view the entity lives in."},
-            "entity": {**_GTOL_ENTITY_SCHEMA, "description": "Edge/face to attach the weld symbol to."},
+            "entity": {**_ENTITY_REF_SCHEMA, "description": "Edge/face to attach the weld symbol to."},
             "x": {"type": "number", "description": "Placement, caller's default unit."},
             "y": {"type": "number", "description": "Placement, caller's default unit."},
             "symbol": {"type": "string", "default": "fillet", "description": "Arrow-side weld symbol."},

@@ -11,21 +11,7 @@ against the fake's call log.
 import pytest
 
 from solidworks_mcp.automation.drawings import _WELD_SYMBOL_ALIASES, _WELD_SYMBOL_CODES
-from solidworks_mcp.tools import dispatch, sw_automation
-
-
-@pytest.fixture
-def tool_sw(make_sw):
-    """Factory mirroring test_tools_gdt.py's `tool_sw`, connecting the
-    shared `tools.sw_automation` singleton to a fresh fake
-    `SldWorks.Application`."""
-    def _make(doc_type="drawing", **kwargs):
-        fake = make_sw(doc_type, **kwargs)
-        connected = sw_automation.connect()
-        assert connected["success"], connected
-        return fake
-    yield _make
-    sw_automation.disconnect()
+from solidworks_mcp.tools import dispatch
 
 
 def _prep_view(fake_sw):

@@ -76,6 +76,7 @@ from ..constants_drawing import (
     SwWeldSymbolSymmetric,
     decode_save_error,
 )
+from .selection import _VIEW_ENTITY_TYPES
 from ..utils import find_template
 
 logger = logging.getLogger(__name__)
@@ -6885,7 +6886,7 @@ class DrawingOperations:
         reading this count: the dossier never claims
         `InsertModelAnnotations4`'s return value is stale until a rebuild.
         """
-        with self.selected(view_name, "DRAWINGVIEW", 0, 0, 0) as sel:
+        with self.selected(view_name, "DRAWINGVIEW", 0, 0, 0, doc=doc) as sel:
             if not sel["success"]:
                 return {
                     "view_name": view_name, "success": False, "count": 0,
@@ -7173,18 +7174,15 @@ class DrawingOperations:
                 )
             parsed_entities.append(parsed)
 
-        if isinstance(x, bool) or isinstance(y, bool) \
-                or not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
-            return self._result(
-                False, f"x/y must be numbers, got x={x!r}, y={y!r}",
-                SwErrors.swInvalidInput, {"dimension_type": type_key, "x": x, "y": y},
-            )
+        xy_err = self._validate_xy(x, y, {"dimension_type": type_key, "x": x, "y": y})
+        if xy_err:
+            return xy_err
 
         doc, err = self.get_drawing_doc()
         if err:
             return err
 
-        activated = self.select_view_by_name(view_name)
+        activated = self.select_view_by_name(view_name, doc=doc)
         if not activated["success"]:
             return activated
 
@@ -7196,7 +7194,7 @@ class DrawingOperations:
         with ExitStack() as stack:
             for i, (type_str, ex, ey, ez) in enumerate(parsed_entities):
                 sel = stack.enter_context(
-                    self.selected("", type_str, ex, ey, ez, append=(i > 0), mark=i)
+                    self.selected("", type_str, ex, ey, ez, append=(i > 0), mark=i, doc=doc)
                 )
                 if not sel["success"]:
                     return sel
@@ -7337,18 +7335,15 @@ class DrawingOperations:
                 )
             parsed_entities.append(parsed)
 
-        if isinstance(x, bool) or isinstance(y, bool) \
-                or not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
-            return self._result(
-                False, f"x/y must be numbers, got x={x!r}, y={y!r}",
-                SwErrors.swInvalidInput, {"x": x, "y": y},
-            )
+        xy_err = self._validate_xy(x, y, {"x": x, "y": y})
+        if xy_err:
+            return xy_err
 
         doc, err = self.get_drawing_doc()
         if err:
             return err
 
-        activated = self.select_view_by_name(view_name)
+        activated = self.select_view_by_name(view_name, doc=doc)
         if not activated["success"]:
             return activated
 
@@ -7361,7 +7356,7 @@ class DrawingOperations:
         with ExitStack() as stack:
             for i, (type_str, ex, ey, ez) in enumerate(all_refs):
                 sel = stack.enter_context(
-                    self.selected("", type_str, ex, ey, ez, append=(i > 0), mark=i)
+                    self.selected("", type_str, ex, ey, ez, append=(i > 0), mark=i, doc=doc)
                 )
                 if not sel["success"]:
                     return sel
@@ -7443,7 +7438,7 @@ class DrawingOperations:
         data = {"dimension_name": dimension_name, "value": value}
 
         dimension = None
-        with self.selected(dimension_name, "DIMENSION", 0, 0, 0) as sel:
+        with self.selected(dimension_name, "DIMENSION", 0, 0, 0, doc=doc) as sel:
             if not sel["success"]:
                 return sel
             try:
@@ -7534,7 +7529,7 @@ class DrawingOperations:
         }
 
         display_dim = None
-        with self.selected(dimension_name, "DIMENSION", 0, 0, 0) as sel:
+        with self.selected(dimension_name, "DIMENSION", 0, 0, 0, doc=doc) as sel:
             if not sel["success"]:
                 return sel
             try:
@@ -7662,7 +7657,7 @@ class DrawingOperations:
             "horizontal_placement": h_placement_key, "vertical_placement": v_placement_key,
         }
 
-        with self.selected(view_name, "DRAWINGVIEW", 0, 0, 0) as sel:
+        with self.selected(view_name, "DRAWINGVIEW", 0, 0, 0, doc=doc) as sel:
             if not sel["success"]:
                 return sel
             try:
@@ -7768,6 +7763,25 @@ class DrawingOperations:
             "all_around": bool(leader.get("all_around", False)),
         }, None
 
+    def _validate_xy(self, x: Any, y: Any, data: Optional[Dict] = None) -> Optional[Dict]:
+        """Type-check an annotation placement point.
+
+        Every `Insert*`/`Create*` wrapper in this module takes a sheet-space
+        `x`/`y` and must reject a non-number *before* any COM call, per the
+        working agreement's "validate before COM calls" rule -- `bool` is
+        excluded explicitly because Python makes it an `int` subclass, and a
+        `True` that silently means 1 meter is worse than an error.
+
+        Returns an error dict, or `None` if both are numbers.
+        """
+        if isinstance(x, bool) or isinstance(y, bool) \
+                or not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+            return self._result(
+                False, f"x/y must be numbers, got x={x!r}, y={y!r}",
+                SwErrors.swInvalidInput, data,
+            )
+        return None
+
     def _validate_note_geometry(self, x: float, y: float, height: Optional[float],
                                  angle: float) -> Optional[Dict]:
         """Type/range-check `add_note`/`add_property_note`'s `x`/`y`/`height`/
@@ -7776,11 +7790,9 @@ class DrawingOperations:
         `ActivateView`), per the working agreement's "validate before COM
         calls" rule. Returns an error dict, or `None` if everything checks out.
         """
-        if isinstance(x, bool) or isinstance(y, bool) \
-                or not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
-            return self._result(
-                False, f"x/y must be numbers, got x={x!r}, y={y!r}", SwErrors.swInvalidInput,
-            )
+        xy_err = self._validate_xy(x, y)
+        if xy_err:
+            return xy_err
         if height is not None and (
             isinstance(height, bool) or not isinstance(height, (int, float)) or height < 0
         ):
@@ -7908,23 +7920,100 @@ class DrawingOperations:
 
         return annotation, None
 
-    def _note_data(self, note: Any, annotation: Any, view_name: Optional[str],
+    def _annotation_name_position(self, annotation: Any) -> Tuple[Any, Any, Any]:
+        """Read `(name, x, y)` off an `IAnnotation` via `GetName`/`GetPosition`.
+
+        Every annotation family this module creates or lists reports its
+        identity the same way, so the read-back is shared: `GetPosition`
+        is meters on the wire and comes back in the caller's default unit.
+        Best-effort throughout -- a null `annotation`, an unreadable
+        property, or a position that isn't a 2+ element sequence yields
+        `None` rather than failing the describe.
+        """
+        if annotation is None:
+            return None, None, None
+
+        name = self._read_prop(annotation, "GetName")
+        position = self._read_prop(annotation, "GetPosition")
+        if isinstance(position, (list, tuple)) and len(position) >= 2:
+            try:
+                return (name,
+                        self._units.from_meters(float(position[0])),
+                        self._units.from_meters(float(position[1])))
+            except (TypeError, ValueError):
+                pass
+        return name, None, None
+
+    def _place_annotation(self, owner: Any, x: Optional[float], y: Optional[float],
+                           noun: str, position_noun: str, context: str,
+                           data: Dict) -> Tuple[Any, Optional[Dict]]:
+        """Position a freshly-created annotation and record its name.
+
+        Every `Insert*` factory in this module returns a type-specific
+        wrapper (`IDatumTag`, `IGtol`, `IWeldSymbol`, ...) that carries no
+        placement of its own: the position lives on the `IAnnotation` behind
+        `GetAnnotation()`, is set via `SetPosition2` (meters, `z` always
+        `0.0` in 2D sheet space), and the annotation is also where the
+        SolidWorks-assigned name comes from. This is the shared tail of
+        `add_datum_feature`/`add_gtol`/`add_datum_target`/`add_weld_symbol`
+        -- `_finalize_note` is the notes-specific equivalent.
+
+        A `GetAnnotation` that throws or returns nothing is only fatal when
+        a position was actually requested: `add_gtol`'s freestanding
+        (`leader=False`, no `x`/`y`) form legitimately has nothing to place,
+        and still succeeds with a `None` name.
+
+        Args:
+            owner: The wrapper returned by the `Insert*` call.
+            x, y: Placement in the caller's default unit, or `None` to skip
+                positioning entirely.
+            noun: Sentence-initial name for the "no IAnnotation" message
+                (e.g. `"Datum tag"`).
+            position_noun: Mid-sentence name for the "could not set …
+                position" message (e.g. `"datum tag"`).
+            context: Caller identification for the log lines.
+            data: The caller's result payload -- `data["name"]` is set here.
+
+        Returns:
+            `(annotation, None)` on success, or `(None, error_dict)`.
+        """
+        try:
+            annotation = owner.GetAnnotation()
+        except Exception as e:
+            logger.warning(f"{context} GetAnnotation error: {e}")
+            annotation = None
+
+        if x is not None:
+            if annotation is None:
+                return None, self._result(
+                    False, f"{noun} has no IAnnotation wrapper (GetAnnotation returned nothing) "
+                    "-- cannot set position", SwErrors.swFeatureError, data,
+                )
+            try:
+                x_m, y_m = self._units.to_meters(x), self._units.to_meters(y)
+                positioned = annotation.SetPosition2(x_m, y_m, 0.0)
+            except Exception as e:
+                logger.error(f"{context} SetPosition2 error: {e}")
+                return None, self._result(
+                    False, f"Set position error: {e}", SwErrors.swFeatureError, data,
+                )
+            if positioned is False:
+                return None, self._result(
+                    False, f"Could not set {position_noun} position (SetPosition2 returned False)",
+                    SwErrors.swFeatureError, data,
+                )
+
+        data["name"] = self._read_prop(annotation, "GetName") if annotation is not None else None
+        return annotation, None
+
+    def _note_data(self, annotation: Any, view_name: Optional[str],
                     height: Optional[float], angle: float, bold: bool, italic: bool,
                     layer: Optional[str]) -> Dict:
         """Best-effort result payload shared by `add_note`/`add_property_note`
         -- name/position read back from `annotation` (via `IAnnotation::
         GetName`/`GetPosition`, both meters on the wire), everything else
         just the caller's own (already-validated) arguments."""
-        name = self._read_prop(annotation, "GetName") if annotation is not None else None
-
-        x = y = None
-        position = self._read_prop(annotation, "GetPosition") if annotation is not None else None
-        if isinstance(position, (list, tuple)) and len(position) >= 2:
-            try:
-                x = self._units.from_meters(float(position[0]))
-                y = self._units.from_meters(float(position[1]))
-            except (TypeError, ValueError):
-                x = y = None
+        name, x, y = self._annotation_name_position(annotation)
 
         return {
             "name": name, "view_name": view_name, "x": x, "y": y,
@@ -7990,7 +8079,7 @@ class DrawingOperations:
             return err
 
         if view_name:
-            activated = self.select_view_by_name(view_name)
+            activated = self.select_view_by_name(view_name, doc=doc)
             if not activated["success"]:
                 return activated
 
@@ -8003,7 +8092,7 @@ class DrawingOperations:
         if finalize_err:
             return finalize_err
 
-        data = self._note_data(note, annotation, view_name, height, angle, bold, italic, layer)
+        data = self._note_data(annotation, view_name, height, angle, bold, italic, layer)
         data["text"] = text
         return self._result(True, f"Added note {data['name'] or '(unnamed)'!r}",
                              SwErrors.swSuccess, data)
@@ -8072,7 +8161,7 @@ class DrawingOperations:
             return err
 
         if view_name:
-            activated = self.select_view_by_name(view_name)
+            activated = self.select_view_by_name(view_name, doc=doc)
             if not activated["success"]:
                 return activated
 
@@ -8094,7 +8183,7 @@ class DrawingOperations:
         if finalize_err:
             return finalize_err
 
-        data = self._note_data(note, annotation, view_name, height, angle, bold, italic, layer)
+        data = self._note_data(annotation, view_name, height, angle, bold, italic, layer)
         data.update({
             "source": source_key, "property_name": property_name, "linked_text": linked_text,
         })
@@ -8105,6 +8194,39 @@ class DrawingOperations:
     # Note discovery / editing
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _iter_com_chain(owner: Any, first_method: str, next_method: str, context: str):
+        """Walk a SolidWorks `GetFirstX()` / `X.GetNext()` linked list.
+
+        Every annotation family in this API is enumerated the same way: one
+        `GetFirstX` off the owner, then `GetNext` off each element until it
+        returns null. A COM failure at either end is logged and ends the
+        walk rather than propagating, so one unreadable element can't fail a
+        whole listing -- the same best-effort convention
+        `list_view_entities`'s `_entity_point` uses.
+
+        Args:
+            owner: The object exposing `first_method` (an `IDrawingDoc` for
+                views, an `IView` for the annotations attached to it).
+            first_method: `"GetFirstNote"`, `"GetFirstDatumTag"`, ...
+            next_method: `"GetNext"` for annotations; `IView` spells its own
+                `"GetNextView"`.
+            context: Caller name, used only in the warning messages.
+        """
+        try:
+            item = getattr(owner, first_method)()
+        except Exception as e:
+            logger.warning(f"{context}: {first_method} failed: {e}")
+            item = None
+        while item is not None:
+            yield item
+            try:
+                nxt = getattr(item, next_method)()
+            except Exception as e:
+                logger.warning(f"{context}: {next_method} failed: {e}")
+                nxt = None
+            item = nxt if nxt else None
+
     def _iter_document_views(self, doc):
         """Walk every view in the document via `IDrawingDoc::GetFirstView` /
         `IView::GetNextView` -- per docs/api/03-annotations.md's "Note
@@ -8112,36 +8234,14 @@ class DrawingOperations:
         pseudo/template view first (where sheet-level/title-block notes
         live), then `GetNextView` walks every real view, then the next
         sheet's own pseudo-view, and so on across the whole document."""
-        try:
-            view = doc.GetFirstView()
-        except Exception as e:
-            logger.warning(f"_iter_document_views: GetFirstView failed: {e}")
-            view = None
-        while view is not None:
-            yield view
-            try:
-                nxt = view.GetNextView()
-            except Exception as e:
-                logger.warning(f"_iter_document_views: GetNextView failed: {e}")
-                nxt = None
-            view = nxt if nxt else None
+        return self._iter_com_chain(doc, "GetFirstView", "GetNextView",
+                                    "_iter_document_views")
 
     def _iter_view_notes(self, view):
         """Walk every note attached to `view` via `IView::GetFirstNote` /
         `INote::GetNext`."""
-        try:
-            note = view.GetFirstNote()
-        except Exception as e:
-            logger.warning(f"_iter_view_notes: GetFirstNote failed: {e}")
-            note = None
-        while note is not None:
-            yield note
-            try:
-                nxt = note.GetNext()
-            except Exception as e:
-                logger.warning(f"_iter_view_notes: GetNext failed: {e}")
-                nxt = None
-            note = nxt if nxt else None
+        return self._iter_com_chain(view, "GetFirstNote", "GetNext",
+                                    "_iter_view_notes")
 
     def _describe_note(self, note: Any, view_name: Optional[str]) -> Dict:
         """`list_notes`/`edit_note`'s per-note description: text, position,
@@ -8151,17 +8251,8 @@ class DrawingOperations:
         except Exception:
             annotation = None
 
-        name = self._read_prop(annotation, "GetName") if annotation is not None else None
+        name, x, y = self._annotation_name_position(annotation)
         layer = self._read_prop(annotation, "Layer") if annotation is not None else None
-
-        x = y = None
-        position = self._read_prop(annotation, "GetPosition") if annotation is not None else None
-        if isinstance(position, (list, tuple)) and len(position) >= 2:
-            try:
-                x = self._units.from_meters(float(position[0]))
-                y = self._units.from_meters(float(position[1]))
-            except (TypeError, ValueError):
-                x = y = None
 
         is_compound = bool(self._read_prop(note, "IsCompoundNote"))
         text = self._read_prop(note, "GetText")
@@ -8170,6 +8261,56 @@ class DrawingOperations:
             "name": name, "text": text, "is_compound": is_compound,
             "x": x, "y": y, "layer": layer or None, "view_name": view_name,
         }
+
+    def _scoped_views(self, doc, sheet_name: Optional[str], op: str,
+                       label: str) -> Tuple[Optional[List[Tuple[Any, Any]]], Optional[Dict]]:
+        """Resolve the `(view, view_name)` pairs a document-wide annotation
+        listing should walk, honouring an optional `sheet_name` scope.
+
+        Shared by `list_notes`/`list_datums`, which enumerate different
+        annotation families over the identical view set: every view in the
+        document when `sheet_name` is omitted, else that sheet's own real
+        views plus its sheet-level pseudo-view (where title-block
+        annotations live -- see `_iter_document_views`).
+
+        `_is_sheet_pseudo_view` is a COM `Type` read, so it is deliberately
+        the right-hand side of the `or`: it only costs a round-trip for the
+        one view whose name actually matches `sheet_name`.
+
+        Args:
+            op: Calling method name, for the log line only.
+            label: Human-facing prefix for the returned error message.
+
+        Returns:
+            `(pairs, None)` on success, or `(None, error_dict)`.
+        """
+        allowed_view_names = None
+        if sheet_name:
+            sheet, err = self._resolve_sheet(doc, sheet_name)
+            if err:
+                return None, err
+            try:
+                views_raw = sheet.GetViews() or []
+            except Exception as e:
+                logger.error(f"{op}(sheet_name={sheet_name!r}) error: {e}")
+                return None, self._result(
+                    False, f"{label} error: {e}", SwErrors.swUnknownError,
+                )
+            allowed_view_names = {
+                self._read_prop(v, "GetName2") for v in views_raw
+                if self._read_prop(v, "GetName2")
+            }
+
+        scoped: List[Tuple[Any, Any]] = []
+        for view in self._iter_document_views(doc):
+            v_name = self._read_prop(view, "GetName2")
+            if allowed_view_names is not None and not (
+                v_name in allowed_view_names
+                or (v_name == sheet_name and self._is_sheet_pseudo_view(view))
+            ):
+                continue
+            scoped.append((view, v_name))
+        return scoped, None
 
     def list_notes(self, view_name: Optional[str] = None,
                     sheet_name: Optional[str] = None) -> Dict:
@@ -8194,7 +8335,7 @@ class DrawingOperations:
         notes: List[Dict] = []
 
         if view_name:
-            activated = self.select_view_by_name(view_name)
+            activated = self.select_view_by_name(view_name, doc=doc)
             if not activated["success"]:
                 return activated
             try:
@@ -8208,29 +8349,12 @@ class DrawingOperations:
                 {"view_name": view_name, "sheet_name": sheet_name, "notes": notes},
             )
 
-        allowed_view_names = None
-        if sheet_name:
-            sheet, err = self._resolve_sheet(doc, sheet_name)
-            if err:
-                return err
-            try:
-                views_raw = sheet.GetViews() or []
-            except Exception as e:
-                logger.error(f"list_notes(sheet_name={sheet_name!r}) error: {e}")
-                return self._result(False, f"List notes error: {e}", SwErrors.swUnknownError)
-            allowed_view_names = {
-                self._read_prop(v, "GetName2") for v in views_raw
-                if self._read_prop(v, "GetName2")
-            }
+        scoped, err = self._scoped_views(doc, sheet_name, "list_notes", "List notes")
+        if err:
+            return err
 
-        for view in self._iter_document_views(doc):
-            v_name = self._read_prop(view, "GetName2")
-            is_sheet_pseudo = self._is_sheet_pseudo_view(view)
-            include = True
-            if allowed_view_names is not None:
-                include = (v_name in allowed_view_names) or (is_sheet_pseudo and v_name == sheet_name)
-            if include:
-                notes.extend(self._describe_note(n, v_name) for n in self._iter_view_notes(view))
+        for view, v_name in scoped:
+            notes.extend(self._describe_note(n, v_name) for n in self._iter_view_notes(view))
 
         return self._result(
             True, f"{len(notes)} note(s)" + (f" on sheet {sheet_name!r}" if sheet_name else ""),
@@ -8533,19 +8657,8 @@ class DrawingOperations:
         GetFirstDatumTag` / `IDatumTag::GetNext` -- the datum-tag analog of
         `_iter_view_notes`'s `GetFirstNote`/`GetNext` walk (sw-1xx.3), per
         docs/api/03-annotations.md's sw-1xx.4 addendum."""
-        try:
-            tag = view.GetFirstDatumTag()
-        except Exception as e:
-            logger.warning(f"_iter_view_datum_tags: GetFirstDatumTag failed: {e}")
-            tag = None
-        while tag is not None:
-            yield tag
-            try:
-                nxt = tag.GetNext()
-            except Exception as e:
-                logger.warning(f"_iter_view_datum_tags: GetNext failed: {e}")
-                nxt = None
-            tag = nxt if nxt else None
+        return self._iter_com_chain(view, "GetFirstDatumTag", "GetNext",
+                                    "_iter_view_datum_tags")
 
     def _describe_datum(self, tag: Any, view_name: Optional[str]) -> Dict:
         """`list_datums`'s per-tag description: label, position, and the
@@ -8556,16 +8669,7 @@ class DrawingOperations:
             annotation = None
 
         label = self._read_prop(tag, "GetLabel")
-        name = self._read_prop(annotation, "GetName") if annotation is not None else None
-
-        x = y = None
-        position = self._read_prop(annotation, "GetPosition") if annotation is not None else None
-        if isinstance(position, (list, tuple)) and len(position) >= 2:
-            try:
-                x = self._units.from_meters(float(position[0]))
-                y = self._units.from_meters(float(position[1]))
-            except (TypeError, ValueError):
-                x = y = None
+        name, x, y = self._annotation_name_position(annotation)
 
         return {"label": label, "name": name, "x": x, "y": y, "view_name": view_name}
 
@@ -8591,30 +8695,13 @@ class DrawingOperations:
         if err:
             return err
 
-        allowed_view_names = None
-        if sheet_name:
-            sheet, err = self._resolve_sheet(doc, sheet_name)
-            if err:
-                return err
-            try:
-                views_raw = sheet.GetViews() or []
-            except Exception as e:
-                logger.error(f"list_datums(sheet_name={sheet_name!r}) error: {e}")
-                return self._result(False, f"List datums error: {e}", SwErrors.swUnknownError)
-            allowed_view_names = {
-                self._read_prop(v, "GetName2") for v in views_raw
-                if self._read_prop(v, "GetName2")
-            }
+        scoped, err = self._scoped_views(doc, sheet_name, "list_datums", "List datums")
+        if err:
+            return err
 
         datums: List[Dict] = []
-        for view in self._iter_document_views(doc):
-            v_name = self._read_prop(view, "GetName2")
-            is_sheet_pseudo = self._is_sheet_pseudo_view(view)
-            include = True
-            if allowed_view_names is not None:
-                include = (v_name in allowed_view_names) or (is_sheet_pseudo and v_name == sheet_name)
-            if include:
-                datums.extend(self._describe_datum(t, v_name) for t in self._iter_view_datum_tags(view))
+        for view, v_name in scoped:
+            datums.extend(self._describe_datum(t, v_name) for t in self._iter_view_datum_tags(view))
 
         letters = sorted({
             str(d["label"]).strip().upper() for d in datums
@@ -8663,11 +8750,9 @@ class DrawingOperations:
             return self._result(
                 False, "x/y are required", SwErrors.swInvalidInput, {"x": x, "y": y},
             )
-        if isinstance(x, bool) or isinstance(y, bool) \
-                or not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
-            return self._result(
-                False, f"x/y must be numbers, got x={x!r}, y={y!r}", SwErrors.swInvalidInput,
-            )
+        xy_err = self._validate_xy(x, y)
+        if xy_err:
+            return xy_err
 
         style_key = None
         style_enum = None
@@ -8721,7 +8806,7 @@ class DrawingOperations:
         if err:
             return err
 
-        activated = self.select_view_by_name(view_name)
+        activated = self.select_view_by_name(view_name, doc=doc)
         if not activated["success"]:
             return activated
 
@@ -8730,7 +8815,7 @@ class DrawingOperations:
             "view_name": view_name, "label": label_final, "x": x, "y": y, "style": style_key,
         }
 
-        with self.selected("", type_str, ex, ey, ez) as sel:
+        with self.selected("", type_str, ex, ey, ez, doc=doc) as sel:
             if not sel["success"]:
                 return sel
 
@@ -8771,30 +8856,12 @@ class DrawingOperations:
                         SwErrors.swFeatureError, data,
                     )
 
-            try:
-                annotation = tag.GetAnnotation()
-            except Exception as e:
-                logger.error(f"add_datum_feature({view_name!r}) GetAnnotation error: {e}")
-                return self._result(False, f"Get datum annotation error: {e}", SwErrors.swFeatureError, data)
-            if annotation is None:
-                return self._result(
-                    False, "Datum tag has no IAnnotation wrapper (GetAnnotation returned nothing) "
-                    "-- cannot set position", SwErrors.swFeatureError, data,
-                )
-
-            try:
-                x_m, y_m = self._units.to_meters(x), self._units.to_meters(y)
-                positioned = annotation.SetPosition2(x_m, y_m, 0.0)
-            except Exception as e:
-                logger.error(f"add_datum_feature({view_name!r}) SetPosition2 error: {e}")
-                return self._result(False, f"Set position error: {e}", SwErrors.swFeatureError, data)
-            if positioned is False:
-                return self._result(
-                    False, "Could not set datum tag position (SetPosition2 returned False)",
-                    SwErrors.swFeatureError, data,
-                )
-
-            data["name"] = self._read_prop(annotation, "GetName")
+            _, place_err = self._place_annotation(
+                tag, x, y, "Datum tag", "datum tag",
+                f"add_datum_feature({view_name!r})", data,
+            )
+            if place_err:
+                return place_err
 
         return self._result(True, f"Added datum feature {label_final!r}", SwErrors.swSuccess, data)
 
@@ -8944,13 +9011,10 @@ class DrawingOperations:
                 False, "x/y must both be given or both omitted", SwErrors.swInvalidInput,
                 {"x": x, "y": y},
             )
-        if x is not None and (
-            isinstance(x, bool) or isinstance(y, bool)
-            or not isinstance(x, (int, float)) or not isinstance(y, (int, float))
-        ):
-            return self._result(
-                False, f"x/y must be numbers, got x={x!r}, y={y!r}", SwErrors.swInvalidInput,
-            )
+        if x is not None:
+            xy_err = self._validate_xy(x, y)
+            if xy_err:
+                return xy_err
 
         if projected_zone is not None and (
             isinstance(projected_zone, bool) or not isinstance(projected_zone, (int, float))
@@ -8965,25 +9029,32 @@ class DrawingOperations:
         if err:
             return err
 
-        activated = self.select_view_by_name(view_name)
+        activated = self.select_view_by_name(view_name, doc=doc)
         if not activated["success"]:
             return activated
 
-        existing = self.list_datums()
-        if not existing["success"]:
-            return existing
-        existing_letters = set(existing["data"]["letters"])
-
+        # Only walk the document's datum tags if this frame actually
+        # references one. The form tolerances (flatness, straightness,
+        # circularity, cylindricity) are *forbidden* datums by
+        # `_validate_gtol_datum_requirement` above, so for them the walk --
+        # every view on every sheet, several COM calls per tag -- would be
+        # a full-document enumeration whose result is discarded.
         requested_letters = {letter for letter, _ in datum_entries + composite_entries}
-        missing = sorted(requested_letters - existing_letters)
-        if missing:
-            return self._result(
-                False,
-                f"Datum letter(s) {missing!r} not found on the drawing -- create them first "
-                f"via add_datum_feature (existing: {sorted(existing_letters)!r})",
-                SwErrors.swInvalidInput,
-                {"missing_datums": missing, "existing_datums": sorted(existing_letters)},
-            )
+        if requested_letters:
+            existing = self.list_datums()
+            if not existing["success"]:
+                return existing
+            existing_letters = set(existing["data"]["letters"])
+
+            missing = sorted(requested_letters - existing_letters)
+            if missing:
+                return self._result(
+                    False,
+                    f"Datum letter(s) {missing!r} not found on the drawing -- create them first "
+                    f"via add_datum_feature (existing: {sorted(existing_letters)!r})",
+                    SwErrors.swInvalidInput,
+                    {"missing_datums": missing, "existing_datums": sorted(existing_letters)},
+                )
 
         row1 = self._build_gtol_row(f"<IGTOL-{gtol_token}>", tolerance, datum_entries, mc_key)
         row2 = None
@@ -9011,7 +9082,7 @@ class DrawingOperations:
             return gtol_obj, None
 
         if leader:
-            with self.selected("", type_str, ex, ey, ez) as sel:
+            with self.selected("", type_str, ex, ey, ez, doc=doc) as sel:
                 if not sel["success"]:
                     return sel
                 gtol_obj, create_err = _create_gtol()
@@ -9047,31 +9118,12 @@ class DrawingOperations:
                     SwErrors.swFeatureError, data,
                 )
 
-        try:
-            annotation = gtol_obj.GetAnnotation()
-        except Exception as e:
-            logger.warning(f"add_gtol({view_name!r}) GetAnnotation error: {e}")
-            annotation = None
+        _, place_err = self._place_annotation(
+            gtol_obj, x, y, "GTol", "GTol", f"add_gtol({view_name!r})", data,
+        )
+        if place_err:
+            return place_err
 
-        if x is not None:
-            if annotation is None:
-                return self._result(
-                    False, "GTol has no IAnnotation wrapper (GetAnnotation returned nothing) "
-                    "-- cannot set position", SwErrors.swFeatureError, data,
-                )
-            try:
-                x_m, y_m = self._units.to_meters(x), self._units.to_meters(y)
-                positioned = annotation.SetPosition2(x_m, y_m, 0.0)
-            except Exception as e:
-                logger.error(f"add_gtol({view_name!r}) SetPosition2 error: {e}")
-                return self._result(False, f"Set position error: {e}", SwErrors.swFeatureError, data)
-            if positioned is False:
-                return self._result(
-                    False, "Could not set GTol position (SetPosition2 returned False)",
-                    SwErrors.swFeatureError, data,
-                )
-
-        data["name"] = self._read_prop(annotation, "GetName") if annotation is not None else None
         data["x"] = x
         data["y"] = y
         return self._result(
@@ -9136,17 +9188,15 @@ class DrawingOperations:
                 False, f"size must be a non-negative number, got {size!r}",
                 SwErrors.swInvalidInput, {"size": size},
             )
-        if isinstance(x, bool) or isinstance(y, bool) \
-                or not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
-            return self._result(
-                False, f"x/y must be numbers, got x={x!r}, y={y!r}", SwErrors.swInvalidInput,
-            )
+        xy_err = self._validate_xy(x, y)
+        if xy_err:
+            return xy_err
 
         doc, err = self.get_drawing_doc()
         if err:
             return err
 
-        activated = self.select_view_by_name(view_name)
+        activated = self.select_view_by_name(view_name, doc=doc)
         if not activated["success"]:
             return activated
 
@@ -9156,7 +9206,7 @@ class DrawingOperations:
             "x": x, "y": y,
         }
 
-        with self.selected("", type_str, ex, ey, ez) as sel:
+        with self.selected("", type_str, ex, ey, ez, doc=doc) as sel:
             if not sel["success"]:
                 return sel
 
@@ -9182,31 +9232,12 @@ class DrawingOperations:
                     SwErrors.swFeatureError, data,
                 )
 
-            try:
-                annotation = created.GetAnnotation()
-            except Exception as e:
-                logger.warning(f"add_datum_target({view_name!r}) GetAnnotation error: {e}")
-                annotation = None
-
-            if annotation is None:
-                return self._result(
-                    False, "Datum target has no IAnnotation wrapper (GetAnnotation returned nothing) "
-                    "-- cannot set position", SwErrors.swFeatureError, data,
-                )
-
-            try:
-                x_m, y_m = self._units.to_meters(x), self._units.to_meters(y)
-                positioned = annotation.SetPosition2(x_m, y_m, 0.0)
-            except Exception as e:
-                logger.error(f"add_datum_target({view_name!r}) SetPosition2 error: {e}")
-                return self._result(False, f"Set position error: {e}", SwErrors.swFeatureError, data)
-            if positioned is False:
-                return self._result(
-                    False, "Could not set datum target position (SetPosition2 returned False)",
-                    SwErrors.swFeatureError, data,
-                )
-
-            data["name"] = self._read_prop(annotation, "GetName")
+            _, place_err = self._place_annotation(
+                created, x, y, "Datum target", "datum target",
+                f"add_datum_target({view_name!r})", data,
+            )
+            if place_err:
+                return place_err
 
         return self._result(True, f"Added datum target {label!r}", SwErrors.swSuccess, data)
 
@@ -9292,11 +9323,9 @@ class DrawingOperations:
                 False, f"entity: {entity_err}", SwErrors.swInvalidInput, {"entity": entity},
             )
 
-        if isinstance(x, bool) or isinstance(y, bool) \
-                or not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
-            return self._result(
-                False, f"x/y must be numbers, got x={x!r}, y={y!r}", SwErrors.swInvalidInput,
-            )
+        xy_err = self._validate_xy(x, y)
+        if xy_err:
+            return xy_err
 
         for label, value in (("roughness_max", roughness_max), ("roughness_min", roughness_min)):
             if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
@@ -9324,7 +9353,7 @@ class DrawingOperations:
         if err:
             return err
 
-        activated = self.select_view_by_name(view_name)
+        activated = self.select_view_by_name(view_name, doc=doc)
         if not activated["success"]:
             return activated
 
@@ -9334,7 +9363,7 @@ class DrawingOperations:
             "x": x, "y": y, "all_around": bool(all_around),
         }
 
-        with self.selected("", type_str, ex, ey, ez) as sel:
+        with self.selected("", type_str, ex, ey, ez, doc=doc) as sel:
             if not sel["success"]:
                 return sel
 
@@ -9497,11 +9526,9 @@ class DrawingOperations:
                 False, f"entity: {entity_err}", SwErrors.swInvalidInput, {"entity": entity},
             )
 
-        if isinstance(x, bool) or isinstance(y, bool) \
-                or not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
-            return self._result(
-                False, f"x/y must be numbers, got x={x!r}, y={y!r}", SwErrors.swInvalidInput,
-            )
+        xy_err = self._validate_xy(x, y)
+        if xy_err:
+            return xy_err
 
         if size is not None and (
             isinstance(size, bool) or not isinstance(size, (int, float)) or size < 0
@@ -9535,7 +9562,7 @@ class DrawingOperations:
         if err:
             return err
 
-        activated = self.select_view_by_name(view_name)
+        activated = self.select_view_by_name(view_name, doc=doc)
         if not activated["success"]:
             return activated
 
@@ -9551,7 +9578,7 @@ class DrawingOperations:
             "both_sides": bool(both_sides), "x": x, "y": y,
         }
 
-        with self.selected("", type_str, ex, ey, ez) as sel:
+        with self.selected("", type_str, ex, ey, ez, doc=doc) as sel:
             if not sel["success"]:
                 return sel
 
@@ -9643,31 +9670,12 @@ class DrawingOperations:
                         SwErrors.swFeatureError, data,
                     )
 
-            try:
-                annotation = weld.GetAnnotation()
-            except Exception as e:
-                logger.warning(f"add_weld_symbol({view_name!r}) GetAnnotation error: {e}")
-                annotation = None
-
-            if annotation is None:
-                return self._result(
-                    False, "Weld symbol has no IAnnotation wrapper (GetAnnotation returned nothing) "
-                    "-- cannot set position", SwErrors.swFeatureError, data,
-                )
-
-            try:
-                x_m, y_m = self._units.to_meters(x), self._units.to_meters(y)
-                positioned = annotation.SetPosition2(x_m, y_m, 0.0)
-            except Exception as e:
-                logger.error(f"add_weld_symbol({view_name!r}) SetPosition2 error: {e}")
-                return self._result(False, f"Set position error: {e}", SwErrors.swFeatureError, data)
-            if positioned is False:
-                return self._result(
-                    False, "Could not set weld symbol position (SetPosition2 returned False)",
-                    SwErrors.swFeatureError, data,
-                )
-
-            data["name"] = self._read_prop(annotation, "GetName")
+            _, place_err = self._place_annotation(
+                weld, x, y, "Weld symbol", "weld symbol",
+                f"add_weld_symbol({view_name!r})", data,
+            )
+            if place_err:
+                return place_err
 
         return self._result(
             True, f"Added {symbol_code} weld symbol" + (f" {data['name']!r}" if data["name"] else ""),
@@ -9685,19 +9693,8 @@ class DrawingOperations:
         `GetFirstDatumTag`/`GetNext` walk (sw-1xx.4), per the sw-1xx.6 dossier
         addendum. `GetFirstCenterMark2` is SOLIDWORKS 2025 SP01+ -- see that
         addendum record's Gotchas for the obsolete pre-2025-SP01 predecessor."""
-        try:
-            mark = view.GetFirstCenterMark2()
-        except Exception as e:
-            logger.warning(f"_iter_view_center_marks: GetFirstCenterMark2 failed: {e}")
-            mark = None
-        while mark is not None:
-            yield mark
-            try:
-                nxt = mark.GetNext()
-            except Exception as e:
-                logger.warning(f"_iter_view_center_marks: GetNext failed: {e}")
-                nxt = None
-            mark = nxt if nxt else None
+        return self._iter_com_chain(view, "GetFirstCenterMark2", "GetNext",
+                                    "_iter_view_center_marks")
 
     def _find_circular_edges(self, view: Any) -> List[Tuple[str, float, float, float]]:
         """`add_center_marks`' `target="all_holes"` discovery: every visible
@@ -9715,7 +9712,7 @@ class DrawingOperations:
         """
         try:
             component = view.RootDrawingComponent
-            edges = view.GetVisibleEntities2(component, 1) or []
+            edges = view.GetVisibleEntities2(component, _VIEW_ENTITY_TYPES["edge"]) or []
         except Exception as e:
             logger.warning(f"_find_circular_edges: GetVisibleEntities2 failed: {e}")
             return []
@@ -9816,7 +9813,7 @@ class DrawingOperations:
         if err:
             return err
 
-        activated = self.select_view_by_name(view_name)
+        activated = self.select_view_by_name(view_name, doc=doc)
         if not activated["success"]:
             return activated
 
@@ -9868,7 +9865,7 @@ class DrawingOperations:
 
         created_count = 0
         for type_str, ex, ey, ez in candidates:
-            with self.selected("", type_str, ex, ey, ez) as sel:
+            with self.selected("", type_str, ex, ey, ez, doc=doc) as sel:
                 if not sel["success"]:
                     continue
                 try:
@@ -9945,7 +9942,7 @@ class DrawingOperations:
         if err:
             return err
 
-        activated = self.select_view_by_name(view_name)
+        activated = self.select_view_by_name(view_name, doc=doc)
         if not activated["success"]:
             return activated
 
@@ -9959,7 +9956,7 @@ class DrawingOperations:
                     "pass select_view=False with an explicit 2-entity target instead",
                     SwErrors.swInvalidInput, data,
                 )
-            with self.selected(view_name, "DRAWINGVIEW", 0, 0, 0) as sel:
+            with self.selected(view_name, "DRAWINGVIEW", 0, 0, 0, doc=doc) as sel:
                 if not sel["success"]:
                     return sel
                 try:
@@ -9989,7 +9986,7 @@ class DrawingOperations:
             with ExitStack() as stack:
                 for i, (type_str, ex, ey, ez) in enumerate(parsed_entities):
                     sel = stack.enter_context(
-                        self.selected("", type_str, ex, ey, ez, append=(i > 0), mark=i)
+                        self.selected("", type_str, ex, ey, ez, append=(i > 0), mark=i, doc=doc)
                     )
                     if not sel["success"]:
                         return sel
@@ -10041,7 +10038,7 @@ class DrawingOperations:
         if err:
             return err
 
-        activated = self.select_view_by_name(view_name)
+        activated = self.select_view_by_name(view_name, doc=doc)
         if not activated["success"]:
             return activated
 
@@ -10055,14 +10052,24 @@ class DrawingOperations:
             )
 
         data = {"view_name": view_name}
+
+        # Both of these are loop invariants and each read is a COM
+        # round-trip, so they are fetched once rather than per mark.
         sel_mgr = doc.SelectionManager
+        try:
+            sel_data = sel_mgr.CreateSelectData()
+            extension = doc.Extension
+        except Exception as e:
+            logger.error(f"remove_center_marks({view_name!r}) error: {e}")
+            return self._result(
+                False, f"Remove center marks error: {e}", SwErrors.swSelectionError, data,
+            )
 
         removed = 0
         candidates = 0
         for mark in self._iter_view_center_marks(view):
             candidates += 1
             try:
-                sel_data = sel_mgr.CreateSelectData()
                 selected_ok = mark.Select(False, sel_data)
             except Exception as e:
                 logger.warning(f"remove_center_marks({view_name!r}) Select error: {e}")
@@ -10070,7 +10077,7 @@ class DrawingOperations:
             if not selected_ok:
                 continue
             try:
-                deleted = doc.Extension.DeleteSelection2(0)
+                deleted = extension.DeleteSelection2(0)
             except Exception as e:
                 logger.warning(f"remove_center_marks({view_name!r}) DeleteSelection2 error: {e}")
                 deleted = False

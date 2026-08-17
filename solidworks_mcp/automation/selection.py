@@ -193,7 +193,7 @@ class SelectionOperations:
     @contextmanager
     def selected(self, name: str, type_str: str, x: float = 0, y: float = 0, z: float = 0,
                  append: bool = False, mark: int = 0, callout: Any = None,
-                 sel_option: int = 0):
+                 sel_option: int = 0, doc: Any = None):
         """
         Select-then-act context manager: clears any stale selection, selects
         the given entity via `select_by_id`, yields the selection result
@@ -226,11 +226,17 @@ class SelectionOperations:
         Clearing on entry to an appending block would discard the entity the
         enclosing block just selected; clearing on its exit would discard the
         selection before the enclosing block's body ever ran.
+
+        `doc` lets a caller that has already resolved the document hand it
+        in, skipping the two COM round-trips `get_active_doc()` costs (see
+        `_select_by_id`). Batch callers should always pass it -- a loop that
+        selects N entities otherwise pays 2N redundant round-trips.
         """
-        doc, err = self.get_active_doc()
-        if err:
-            yield err
-            return
+        if doc is None:
+            doc, err = self.get_active_doc()
+            if err:
+                yield err
+                return
 
         # One document resolution for all three COM calls; composing the
         # public `clear_selection`/`select_by_id` would re-resolve it three
@@ -249,14 +255,20 @@ class SelectionOperations:
     # View selection / discovery
     # ========================================================================
 
-    def select_view_by_name(self, view_name: str) -> Dict:
+    def select_view_by_name(self, view_name: str, doc: Any = None) -> Dict:
         """
         Resolve and activate an `IView` by name via `IDrawingDoc::ActivateView`
         -- the target of most drawing-view-scoped operations.
+
+        `doc` lets a caller that already holds the drawing document pass it
+        in; `get_drawing_doc()` is three COM round-trips (the `is_connected`
+        probe, `ActiveDoc`, and `GetType`), and nearly every annotation tool
+        resolves the document immediately before calling this.
         """
-        doc, err = self.get_drawing_doc()
-        if err:
-            return err
+        if doc is None:
+            doc, err = self.get_drawing_doc()
+            if err:
+                return err
 
         try:
             activated = doc.ActivateView(view_name)

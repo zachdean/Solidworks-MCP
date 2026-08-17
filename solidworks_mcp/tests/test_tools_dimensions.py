@@ -14,20 +14,6 @@ import pytest
 from solidworks_mcp.tools import dispatch, sw_automation
 
 
-@pytest.fixture
-def tool_sw(make_sw):
-    """Factory mirroring test_tools_model_items.py's `tool_sw`, connecting
-    the shared `tools.sw_automation` singleton to a fresh fake
-    `SldWorks.Application`."""
-    def _make(doc_type="drawing", **kwargs):
-        fake = make_sw(doc_type, **kwargs)
-        connected = sw_automation.connect()
-        assert connected["success"], connected
-        return fake
-    yield _make
-    sw_automation.disconnect()
-
-
 def _prep_view(fake_sw):
     """Common setup every happy/near-happy-path test needs: ActivateView and
     SelectByID2 both scripted to succeed."""
