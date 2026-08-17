@@ -1208,11 +1208,17 @@ Property ColumnCount As System.Integer
 **status:** verified
 
 **Gotchas:**
-- No documented hidden-vs-visible distinction analogous to `RowCount`/`TotalRowCount`
-  for columns on this page — `ColumnHidden` (a separate per-column property listed in
-  the interface's member index, not independently fetched this pass) suggests columns
-  can also be hidden, but whether `ColumnCount` includes hidden columns is unverified;
-  confirm empirically before relying on it for a hidden-column-inclusive loop bound.
+- Resolved by the sw-mio.1 issue: `ITableAnnotation::TotalColumnCount` (property,
+  read-only, `SOLIDWORKS 2011 SP05, Revision Number 19.5` — same release as
+  `TotalRowCount`) is the hidden-inclusive counterpart this record originally flagged
+  as unverified. Its own page states plainly: "Gets the total number of visible and
+  hidden columns in this table" — the exact `RowCount`/`TotalRowCount` split, mirrored
+  for columns. Source:
+  https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.ITableAnnotation~TotalColumnCount.html
+  -- `get_bom_contents` bounds its column loop with `TotalColumnCount` (falling back to
+  this plain `ColumnCount` only if that read fails), the same way `TotalRowCount`
+  bounds its row loop, so an `IncludeHidden=True` `Text2` read (e.g. after
+  `insert_bom_table`'s `hidden_columns`) doesn't silently truncate a hidden column.
 
 ---
 
@@ -1393,6 +1399,108 @@ present in `ITableAnnotation`'s own index).
   for other annotation types) in `03-annotations.md` — this dossier documents only the
   base, unsuffixed `SetPosition` overload, which is the one the table-annotation
   Remarks table explicitly names.
+
+## Enumerating and hiding table columns
+
+Added by the sw-mio.1 issue (`list_tables`/`insert_bom_table`'s `hidden_columns`) —
+absent from the dossier's original research pass. `help.solidworks.com` still blocks
+plain fetches without a browser-like `User-Agent` (this dossier's intro); these two
+records were fetched with `curl -A "Mozilla/5.0 ..."`, not the plain `WebFetch` tool,
+which has no way to set a custom header and gets a 403 on this site.
+
+### IView::GetFirstTableAnnotation
+
+- **Interface:** IView
+- **Method:** GetFirstTableAnnotation
+- **Minimum SW version:** SOLIDWORKS 2004 FCS, Revision Number 12.0
+
+**Signature:**
+
+```vb
+Function GetFirstTableAnnotation() As TableAnnotation
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| (none — no-argument getter) | n/a | n/a | n/a | Getter takes no arguments | |
+
+**Returns:** `TableAnnotation` — the first table annotation attached to this view, or
+`Nothing` if the view has none. Walk the rest via `ITableAnnotation::GetNext` (the same
+member name `INote::GetNext` uses for the note chain in docs/api/03-annotations.md) —
+identical `GetFirstX`/`X::GetNext` linked-list shape.
+
+**Prior selection required:** None beyond holding the target `IView` reference.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IView~GetFirstTableAnnotation.html
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IView~GetTableAnnotations.html (array-getter alternative — see Gotchas; SOLIDWORKS 2009 SP1, Revision Number 17.1)
+
+**status:** verified
+
+**Gotchas:**
+- `IView::GetTableAnnotations() As System.Object` (array of `ITableAnnotation`) is a
+  real, current alternative that fetches every table on the view in one call instead of
+  walking the linked list — its own Remarks state it exists specifically so a caller
+  doesn't have to call `GetFirstTableAnnotation`/`ITableAnnotation::GetNext`
+  repeatedly. `list_tables` uses the linked-list form instead, for consistency with
+  every other annotation-enumeration helper already in this codebase (the shared
+  `_iter_com_chain`, also used for note and datum-tag walking).
+- `IView::GetTableAnnotationCount` and `IView::IGetTableAnnotations` (the
+  interface-qualified dispatch variant, matching the `I`-prefix pattern seen elsewhere
+  in this API, e.g. `ISelectionMgr::IGetSelectedObject`) both exist per the `IView`
+  member index but were not independently fetched this pass.
+
+---
+
+### ITableAnnotation::ColumnHidden
+
+- **Interface:** ITableAnnotation
+- **Method:** ColumnHidden (property, read/write)
+- **Minimum SW version:** SOLIDWORKS 2010 FCS, Revision Number 18.0
+
+**Signature:**
+
+```vb
+Property ColumnHidden( _
+   ByVal Index As System.Integer _
+) As System.Boolean
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| Index | Integer | n/a | Yes | 0-based column index | |
+
+**Returns:** `Boolean` — `True` if the column at `Index` is currently hidden. As a
+read/write property, assigning to it (`table.ColumnHidden(Index) = True` in VB) sets
+whether that column is hidden.
+
+**Prior selection required:** None beyond holding the `ITableAnnotation` (or derived
+interface) reference.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.ITableAnnotation~ColumnHidden.html
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.ITableAnnotation~RowHidden.html (row-hiding counterpart, same shape — see Gotchas; SOLIDWORKS 2009 FCS, Revision Number 17.0)
+
+**status:** verified
+
+**Gotchas:**
+- This is a genuine VB *parameterized* property (an indexed getter **and** setter
+  under one name), the same shape as `Text`/`Text2` above — there is no separate
+  `SetColumnHidden` member in the `ITableAnnotation` member index. **Unverified**: the
+  exact call shape a `win32com` dynamic-dispatch Python caller must use to reach the
+  *setter* half (the getter, a plain 1-arg read, is unambiguous). `insert_bom_table`'s
+  `hidden_columns` calls it as `table.ColumnHidden(index, True)` — index and the new
+  value as two positional arguments — as its best-effort choice, flagged here per this
+  dossier's honesty convention rather than guessed silently. Confirm empirically
+  against a real SolidWorks install before relying on it.
+- `RowHidden` (property, read/write, identical `Property RowHidden(Index As Integer)
+  As Boolean` shape per the `ITableAnnotation` member index) is the row-hiding
+  counterpart — not wired to any tool by this issue, listed here only because it
+  surfaced alongside `ColumnHidden` in the same member-index fetch.
 
 ## Enums
 

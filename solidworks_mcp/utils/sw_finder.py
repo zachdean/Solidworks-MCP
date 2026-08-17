@@ -53,6 +53,15 @@ class SolidWorksFinder:
         "lang/english/templates",
     ]
     
+    # Drawing-table template extensions, keyed by this project's own
+    # template_type name -- see `_find_table_template`. Only "bom" is wired
+    # up by sw-mio.1; the other table types this dossier documents
+    # (`.sldrevtbt` revision, `.sldwldtbt` weldment cut list) are left for
+    # the sibling issues that add those insert tools.
+    TABLE_TEMPLATE_EXTENSIONS = {
+        "bom": ".sldbomtbt",
+    }
+
     # ProgramData template paths
     PROGRAMDATA_TEMPLATE_PATHS = [
         r"C:\ProgramData\SolidWorks\SOLIDWORKS 2025\templates",
@@ -185,11 +194,12 @@ class SolidWorksFinder:
     def find_template(cls, template_type: str = "part", sw_exe_path: str = None) -> Optional[str]:
         """
         Find SolidWorks template file
-        
+
         Args:
-            template_type: "part", "assembly", or "drawing"
+            template_type: "part", "assembly", "drawing", or a table-template
+                type ("bom" -- see `_find_table_template`)
             sw_exe_path: SolidWorks exe path (auto-detect if None)
-        
+
         Returns:
             Path to template file or None
         """
@@ -198,12 +208,15 @@ class SolidWorksFinder:
             "assembly": "Assembly.asmdot",
             "drawing": "Drawing.drwdot",
         }
-        
-        template_name = template_files.get(template_type.lower())
-        if not template_name:
+
+        key = template_type.lower()
+        template_name = template_files.get(key)
+        if template_name is None:
+            if key in cls.TABLE_TEMPLATE_EXTENSIONS:
+                return cls._find_table_template(key, sw_exe_path)
             logger.error(f"Unknown template type: {template_type}")
             return None
-        
+
         # Get SolidWorks directory
         if sw_exe_path:
             sw_dir = os.path.dirname(sw_exe_path)
@@ -213,7 +226,7 @@ class SolidWorksFinder:
                 sw_dir = os.path.dirname(sw_exe)
             else:
                 sw_dir = None
-        
+
         # Search relative to SolidWorks install
         if sw_dir:
             for subdir in cls.TEMPLATE_SUBDIRS:
@@ -221,14 +234,75 @@ class SolidWorksFinder:
                 if os.path.exists(template_path):
                     logger.info(f"Found {template_type} template: {template_path}")
                     return template_path
-        
+
         # Search ProgramData
         for pdata_path in cls.PROGRAMDATA_TEMPLATE_PATHS:
             template_path = os.path.join(pdata_path, template_name)
             if os.path.exists(template_path):
                 logger.info(f"Found {template_type} template in ProgramData: {template_path}")
                 return template_path
-        
+
+        logger.warning(f"Template not found: {template_type}")
+        return None
+
+    @classmethod
+    def _find_table_template(cls, template_type: str, sw_exe_path: str = None) -> Optional[str]:
+        """Find a default drawing-table template (BOM, revision, weldment
+        cut list, ...) by extension, for template types that -- unlike
+        part/assembly/drawing -- have no single fixed filename.
+
+        Per docs/api/04-tables.md's `InsertBomTable4`/`6` Gotchas, table
+        templates live in `<SOLIDWORKS_install_dir>\\lang\\<language>\\` with
+        a type-specific extension (`.sldbomtbt` for BOM, e.g.
+        `bom-standard.sldbomtbt`) -- there is no fixed filename to look up the
+        way `Part.prtdot`/`Assembly.asmdot`/`Drawing.drwdot` are, so this
+        globs each installed language folder under `lang/` for the first
+        file with that extension, preferring an "english" locale folder if
+        more than one is installed.
+        """
+        extension = cls.TABLE_TEMPLATE_EXTENSIONS.get(template_type)
+        if extension is None:
+            logger.error(f"Unknown table template type: {template_type}")
+            return None
+
+        if sw_exe_path:
+            sw_dir = os.path.dirname(sw_exe_path)
+        else:
+            sw_exe = cls.find()
+            sw_dir = os.path.dirname(sw_exe) if sw_exe else None
+
+        if not sw_dir:
+            logger.warning(f"Template not found: {template_type} (SolidWorks install not found)")
+            return None
+
+        lang_dir = os.path.join(sw_dir, "lang")
+        if not os.path.isdir(lang_dir):
+            logger.warning(f"Template not found: {template_type} (no lang dir under {sw_dir})")
+            return None
+
+        try:
+            locales = sorted(
+                os.listdir(lang_dir),
+                key=lambda name: (0 if "english" in name.lower() else 1, name.lower()),
+            )
+        except OSError:
+            logger.warning(f"Template not found: {template_type} (could not list {lang_dir})")
+            return None
+
+        for locale in locales:
+            locale_dir = os.path.join(lang_dir, locale)
+            if not os.path.isdir(locale_dir):
+                continue
+            try:
+                filenames = sorted(os.listdir(locale_dir))
+            except OSError:
+                continue
+            for filename in filenames:
+                if filename.lower().endswith(extension):
+                    template_path = os.path.join(locale_dir, filename)
+                    logger.info(f"Found {template_type} template: {template_path}")
+                    return template_path
+
         logger.warning(f"Template not found: {template_type}")
         return None
     

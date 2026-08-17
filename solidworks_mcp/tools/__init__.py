@@ -4,8 +4,9 @@ SolidWorks MCP Tools
 Declarative tool registry (`registry.py`) plus one module per tool area:
 `connection.py`, `documents.py`, `drawing_documents.py`, `drawing_sheets.py`,
 `drawing_views.py`, `drawing_view_layout.py`, `drawing_annotations.py`,
-`sketches.py`, `features.py`, `utility.py`. Importing this package registers
-every tool as a side effect of importing its submodules.
+`drawing_tables.py`, `sketches.py`, `features.py`, `utility.py`. Importing
+this package registers every tool as a side effect of importing its
+submodules.
 
 The shared `sw_automation` instance lives in `_automation.py` and is
 re-exported here for `server.py`'s convenience; submodules import it from
@@ -29,6 +30,7 @@ from . import drawing_sheets  # noqa: F401
 from . import drawing_views  # noqa: F401
 from . import drawing_view_layout  # noqa: F401
 from . import drawing_annotations  # noqa: F401
+from . import drawing_tables  # noqa: F401
 from . import sketches  # noqa: F401
 from . import features  # noqa: F401
 from . import utility  # noqa: F401

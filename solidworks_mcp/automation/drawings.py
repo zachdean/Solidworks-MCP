@@ -29,6 +29,8 @@ from ..constants_drawing import (
     SwAutodimScheme,
     SwAutodimStatus,
     SwAutodimVerticalPlacement,
+    SwBOMConfigurationAnchorType,
+    SwBomType,
     SwBreakLineOrientation,
     SwBreakLineStyle,
     SwCenterMarkConnectionLine,
@@ -60,6 +62,7 @@ from ..constants_drawing import (
     SwInsertAnnotation,
     SwInsertOptions,
     SwLeaderStyle,
+    SwNumberingType,
     SwRenameOptions,
     SwSaveAsOptions,
     SwSaveAsVersion,
@@ -67,6 +70,7 @@ from ..constants_drawing import (
     SwSetValueReturnStatus,
     SwSFLaySym,
     SwSFSymType,
+    SwTableAnnotationType,
     SwUserPreferenceIntegerValue,
     SwUserPreferenceStringListValue,
     SwUserPreferenceToggle,
@@ -1171,6 +1175,53 @@ def _enum_name(enum_cls, code: Any) -> str:
         return enum_cls(code).name
     except (ValueError, TypeError):
         return f"unknown status {code!r}"
+
+
+# `insert_bom_table`'s `bom_type` -> `IView::InsertBomTable6`'s `BomType`
+# (`swBomType_e`). Only the 3 types this task's Requirements name
+# ("top-level-only / parts-only / indented") are exposed -- `swBomType_Flattened`
+# exists in the enum (docs/api/04-tables.md's Enums section) but has no
+# requested public key.
+_BOM_TYPES = {
+    "top_level": int(SwBomType.swBomType_TopLevelOnly),
+    "parts_only": int(SwBomType.swBomType_PartsOnly),
+    "indented": int(SwBomType.swBomType_Indented),
+}
+
+# `insert_bom_table`'s `anchor` -> the shared `swBOMConfigurationAnchorType_e`
+# every table type in this dossier's Enums section uses for `AnchorType`, not
+# just BOM -- kept generically named (not `_BOM_ANCHOR_TYPES`) so a sibling
+# hole/revision/weldment table tool (sw-mio.2/.3/.4) can reuse this dict
+# rather than redeclaring it.
+_TABLE_ANCHOR_TYPES = {
+    "top_left": int(SwBOMConfigurationAnchorType.swBOMConfigurationAnchor_TopLeft),
+    "top_right": int(SwBOMConfigurationAnchorType.swBOMConfigurationAnchor_TopRight),
+    "bottom_left": int(SwBOMConfigurationAnchorType.swBOMConfigurationAnchor_BottomLeft),
+    "bottom_right": int(SwBOMConfigurationAnchorType.swBOMConfigurationAnchor_BottomRight),
+}
+
+# `IView::InsertBomTable6`'s positional signature, in the exact order
+# documented in docs/api/04-tables.md: UseAnchorPoint, X, Y, AnchorType,
+# BomType, Configuration, TableTemplate, Hidden, IndentedNumberingType,
+# DetailedCutList, DissolvePartLevelRows, DisplayAsOneItem. 12 positional
+# parameters -- ComSignature per this issue's working agreement (>6 params).
+# `Hidden` always binds `False` (an *insert* tool has no reason to create a
+# hidden table) and `DisplayAsOneItem` always binds `False` -- neither is in
+# this task's Requirements as a public parameter.
+INSERT_BOM_TABLE6 = ComSignature("InsertBomTable6", [
+    Param("use_anchor_point", REQUIRED, to_bool),
+    Param("x", 0.0, to_meters),
+    Param("y", 0.0, to_meters),
+    Param("anchor_type", REQUIRED, enum_to_int),
+    Param("bom_type", REQUIRED, enum_to_int),
+    Param("configuration", ""),
+    Param("table_template", REQUIRED),
+    Param("hidden", False, to_bool),
+    Param("indented_numbering_type", int(SwNumberingType.swNumberingType_None), enum_to_int),
+    Param("detailed_cut_list", False, to_bool),
+    Param("dissolve_part_level_rows", False, to_bool),
+    Param("display_as_one_item", False, to_bool),
+])
 
 
 class DrawingOperations:
@@ -10239,4 +10290,409 @@ class DrawingOperations:
         return self._result(
             True, f"Removed {removed} center mark(s) from view {view_name!r}",
             SwErrors.swSuccess, data,
+        )
+
+    # ========================================================================
+    # BOM table tools
+    # ========================================================================
+
+    @staticmethod
+    def _table_annotation(table: Any) -> Any:
+        """`ITableAnnotation::GetAnnotation` -- the base `IAnnotation`
+        wrapper every table type inherits, reached the same way `_describe_note`
+        reaches an `INote`'s own `IAnnotation`. Never raises; `None` on
+        failure."""
+        try:
+            return table.GetAnnotation()
+        except Exception:
+            return None
+
+    def _iter_view_tables(self, view: Any):
+        """Walk every table annotation attached to `view` via `IView::
+        GetFirstTableAnnotation`/`ITableAnnotation::GetNext` -- the
+        linked-list enumeration documented in docs/api/04-tables.md's
+        "Enumerating and hiding table columns" addendum, the same
+        `_iter_com_chain` shape `_iter_view_notes`/`_iter_view_datum_tags`
+        already use."""
+        return self._iter_com_chain(view, "GetFirstTableAnnotation", "GetNext",
+                                    "_iter_view_tables")
+
+    def _describe_table(self, table: Any, view_name: Optional[str]) -> Dict:
+        """`list_tables`'s per-table record: type, name, position, and size
+        (row/column counts -- tables have no documented overall width/height
+        property, per the `ITableAnnotation` member index)."""
+        annotation = self._table_annotation(table)
+        name, x, y = self._annotation_name_position(annotation)
+
+        type_code = _com_int(self._read_prop(table, "Type"))
+        type_name = _enum_name(SwTableAnnotationType, type_code) if type_code is not None else None
+
+        return {
+            "name": name, "type": type_name, "type_code": type_code,
+            "x": x, "y": y, "view_name": view_name,
+            "row_count": _com_int(self._read_prop(table, "RowCount")),
+            "column_count": _com_int(self._read_prop(table, "ColumnCount")),
+        }
+
+    def list_tables(self, sheet_name: Optional[str] = None) -> Dict:
+        """
+        Enumerate every table annotation (BOM, hole, revision, weldment cut
+        list, general, title block, ...) via `IView::GetFirstTableAnnotation`/
+        `ITableAnnotation::GetNext`, walked over every view `_scoped_views`
+        resolves -- every real view in the document when `sheet_name` is
+        omitted, else that sheet's own real views plus its sheet-level
+        pseudo-view (where a title-block table lives).
+
+        Args:
+            sheet_name: Restrict to this sheet's tables. Omitted: every
+                table in the whole document.
+
+        Returns:
+            Result dict. `data["tables"]` is a list of `_describe_table`
+            records: `name` (`IAnnotation::GetName`), `type` (readable
+            `swTableAnnotationType_e` name), `x`/`y` (caller's default
+            unit), `view_name`, and `row_count`/`column_count` -- this
+            record's "size", since tables have no overall width/height
+            property.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        scoped, err = self._scoped_views(doc, sheet_name, "list_tables", "List tables")
+        if err:
+            return err
+
+        tables: List[Dict] = []
+        for view, v_name in scoped:
+            tables.extend(self._describe_table(t, v_name) for t in self._iter_view_tables(view))
+
+        return self._result(
+            True, f"{len(tables)} table(s)" + (f" on sheet {sheet_name!r}" if sheet_name else ""),
+            SwErrors.swSuccess, {"sheet_name": sheet_name, "tables": tables},
+        )
+
+    def _find_table_by_name(self, doc, table_name: str) -> Tuple[Any, Optional[str], Optional[Dict]]:
+        """Find the table annotation named `table_name` anywhere in the
+        document -- `get_bom_contents`'s lookup, walking every view the same
+        way `list_tables` does with no `sheet_name` scope.
+
+        Returns:
+            `(table, view_name, None)` on a hit; `(None, None, None)` on a
+            clean miss (no table has that name); `(None, None, error_dict)`
+            if the walk itself failed.
+        """
+        scoped, err = self._scoped_views(doc, None, "get_bom_contents", "Get BOM contents")
+        if err:
+            return None, None, err
+
+        for view, v_name in scoped:
+            for table in self._iter_view_tables(view):
+                annotation = self._table_annotation(table)
+                if self._read_prop(annotation, "GetName") == table_name:
+                    return table, v_name, None
+
+        return None, None, None
+
+    def insert_bom_table(
+        self, view_name: Optional[str] = None, template_path: Optional[str] = None,
+        x: float = 0, y: float = 0, bom_type: str = "top_level",
+        configuration: Optional[str] = None, anchor: Optional[str] = None,
+        attach_to_anchor: bool = False, detailed_cut_list: bool = False,
+        hidden_columns: Optional[List[int]] = None,
+    ) -> Dict:
+        """
+        Insert a BOM table onto a drawing view via `IView::InsertBomTable6`.
+
+        Args:
+            view_name: Drawing view to attach the table to (`IView::GetName2`,
+                e.g. from `list_views`), on the active sheet. Omitted: the
+                first real view on the active sheet -- fails with
+                `swInvalidInput` if the sheet has none.
+            template_path: Path to a `.sldbomtbt` template. Omitted: falls
+                back to `utils.sw_finder.find_template("bom")` (globs the
+                SolidWorks install's `lang/<language>/` folders for the
+                first `.sldbomtbt` file, per docs/api/04-tables.md's
+                Gotchas); if that also finds nothing, fails with
+                `swTemplateNotFound` rather than passing an empty string to
+                `InsertBomTable6` and getting an opaque COM failure.
+            x, y: Table placement, caller's default unit -- converted to
+                meters. Used only when `attach_to_anchor` is `False` (the
+                default).
+            bom_type: `"top_level"` (default), `"parts_only"`, or
+                `"indented"` -- `swBomType_e`. `"top_level"` must not be
+                combined with `configuration` (`InsertBomTable6`'s own
+                Remarks: use `IBomFeature::GetConfigurations`/
+                `SetConfigurations` instead); `"parts_only"`/`"indented"`
+                require it.
+            configuration: Configuration name for the BOM. Required for
+                `bom_type in ("parts_only", "indented")`; must be omitted
+                for `"top_level"`.
+            anchor: `"top_left"`, `"top_right"`, `"bottom_left"`, or
+                `"bottom_right"` -- the shared `swBOMConfigurationAnchorType_e`
+                every table type uses. Required when `attach_to_anchor=True`;
+                must be omitted when `attach_to_anchor=False` (mutually
+                exclusive with the `x`/`y` placement mode -- either
+                combination of the two fails with `swInvalidInput`).
+            attach_to_anchor: `True` to snap to the sheet format's BOM
+                anchor point (`UseAnchorPoint`) instead of `x`/`y`. Default
+                `False`.
+            detailed_cut_list: `True` to show the detailed cut list.
+            hidden_columns: Optional list of 0-based column indices to hide
+                after creation, via `ITableAnnotation::ColumnHidden` (see
+                that record's Gotchas in the dossier for the unverified
+                setter call shape used here). A failure hiding any column
+                fails the whole call -- the table itself is already created
+                by that point and is not rolled back, the same
+                already-committed-then-fails convention `add_surface_finish`'s
+                `all_around` documents.
+
+        Returns:
+            Result dict. `data["name"]` is the table's `IAnnotation::GetName`
+            value; `data["row_count"]`/`data["column_count"]` are read back
+            via `ITableAnnotation::RowCount`/`ColumnCount`, for balloon/update
+            tools elsewhere in this epic to address the table by.
+        """
+        bom_key = (bom_type or "").strip().lower() if isinstance(bom_type, str) else ""
+        bom_type_enum = _BOM_TYPES.get(bom_key)
+        if bom_type_enum is None:
+            return self._result(
+                False, f"Unknown bom_type {bom_type!r}; expected one of {sorted(_BOM_TYPES)!r}",
+                SwErrors.swInvalidInput, {"bom_type": bom_type},
+            )
+
+        if bom_key == "top_level":
+            if configuration:
+                return self._result(
+                    False,
+                    "configuration must not be given when bom_type='top_level' -- "
+                    "IBomFeature::GetConfigurations/SetConfigurations controls the "
+                    "configuration for a top-level-only BOM instead",
+                    SwErrors.swInvalidInput, {"bom_type": bom_type, "configuration": configuration},
+                )
+            config_value = ""
+        else:
+            if not configuration:
+                return self._result(
+                    False, f"configuration is required when bom_type={bom_type!r}",
+                    SwErrors.swInvalidInput, {"bom_type": bom_type},
+                )
+            config_value = configuration
+
+        if attach_to_anchor:
+            if not anchor:
+                return self._result(
+                    False, "anchor is required when attach_to_anchor=True",
+                    SwErrors.swInvalidInput, {"attach_to_anchor": attach_to_anchor},
+                )
+            anchor_key = anchor.strip().lower() if isinstance(anchor, str) else ""
+        else:
+            if anchor:
+                return self._result(
+                    False,
+                    "anchor is only used when attach_to_anchor=True; omit anchor to "
+                    "place by x/y, or pass attach_to_anchor=True to use it",
+                    SwErrors.swInvalidInput,
+                    {"anchor": anchor, "attach_to_anchor": attach_to_anchor},
+                )
+            anchor_key = "top_left"
+
+        anchor_enum = _TABLE_ANCHOR_TYPES.get(anchor_key)
+        if anchor_enum is None:
+            return self._result(
+                False, f"Unknown anchor {anchor!r}; expected one of {sorted(_TABLE_ANCHOR_TYPES)!r}",
+                SwErrors.swInvalidInput, {"anchor": anchor},
+            )
+
+        if hidden_columns is not None and (
+            not isinstance(hidden_columns, (list, tuple))
+            or not all(isinstance(i, int) and not isinstance(i, bool) for i in hidden_columns)
+        ):
+            return self._result(
+                False,
+                f"hidden_columns must be a list of column indices, got {hidden_columns!r}",
+                SwErrors.swInvalidInput, {"hidden_columns": hidden_columns},
+            )
+
+        xy_err = self._validate_xy(x, y)
+        if xy_err:
+            return xy_err
+
+        resolved_template = template_path or find_template("bom")
+        if not resolved_template:
+            return self._result(
+                False,
+                "No BOM table template found. Pass template_path explicitly, or "
+                "install a default .sldbomtbt template.",
+                SwErrors.swTemplateNotFound, {"bom_type": bom_type},
+            )
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        sheet, err = self._resolve_sheet(doc, None)
+        if err:
+            return err
+
+        if view_name:
+            view, err = self._require_view(
+                doc, view_name, None, data={"bom_type": bom_type}, sheet=sheet,
+            )
+            if err:
+                return err
+        else:
+            view = next(self._iter_real_views(sheet), None)
+            if view is None:
+                return self._result(
+                    False,
+                    "No views on the active sheet to attach the BOM table to -- "
+                    "pass view_name, or insert a view first",
+                    SwErrors.swInvalidInput,
+                )
+            view_name = self._read_prop(view, "GetName2")
+
+        numbering_type = (
+            int(SwNumberingType.swNumberingType_Detailed) if bom_key == "indented"
+            else int(SwNumberingType.swNumberingType_None)
+        )
+
+        data = {
+            "view_name": view_name, "bom_type": bom_key, "configuration": config_value or None,
+            "template_path": resolved_template, "x": x, "y": y,
+            "anchor": anchor_key if attach_to_anchor else None,
+            "attach_to_anchor": bool(attach_to_anchor),
+            "detailed_cut_list": bool(detailed_cut_list),
+        }
+
+        try:
+            args = INSERT_BOM_TABLE6.bind(
+                units=self._units,
+                use_anchor_point=attach_to_anchor, x=x, y=y, anchor_type=anchor_enum,
+                bom_type=bom_type_enum, configuration=config_value,
+                table_template=resolved_template, hidden=False,
+                indented_numbering_type=numbering_type,
+                detailed_cut_list=detailed_cut_list,
+            )
+            table = view.InsertBomTable6(*args)
+        except Exception as e:
+            logger.error(f"insert_bom_table({view_name!r}) InsertBomTable6 error: {e}")
+            return self._result(False, f"Insert BOM table error: {e}", SwErrors.swFeatureError, data)
+
+        if table is None:
+            return self._result(
+                False,
+                "InsertBomTable6 returned nothing -- BOM table not created (an invalid "
+                "configuration name for this bom_type is the most likely cause)",
+                SwErrors.swFeatureError, data,
+            )
+
+        if hidden_columns:
+            for idx in hidden_columns:
+                try:
+                    table.ColumnHidden(idx, True)
+                except Exception as e:
+                    logger.error(f"insert_bom_table({view_name!r}) ColumnHidden({idx}) error: {e}")
+                    return self._result(
+                        False, f"Hide column {idx} error: {e}", SwErrors.swFeatureError,
+                        {**data, "hidden_columns": hidden_columns},
+                    )
+            data["hidden_columns"] = list(hidden_columns)
+
+        annotation = self._table_annotation(table)
+        name, tx, ty = self._annotation_name_position(annotation)
+        data["name"] = name
+        data["x"] = tx if tx is not None else x
+        data["y"] = ty if ty is not None else y
+        data["row_count"] = _com_int(self._read_prop(table, "RowCount"))
+        data["column_count"] = _com_int(self._read_prop(table, "ColumnCount"))
+
+        return self._result(
+            True,
+            "Inserted BOM table" + (f" {name!r}" if name else "") + f" in view {view_name!r}",
+            SwErrors.swSuccess, data,
+        )
+
+    def get_bom_contents(self, table_name: str) -> Dict:
+        """
+        Read a BOM table's cell text back via `ITableAnnotation::Text2`, so
+        an LLM can verify an assembly drawing's BOM without opening
+        SolidWorks.
+
+        Args:
+            table_name: `IAnnotation::GetName` value, as returned by
+                `insert_bom_table`'s `data["name"]` or `list_tables`'
+                `data["tables"][i]["name"]`. Searched across every view in
+                the document (not scoped to one sheet).
+
+        Returns:
+            Result dict. `data["rows"]` is a list of rows (including the
+            header row at index 0), each a list of `TotalRowCount` x
+            `TotalColumnCount` cell strings, read via `Text2(row, col,
+            IncludeHidden=True)` so hidden columns/rows are still reported.
+            Fails with `swInvalidInput` if no table has that name, or if the
+            table found is not a BOM table (`swTableAnnotationType_e`'s
+            `swTableAnnotation_BillOfMaterials`).
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        table, view_name, err = self._find_table_by_name(doc, table_name)
+        if err:
+            return err
+        if table is None:
+            return self._result(
+                False, f"Unknown table {table_name!r}", SwErrors.swInvalidInput,
+                {"table_name": table_name},
+            )
+
+        type_code = _com_int(self._read_prop(table, "Type"))
+        if type_code != int(SwTableAnnotationType.swTableAnnotation_BillOfMaterials):
+            type_name = (
+                _enum_name(SwTableAnnotationType, type_code) if type_code is not None else "unknown"
+            )
+            return self._result(
+                False, f"Table {table_name!r} is not a BOM table (type: {type_name})",
+                SwErrors.swInvalidInput, {"table_name": table_name, "type": type_name},
+            )
+
+        row_count = _com_int(self._read_prop(table, "TotalRowCount"))
+        # `TotalColumnCount` (visible + hidden), not the plain `ColumnCount`
+        # (visible only) -- the same visible/total split `RowCount`/
+        # `TotalRowCount` documents, per this dossier's `ColumnCount` Gotcha.
+        # Falling back to `ColumnCount` only if `TotalColumnCount` itself is
+        # unreadable keeps a hidden `insert_bom_table` column from silently
+        # truncating out of a `Text2(..., IncludeHidden=True)` read.
+        column_count = _com_int(self._read_prop(table, "TotalColumnCount"))
+        if column_count is None:
+            column_count = _com_int(self._read_prop(table, "ColumnCount"))
+        if row_count is None or column_count is None:
+            return self._result(
+                False, f"Could not read row/column count for table {table_name!r}",
+                SwErrors.swFeatureError, {"table_name": table_name},
+            )
+
+        rows: List[List[Optional[str]]] = []
+        for row_index in range(row_count):
+            row: List[Optional[str]] = []
+            for col_index in range(column_count):
+                try:
+                    text = table.Text2(row_index, col_index, True)
+                except Exception as e:
+                    logger.warning(
+                        f"get_bom_contents({table_name!r}) Text2({row_index},{col_index}) error: {e}"
+                    )
+                    text = None
+                row.append(text if isinstance(text, str) else (None if text is None else str(text)))
+            rows.append(row)
+
+        return self._result(
+            True,
+            f"{row_count} row(s) x {column_count} column(s) in table {table_name!r}",
+            SwErrors.swSuccess,
+            {
+                "table_name": table_name, "view_name": view_name,
+                "row_count": row_count, "column_count": column_count, "rows": rows,
+            },
         )

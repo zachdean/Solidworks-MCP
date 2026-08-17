@@ -105,6 +105,10 @@ EXPECTED_TOOL_NAMES = {
     "add_center_marks",
     "add_centerlines",
     "remove_center_marks",
+    # Table Tools
+    "insert_bom_table",
+    "list_tables",
+    "get_bom_contents",
     # Sketch Tools
     "create_sketch",
     "create_sketch_on_face",
