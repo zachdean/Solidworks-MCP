@@ -150,6 +150,8 @@ EXPECTED_TOOL_NAMES = {
     "fillet_edges",
     "chamfer_edges",
     "list_features",
+    # Drawing Pack Composite Tool
+    "create_drawing_pack",
     # Utility Tools
     "set_units",
     "execute_python",
