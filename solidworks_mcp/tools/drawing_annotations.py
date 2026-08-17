@@ -3,7 +3,8 @@ Drawing Annotation Tools
 --------------------------
 insert_model_items, add_dimension, add_ordinate_dimensions,
 set_dimension_value, set_dimension_text, autodimension_view, add_note,
-add_property_note, list_notes, edit_note.
+add_property_note, list_notes, edit_note, list_datums, add_datum_feature,
+add_gtol, add_datum_target.
 
 Backed by `DrawingOperations` (solidworks_mcp/automation/drawings.py), per
 docs/api/03-annotations.md.
@@ -488,6 +489,192 @@ def edit_note(arguments: dict) -> Dict:
     return sw_automation.edit_note(
         arguments.get("note_name"),
         arguments.get("text"),
+        arguments.get("x"),
+        arguments.get("y"),
+    )
+
+
+_GTOL_ENTITY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "kind": {
+            "type": "string",
+            "description": "Entity kind: 'edge', 'face', 'dimension', or 'vertex'.",
+        },
+        "x": {"type": "number", "description": "Caller's default unit."},
+        "y": {"type": "number", "description": "Caller's default unit."},
+        "z": {"type": "number", "description": "Caller's default unit. Defaults to 0."},
+    },
+    "required": ["kind", "x", "y"],
+}
+
+_DATUM_REF_SCHEMA = {
+    "oneOf": [
+        {"type": "string", "description": "Bare datum letter, e.g. 'A'."},
+        {
+            "type": "object",
+            "properties": {
+                "letter": {"type": "string", "description": "Datum letter, e.g. 'A'."},
+                "modifier": {"type": "string", "description": "'MMC', 'LMC', or 'RFS'."},
+            },
+            "required": ["letter"],
+        },
+    ],
+}
+
+
+@tool(
+    name="list_datums",
+    description=(
+        "Enumerate existing datum feature tags -- label, position, view -- "
+        "via IView::GetFirstDatumTag/IDatumTag::GetNext, so add_gtol's "
+        "datum-letter validation and add_datum_feature's auto-lettering "
+        "have something to read. sheet_name restricts to one sheet; omit "
+        "for every datum tag in the document. data.letters is the sorted, "
+        "deduplicated set of labels found."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "sheet_name": {"type": "string", "description": "Restrict to this sheet's datum tags."},
+        },
+        "required": [],
+    },
+)
+def list_datums(arguments: dict) -> Dict:
+    return sw_automation.list_datums(arguments.get("sheet_name"))
+
+
+@tool(
+    name="add_datum_feature",
+    description=(
+        "Place a datum feature symbol (A, B, C...) on a selected edge/face/"
+        "dimension via IModelDoc2::InsertDatumTag2. label is the datum "
+        "letter (up to 2 characters) -- omit to auto-assign the next unused "
+        "letter A-Z, skipping the reserved letters I, O, Q (reading "
+        "existing tags via list_datums). Explicitly passing I/O/Q fails. "
+        "style: 'default', 'square', or 'round' (IDatumTag::SetDisplayStyle)."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "view_name": {"type": "string", "description": "Drawing view the entity lives in."},
+            "entity": {**_GTOL_ENTITY_SCHEMA, "description": "Entity to attach the datum feature to."},
+            "label": {"type": "string", "description": "Datum letter. Omit to auto-assign."},
+            "x": {"type": "number", "description": "Placement, caller's default unit."},
+            "y": {"type": "number", "description": "Placement, caller's default unit."},
+            "style": {"type": "string", "description": "'default', 'square', or 'round'."},
+        },
+        "required": ["view_name", "entity", "x", "y"],
+    },
+)
+def add_datum_feature(arguments: dict) -> Dict:
+    return sw_automation.add_datum_feature(
+        arguments.get("view_name"),
+        arguments.get("entity"),
+        arguments.get("label"),
+        arguments.get("x"),
+        arguments.get("y"),
+        arguments.get("style"),
+    )
+
+
+@tool(
+    name="add_gtol",
+    description=(
+        "Add a geometric tolerance feature control frame via IModelDoc2::"
+        "InsertGtol + IGtol::SetFrameSymbols2/SetFrameValues2. symbol is one "
+        "of the 14 geometric characteristics: 'position', 'flatness', "
+        "'perpendicularity', 'parallelism', 'concentricity', 'straightness', "
+        "'circularity', 'cylindricity', 'profile_of_a_line', "
+        "'profile_of_a_surface', 'angularity', 'symmetry', "
+        "'circular_runout', 'total_runout'. datums is an ordered list of up "
+        "to 3 references (primary/secondary/tertiary), each a bare letter "
+        "string or {letter, modifier: 'MMC'|'LMC'|'RFS'} -- every letter "
+        "must already exist on the drawing (see list_datums/"
+        "add_datum_feature), and form tolerances (flatness, straightness, "
+        "circularity, cylindricity) must omit datums while orientation/"
+        "location/runout characteristics require at least one. "
+        "material_condition modifies the tolerance value itself. "
+        "projected_zone (IGtol::SetPTZHeight2) adds a projected-tolerance-"
+        "zone height. leader=False creates a freestanding GTol with no "
+        "selection. composite adds a second stacked frame row: "
+        "{tolerance, datums, material_condition}."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "view_name": {"type": "string", "description": "Drawing view the entity lives in."},
+            "entity": {**_GTOL_ENTITY_SCHEMA, "description": "Entity to attach the GTol to."},
+            "symbol": {"type": "string", "description": "One of the 14 geometric characteristics."},
+            "tolerance": {"type": "number", "description": "Tolerance zone value, caller's default unit."},
+            "datums": {
+                "type": "array", "items": _DATUM_REF_SCHEMA,
+                "description": "Up to 3 ordered datum references.",
+            },
+            "x": {"type": "number", "description": "Placement, caller's default unit."},
+            "y": {"type": "number", "description": "Placement, caller's default unit."},
+            "material_condition": {"type": "string", "description": "'MMC', 'LMC', or 'RFS'."},
+            "projected_zone": {"type": "number", "description": "Projected tolerance zone height."},
+            "leader": {"type": "boolean", "default": True, "description": "False for a freestanding GTol."},
+            "composite": {
+                "type": "object",
+                "properties": {
+                    "tolerance": {"type": "number"},
+                    "datums": {"type": "array", "items": _DATUM_REF_SCHEMA},
+                    "material_condition": {"type": "string"},
+                },
+                "description": "Optional second stacked frame row (composite feature control frame).",
+            },
+        },
+        "required": ["view_name", "entity", "symbol", "tolerance"],
+    },
+)
+def add_gtol(arguments: dict) -> Dict:
+    return sw_automation.add_gtol(
+        arguments.get("view_name"),
+        arguments.get("entity"),
+        arguments.get("symbol"),
+        arguments.get("tolerance"),
+        arguments.get("datums"),
+        arguments.get("x"),
+        arguments.get("y"),
+        arguments.get("material_condition"),
+        arguments.get("projected_zone"),
+        arguments.get("leader", True),
+        arguments.get("composite"),
+    )
+
+
+@tool(
+    name="add_datum_target",
+    description=(
+        "Add a datum target symbol via IModelDocExtension::"
+        "InsertDatumTargetSymbol3. label is the target's datum reference "
+        "text (e.g. 'a1'). area_type: 'point', 'circle', or 'rectangle'. "
+        "size is the target area diameter/width, caller's default unit."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "view_name": {"type": "string", "description": "Drawing view the entity lives in."},
+            "entity": {**_GTOL_ENTITY_SCHEMA, "description": "Entity (typically a face) to attach the target to."},
+            "label": {"type": "string", "description": "Datum target label, e.g. 'a1'."},
+            "area_type": {"type": "string", "description": "'point', 'circle', or 'rectangle'."},
+            "size": {"type": "number", "description": "Target area diameter/width, caller's default unit."},
+            "x": {"type": "number", "description": "Placement, caller's default unit."},
+            "y": {"type": "number", "description": "Placement, caller's default unit."},
+        },
+        "required": ["view_name", "entity", "label", "area_type", "size", "x", "y"],
+    },
+)
+def add_datum_target(arguments: dict) -> Dict:
+    return sw_automation.add_datum_target(
+        arguments.get("view_name"),
+        arguments.get("entity"),
+        arguments.get("label"),
+        arguments.get("area_type"),
+        arguments.get("size"),
         arguments.get("x"),
         arguments.get("y"),
     )

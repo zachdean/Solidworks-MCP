@@ -77,6 +77,10 @@ EXPECTED_TOOL_NAMES = {
     "add_property_note",
     "list_notes",
     "edit_note",
+    "list_datums",
+    "add_datum_feature",
+    "add_gtol",
+    "add_datum_target",
     # Sketch Tools
     "create_sketch",
     "create_sketch_on_face",

@@ -2199,6 +2199,12 @@ fetched official pages:**
   - `TolMC1 = "<MOD-LMC>"` — Least Material Condition, from the Modifying Symbols
     library (`MOD`)
   - `TolMC1`/datum suffix `<MOD-MMC>` — Maximum Material Condition
+  - `<MOD-RFS>` — Regardless of Feature Size, in the same `MOD` library (sw-1xx.4
+    addendum: not in either official worked example, but confirmed to exist alongside
+    `MOD-MMC`/`MOD-LMC` via a convergent search-engine summary of the `gtol.sym`
+    `LibraryName-SymbolName` convention -- **unverified against a live session**,
+    included here so `add_gtol`'s `material_condition="RFS"` has a real token to emit
+    rather than silently emitting nothing)
   - The full library set is `GTOL`/`IGTOL`/`GGTOL`, each holding 14 tolerance symbols
     (`ANGULAR, CIRC, CONC, CYL, FLAT, LPROF, PARA, PERP, POSI, SPROF, SRUN, STRAIGHT,
     SYMMETRY, TRUN`), plus `LONG`/`AXIS` only in `GGTOL`.
@@ -2484,6 +2490,187 @@ Set swDatumTargetSym = swModelDocExt.InsertDatumTargetSymbol3("a", "", "", 0, Fa
 - Despite the rich parameter list, a face **must still be pre-selected** — the
   parameters position/configure the symbol, they don't specify *what geometry* it
   attaches to.
+
+### GD&T/datum enumeration, GTol annotation access, and projected tolerance zone (sw-1xx.4)
+
+Fetched for `add_gtol`/`add_datum_feature`/`list_datums`'s requirements — `IGtol`
+positioning, datum-tag enumeration (for auto-lettering and datum-letter validation),
+and the projected-tolerance-zone modifier the task spec's `projected_zone` parameter
+implies but the GD&T section above (fetched for sw-1xx.4's own predecessor research
+pass) never covered. Every direct `help.solidworks.com` fetch attempted for this
+addendum 403'd, same as every other addendum in this file researched from this
+environment (see the dossier intro and the "Note enumeration" addendum above) — all
+records below are corroborated via convergent search-engine snippets of the official
+pages only, not a direct page read, and are marked `status: unverified` accordingly.
+
+#### IGtol::GetAnnotation (and the equivalent IDatumTag/DatumTargetSym pattern)
+
+- **Interface:** IGtol
+- **Method:** GetAnnotation
+- **Minimum SW version:** not stated in any accessible source
+
+**Signature:**
+
+```vb
+Function GetAnnotation() As System.Object   ' returns the IAnnotation wrapper
+```
+
+**Returns:** `System.Object` — an `IAnnotation`, the same wrapper type
+`INote::GetAnnotation` returns (documented in the "Note enumeration" addendum above) —
+confirmed by a search-snippet-quoted VBA fragment: `Set swAnno = swGtol.GetAnnotation()`
+... `swAnno.SetPosition(...)`. `IAnnotation::SetPosition2`'s own per-type origin table
+(see that record above) lists "Geometric Tolerances -- Upper-left corner of the
+symbol" and "Datum Feature Symbols -- Point where leader hits symbol", confirming both
+GTols and datum tags route position through this same `GetAnnotation()` ->
+`IAnnotation::SetPosition2` two-step, exactly like `INote` — **not** a direct
+`SetPosition2` call on the `IGtol`/`IDatumTag` object itself. `IDatumTargetSym`'s own
+`GetAnnotation` was not independently found, but by strong analogy with every other
+annotation-producing factory in this dossier (`InsertGtol`, `InsertDatumTag2`,
+`CreateText2`) it's assumed to follow the identical pattern -- unverified.
+
+**Source URL(s):**
+- https://help.solidworks.com/2017/English/api/sldworksapi/SOLIDWORKS.Interop.sldworks~SOLIDWORKS.Interop.sldworks.IGtol~GetAnnotation.html (found via search hit; page content itself 403'd on direct fetch, same as every other URL in this addendum)
+
+**status:** unverified (search-snippet corroboration only, as above)
+
+---
+
+#### IView::GetFirstDatumTag + IDatumTag::GetNext + IDatumTag::GetLabel
+
+- **Interface:** IView (`GetFirstDatumTag`) / IDatumTag (`GetNext`, `GetLabel`)
+- **Method:** GetFirstDatumTag + GetNext + GetLabel — the exact `list_datums`
+  enumeration analog of `IView::GetFirstNote` + `INote::GetNext` (documented in the
+  "Note enumeration" addendum above), confirmed to exist by name via convergent search
+  hits against official 2012/2015/2017/2020/2021/2023 "Set Text in Datum Tags and
+  GTols Example (VBA)" pages (`swView.GetFirstDatumTag`) and the `IDatumTag::GetLabel`
+  method page (present alongside `SetLabel` across the same version range).
+- **Minimum SW version:** not stated in any accessible source
+
+**Signature:**
+
+```vb
+Function GetFirstDatumTag() As System.Object   ' IView, returns first IDatumTag or Nothing
+Function GetNext() As System.Object            ' IDatumTag, returns next sibling or Nothing
+Function GetLabel() As System.String           ' IDatumTag, returns the current label text (e.g. "A")
+```
+
+**Returns:** `GetFirstDatumTag`/`GetNext` — an `IDatumTag`, or `Nothing`/`None` past the
+last datum tag in the chain (same `Do While Not ... Is Nothing` idiom as
+`GetFirstNote`/`GetNext`). `GetLabel` -- the label string previously set via
+`IDatumTag::SetLabel`, up to 2 characters.
+
+**Prior selection required:** None -- read directly off an already-held `IView`/
+`IDatumTag` reference, walked the same way `list_notes`/`_iter_document_views` already
+walks every view in the document (including each sheet's own pseudo-view via
+`IDrawingDoc::GetFirstView` + `IView::GetNextView`).
+
+**Source URL(s):**
+- https://help.solidworks.com/2021/English/api/sldworksapi/Set_Text_in_Datum_Tags_and_GTols_Example_VB.htm (found via search hit; page content 403'd on direct fetch)
+- https://help.solidworks.com/2023/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IDatumTag~GetLabel.html (found via search hit; page content 403'd on direct fetch)
+
+**status:** unverified (search-snippet corroboration only)
+
+**Gotchas:**
+- `list_datums` reuses this module's existing `_iter_document_views` walk
+  (`GetFirstView`/`GetNextView`, sw-1xx.3) and applies the identical
+  `GetFirstDatumTag`/`GetNext` chain-walk per view that `_iter_view_notes` already
+  applies for `GetFirstNote`/`GetNext` -- same iterator shape, different accessor
+  names.
+- A separate, NOT-used-by-`list_datums` pair, `IView::GetFirstGtol` +
+  `IGtol::GetNextGTOL`, also exists (confirmed via search hits against the
+  `GetNextGTOL Method (IGtol)` page across 2019-2023) -- not needed here since
+  `list_datums` only enumerates datum-*defining* tags (the letters `add_gtol`'s
+  `datums` validates against), not the GTols that *reference* those letters.
+
+---
+
+#### IGtol::SetPTZHeight2 (projected tolerance zone)
+
+- **Interface:** IGtol
+- **Method:** SetPTZHeight2 — the real mechanism behind the task spec's
+  `add_gtol(..., projected_zone=...)` parameter, which the GD&T section above (this
+  issue's own predecessor research pass) never covered; confirmed to exist, with this
+  exact call shape, via a search-snippet-quoted example: `status =
+  swGtol.SetPTZHeight2(1, 1, True, "50")`
+- **Minimum SW version:** not stated in any accessible source
+
+**Signature (reconstructed from the quoted call site plus this dossier's own
+`SetFrameValues2`-family naming/typing conventions -- parameter names inferred, not
+independently confirmed):**
+
+```vb
+Function SetPTZHeight2( _
+   ByVal FrameNumber As System.Short, _
+   ByVal ToleranceNumber As System.Short, _
+   ByVal Show As System.Boolean, _
+   ByVal Height As System.String _
+) As System.Boolean
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| FrameNumber | Short | n/a | Yes | Feature control frame index, same convention as `SetFrameSymbols2`/`SetFrameValues2` (`1` for the first frame) | |
+| ToleranceNumber | Short | n/a | Yes | Which tolerance within the frame (`1` for tolerance 1 -- this project never populates tolerance 2, see `SetFrameValues2`'s own record) | |
+| Show | Boolean | n/a | Yes | `True` to display the projected-tolerance-zone symbol (Ⓟ) and height | |
+| Height | String | n/a (display-unit text, same convention as `SetFrameValues2`'s `Tol1`) | Yes | Projected height value as display text, e.g. `"50"` | |
+
+**Returns:** `Boolean` — `True` if the height was successfully set.
+
+**Prior selection required:** None beyond holding a valid `IGtol` from `InsertGtol()`
+with frame 1 already populated via `SetFrameSymbols2`/`SetFrameValues2` -- same
+call-ordering assumption as `SetFrameValues2` itself (documented as required to follow
+`SetFrameSymbols2` for the same frame).
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IGtol~SetPTZHeight2.html (constructed per this dossier's own URL-naming convention from the confirmed method name; not independently opened -- no direct search-hit link surfaced a page title for this exact method, and every other URL in this addendum 403'd on direct fetch regardless)
+
+**status:** unverified (search-snippet corroboration only; signature reconstructed,
+not independently confirmed against a live session)
+
+**Gotchas:**
+- Like `SetFrameValues2`'s `Tol1`, `Height` is a **String**, not a `Double` in meters
+  -- this project's `add_gtol(..., projected_zone=<number, caller's default unit>)`
+  formats it as plain display text (via the same `_format_gtol_number` helper used for
+  `tolerance`) rather than routing it through `self._units.to_meters`, consistent with
+  the GD&T section's own flagged ambiguity that these frame-content strings are
+  document-display text, not COM `Double` length parameters.
+- A companion `GetPTZHeight2` accessor was also confirmed via search hits (a "Retrieve
+  the PTZ height using GetPTZHeight2" mention in a convergent snippet) but is out of
+  scope here -- `add_gtol` is a one-shot creation tool with no read-back requirement
+  for this specific value.
+
+---
+
+#### Composite (stacked) feature control frames via FrameNumber=2
+
+An official, dedicated worked example exists -- "Create GTol Composite Frame Example
+(VBA/VB.NET)", confirmed present across 2019-2024 doc versions via search hits -- but
+its page content itself 403'd on every attempted fetch, so its exact code could not be
+read directly. What's independently confirmed by the search results: `SetFrameSymbols2`/
+`SetFrameValues2`'s own `FrameNumber` parameter is explicitly the mechanism for
+targeting "frame 2" of a composite frame (a second, stacked row under the first, same
+`IGtol` object) -- corroborated by the surrounding `SetFrameSymbols2` documentation
+text itself, independent of the inaccessible dedicated example page.
+
+**What is NOT independently confirmed**: whether frame 2's `GCS` (geometric
+characteristic symbol) parameter should be passed as `""` (empty, visually inheriting
+frame 1's characteristic symbol as one merged box) or must repeat the same
+`<IGTOL-...>` token. The GD&T section's own `SetSymbolXml` (current/2022+ XML format)
+record states explicitly, for that *different* mechanism, that "Composite frames ...
+use an empty `<ToleranceSymbol></ToleranceSymbol>` on the second frame." This project's
+`add_gtol` `composite` parameter applies that same empty-symbol convention by analogy
+to the legacy `SetFrameSymbols2` mechanism (`GCS=""` for frame 2) -- **an inferred,
+not dossier-confirmed, choice**, flagged here rather than silently assumed correct.
+
+**Source URL(s):**
+- https://help.solidworks.com/2019/english/api/sldworksapi/create_gtol_composite_frame_example_vbnet.htm (found via search hit; page content 403'd on direct fetch)
+- https://help.solidworks.com/2022/English/api/sldworksapi/Create_Gtol_Composite_Frame_Example_VB.htm (found via search hit; page content 403'd on direct fetch)
+
+**status:** unverified (mechanism -- `FrameNumber=2` -- confirmed by search hits;
+frame-2 `GCS` value inferred by analogy to the unrelated XML mechanism's documented
+behavior, not independently confirmed for `SetFrameSymbols2` itself)
 
 ## Surface finish and weld symbols
 

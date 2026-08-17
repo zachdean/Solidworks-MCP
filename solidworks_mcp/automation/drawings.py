@@ -6,6 +6,7 @@ Access and operate on drawing (.slddrw) documents.
 
 import os
 import logging
+import string
 from contextlib import ExitStack
 from math import ceil, sqrt
 from typing import Any, Dict, List, Optional, Tuple
@@ -28,6 +29,7 @@ from ..constants_drawing import (
     SwCreateSectionViewAtOptions,
     SwCustomInfoType,
     SwCustomPropertyAddOption,
+    SwDatumDisplayType,
     SwDetCircleShowType,
     SwDetViewStyle,
     SwDimensionTextParts,
@@ -330,8 +332,12 @@ INSERT_MODEL_ANNOTATIONS4 = ComSignature("InsertModelAnnotations4", [
 # docs/api/03-annotations.md's `SelectByID2` Type-string table. `add_dimension`/
 # `add_ordinate_dimensions` accept entity references in exactly this shape (per
 # their own Requirements: "entities is a list of entity references (as returned
-# by list_view_entities)").
-_ENTITY_KIND_TYPE_STR = {"edge": "EDGE", "vertex": "VERTEX", "face": "FACE"}
+# by list_view_entities)"). `add_datum_feature`/`add_gtol` (sw-1xx.4) extend this
+# with `"dimension"` -> `"DIMENSION"` (`IDisplayDimension`), per their own
+# Requirements ("place a datum tag on a selected edge/face/dimension").
+_ENTITY_KIND_TYPE_STR = {
+    "edge": "EDGE", "vertex": "VERTEX", "face": "FACE", "dimension": "DIMENSION",
+}
 
 # `add_dimension`'s `dimension_type` -> which COM creation call to use, the
 # minimum entity count SolidWorks needs to unambiguously produce that dimension
@@ -357,6 +363,120 @@ _ENTITY_KIND_TYPE_STR = {"edge": "EDGE", "vertex": "VERTEX", "face": "FACE"}
 # reports the dimension's actual resulting type via `IDisplayDimension::Type2`
 # (also fetched sw-1xx.2) in `data["type_code"]`, so a caller isn't left
 # trusting `dim_type_enum` alone.
+# `add_gtol`'s `symbol` -> the `IGTOL` library's `<LibraryName-SymbolName>` token
+# (gtol.sym), per docs/api/03-annotations.md's GD&T section ("Symbol syntax is
+# `<LibraryName-SymbolName>`" / library set `GTOL`/`IGTOL`/`GGTOL`, 14 tolerance
+# symbols per library: `ANGULAR, CIRC, CONC, CYL, FLAT, LPROF, PARA, PERP, POSI,
+# SPROF, SRUN, STRAIGHT, SYMMETRY, TRUN`). This project always uses the `IGTOL`
+# (ISO) library, matching the dossier's own official worked example
+# (`<IGTOL-POSI>`) rather than the ASME `GTOL`/`GGTOL` variants.
+_GTOL_SYMBOLS = {
+    "straightness": "STRAIGHT",
+    "flatness": "FLAT",
+    "circularity": "CIRC",
+    "cylindricity": "CYL",
+    "profile_of_a_line": "LPROF",
+    "profile_of_a_surface": "SPROF",
+    "angularity": "ANGULAR",
+    "perpendicularity": "PERP",
+    "parallelism": "PARA",
+    "position": "POSI",
+    "concentricity": "CONC",
+    "symmetry": "SYMMETRY",
+    "circular_runout": "SRUN",
+    "total_runout": "TRUN",
+}
+
+# Form tolerances (per ASME Y14.5) apply to a single feature in isolation and
+# can never carry a datum reference -- `add_gtol` rejects `datums` for these.
+_GTOL_FORM_SYMBOLS = {"straightness", "flatness", "circularity", "cylindricity"}
+
+# Orientation/location/runout tolerances are meaningless without at least one
+# datum reference -- `add_gtol` requires a non-empty `datums` for these (the
+# task's own Acceptance Criteria calls this out explicitly for "position").
+# Profile-of-a-line/profile-of-a-surface are deliberately excluded: a profile
+# tolerance may legally control form alone, with no datum reference.
+_GTOL_DATUM_REQUIRED_SYMBOLS = {
+    "position", "perpendicularity", "parallelism", "angularity",
+    "concentricity", "symmetry", "circular_runout", "total_runout",
+}
+
+# `add_gtol`'s `material_condition` / per-datum modifier -> the `MOD` library's
+# token, per the GD&T section's `SetFrameSymbols2` Gotchas (`<MOD-MMC>`/
+# `<MOD-LMC>` confirmed from the official worked example; `<MOD-RFS>` per this
+# dossier's sw-1xx.4 addendum -- search-corroborated, not independently
+# verified against a live session).
+_GTOL_MATERIAL_CONDITIONS = {
+    "MMC": "<MOD-MMC>",
+    "LMC": "<MOD-LMC>",
+    "RFS": "<MOD-RFS>",
+}
+
+# Datum letters ASME Y14.5 reserves and never assigns (easily confused with
+# digits/other symbols) -- `add_datum_feature`'s auto-lettering skips these,
+# and rejects them if explicitly requested as `label`.
+_GTOL_RESERVED_DATUM_LETTERS = {"I", "O", "Q"}
+
+# `add_datum_feature`'s `style` -> `IDatumTag::SetDisplayStyle`'s `Style`
+# (`swDatumDisplayType_e`, per docs/api/03-annotations.md's Enums section).
+_DATUM_DISPLAY_STYLES = {
+    "default": int(SwDatumDisplayType.swDatumDisplayType_Default),
+    "square": int(SwDatumDisplayType.swDatumDisplayType_Square),
+    "round": int(SwDatumDisplayType.swDatumDisplayType_Round),
+}
+
+# `add_datum_target`'s `area_type` -> `InsertDatumTargetSymbol3`'s `AreaStyle`,
+# per that record's Parameters table ("0 = point, 1 = circle, 2 = rectangle").
+_DATUM_TARGET_AREA_TYPES = {"point": 0, "circle": 1, "rectangle": 2}
+
+# `IGtol::SetFrameSymbols2`'s positional signature, in the exact order
+# documented in docs/api/03-annotations.md: FrameNumber, GCS, TolDia1, TolMC1,
+# TolDia2, TolMC2, DatumMC1, DatumMC2, DatumMC3. 9 positional parameters --
+# ComSignature per this issue's working agreement (>6 params). `add_gtol`
+# never populates a second tolerance value or `DatumMC1..3` (the dossier's own
+# Gotchas flag the official worked example embedding MOD tokens inline in
+# `SetFrameValues2`'s Datum1/2/3 strings instead, treated here as the safe,
+# officially-demonstrated pattern) -- both always bind their own defaults.
+SET_FRAME_SYMBOLS2 = ComSignature("SetFrameSymbols2", [
+    Param("frame_number", REQUIRED, enum_to_int),
+    Param("gcs", REQUIRED),
+    Param("tol_dia1", False, to_bool),
+    Param("tol_mc1", ""),
+    Param("tol_dia2", False, to_bool),
+    Param("tol_mc2", ""),
+    Param("datum_mc1", ""),
+    Param("datum_mc2", ""),
+    Param("datum_mc3", ""),
+])
+
+# `IModelDocExtension::InsertDatumTargetSymbol3`'s positional signature, in the
+# exact order documented in docs/api/03-annotations.md: Datum1, Datum2, Datum3,
+# AreaStyle, AreaOutside, Value1, Value2, ValueStr1, ValueStr2, ArrowsSmart,
+# ArrowStyle, LeaderLineStyle, LeaderBent, ShowArea, ShowSymbol,
+# MoveableDatumStyle. 16 positional parameters -- ComSignature per this issue's
+# working agreement (>6 params). `add_datum_target` exposes only `label`/
+# `area_type`/`size`, so the leader/arrow/moveable-style cosmetics all bind
+# their own SolidWorks-sensible defaults (smart arrows on, solid leader, area
+# + symbol both shown).
+INSERT_DATUM_TARGET_SYMBOL3 = ComSignature("InsertDatumTargetSymbol3", [
+    Param("datum1", REQUIRED),
+    Param("datum2", ""),
+    Param("datum3", ""),
+    Param("area_style", REQUIRED, enum_to_int),
+    Param("area_outside", False, to_bool),
+    Param("value1", 0.0, to_meters),
+    Param("value2", 0.0, to_meters),
+    Param("value_str1", ""),
+    Param("value_str2", ""),
+    Param("arrows_smart", True, to_bool),
+    Param("arrow_style", 0, enum_to_int),
+    Param("leader_line_style", 0, enum_to_int),
+    Param("leader_bent", False, to_bool),
+    Param("show_area", True, to_bool),
+    Param("show_symbol", True, to_bool),
+    Param("moveable_datum_style", 0, enum_to_int),
+])
+
 _DIMENSION_TYPES = {
     "smart": {
         "method": "smart", "min_entities": 1,
@@ -4828,3 +4948,869 @@ class DrawingOperations:
                 data["y"] = y
 
         return self._result(True, f"Updated note {note_name!r}", SwErrors.swSuccess, data)
+
+    # ------------------------------------------------------------------
+    # GD&T: datum features, feature control frames, datum targets
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _format_gtol_number(value: float) -> str:
+        """Format a GTol frame numeric field (`SetFrameValues2`'s `Tol1`,
+        `add_datum_target`'s `size`, `SetPTZHeight2`'s `Height`) as the plain
+        display text those String-typed COM parameters want -- NOT run
+        through `self._units.to_meters`. Per docs/api/03-annotations.md's
+        GD&T section, `Tol1`/`Height` are document-display strings (the
+        official worked example passes plain `"0.4"`), not `Double` meters
+        values -- this project's own choice, flagged as an open ambiguity in
+        that record's Gotchas, is to format the caller's default-unit number
+        directly rather than silently converting it.
+
+        Integral values format without a trailing `.0` (`5`, not `5.0`);
+        everything else uses Python's plain `str()` (`"0.4"`, `"0.005"`) --
+        deterministic for this project's own construction, not a
+        SolidWorks-documented rounding/precision rule.
+        """
+        if isinstance(value, bool):
+            value = float(value)
+        if isinstance(value, int) or (isinstance(value, float) and value.is_integer()):
+            return str(int(value))
+        return str(value)
+
+    @staticmethod
+    def _next_datum_letter(existing_letters: set) -> Optional[str]:
+        """`add_datum_feature`'s auto-lettering: the first unused letter in
+        A-Z order, skipping `_GTOL_RESERVED_DATUM_LETTERS` (I, O, Q) --
+        `None` if every non-reserved letter is already taken."""
+        for letter in string.ascii_uppercase:
+            if letter in _GTOL_RESERVED_DATUM_LETTERS:
+                continue
+            if letter not in existing_letters:
+                return letter
+        return None
+
+    @staticmethod
+    def _parse_gtol_datum_entry(entry: Any, index: int) -> Tuple[Optional[Tuple[str, str]], Optional[str]]:
+        """One `add_gtol`/`composite` `datums[i]` entry -> `(letter,
+        modifier_token)` or an error message.
+
+        Accepts a bare string letter (`"A"`) or an object
+        `{"letter": "A", "modifier": "MMC"|"LMC"|"RFS"}`. The modifier token
+        is returned ready to embed inline in the datum reference string
+        (`"A<MOD-MMC>"`) -- per the GD&T section's own flagged Gotcha, the
+        official worked example embeds `<MOD-MMC>`/`<MOD-LMC>` inline in
+        `SetFrameValues2`'s Datum1/2/3 strings rather than via
+        `SetFrameSymbols2`'s separate `DatumMC1..3` parameters, and this
+        project follows that as the safe, officially-demonstrated pattern.
+        """
+        if isinstance(entry, str):
+            letter, modifier = entry, None
+        elif isinstance(entry, dict):
+            letter, modifier = entry.get("letter"), entry.get("modifier")
+        else:
+            return None, f"datums[{index}] must be a string or an object, got {type(entry).__name__}"
+
+        if not isinstance(letter, str) or not letter.strip():
+            return None, f"datums[{index}] needs a non-empty datum letter"
+        letter = letter.strip().upper()
+        if len(letter) > 2:
+            return None, f"datums[{index}] letter {letter!r} must be at most 2 characters"
+
+        token = ""
+        if modifier is not None:
+            mod_key = modifier.strip().upper() if isinstance(modifier, str) else ""
+            mod_token = _GTOL_MATERIAL_CONDITIONS.get(mod_key)
+            if mod_token is None:
+                return None, (
+                    f"datums[{index}] modifier {modifier!r} must be one of "
+                    f"{sorted(_GTOL_MATERIAL_CONDITIONS)!r}"
+                )
+            token = mod_token
+
+        return (letter, token), None
+
+    def _parse_gtol_datums(self, datums: Any, label: str) -> Tuple[Optional[List[Tuple[str, str]]], Optional[Dict]]:
+        """`datums`/`composite["datums"]` -> a list of at most 3 `(letter,
+        modifier_token)` pairs, or a `swInvalidInput` error dict. `label` is
+        the caller-facing name of the field being parsed (`"datums"` or
+        `"composite.datums"`), used in error messages."""
+        datums = datums or []
+        if not isinstance(datums, (list, tuple)):
+            return None, self._result(
+                False, f"{label} must be a list of datum references, got {type(datums).__name__}",
+                SwErrors.swInvalidInput, {label: datums},
+            )
+        if len(datums) > 3:
+            return None, self._result(
+                False, f"{label} supports at most 3 references (primary/secondary/tertiary), "
+                       f"got {len(datums)}",
+                SwErrors.swInvalidInput, {label: datums},
+            )
+
+        parsed = []
+        for i, entry in enumerate(datums):
+            one, err = self._parse_gtol_datum_entry(entry, i)
+            if err:
+                return None, self._result(
+                    False, f"{label}[{i}]: {err}", SwErrors.swInvalidInput, {label: datums},
+                )
+            parsed.append(one)
+        return parsed, None
+
+    def _validate_gtol_datum_requirement(self, symbol_key: str, datum_entries: List[Tuple[str, str]],
+                                          label: str) -> Optional[Dict]:
+        """Enforce ASME Y14.5's datum-reference rules for `symbol_key`: form
+        tolerances (`_GTOL_FORM_SYMBOLS`) must NOT reference a datum;
+        orientation/location/runout tolerances (`_GTOL_DATUM_REQUIRED_SYMBOLS`)
+        must reference at least one. `label` names the field in the error
+        message (`"symbol"` or `"composite"`)."""
+        if symbol_key in _GTOL_FORM_SYMBOLS and datum_entries:
+            return self._result(
+                False,
+                f"{symbol_key!r} is a form tolerance and cannot reference a datum "
+                f"({label})",
+                SwErrors.swInvalidInput, {"symbol": symbol_key, "datums": datum_entries},
+            )
+        if symbol_key in _GTOL_DATUM_REQUIRED_SYMBOLS and not datum_entries:
+            return self._result(
+                False,
+                f"{symbol_key!r} requires at least one datum reference ({label})",
+                SwErrors.swInvalidInput, {"symbol": symbol_key, "datums": datum_entries},
+            )
+        return None
+
+    def _build_gtol_row(self, gcs: str, tolerance: float, datum_entries: List[Tuple[str, str]],
+                         mc_key: Optional[str]) -> Dict[str, Any]:
+        """Build one `SetFrameSymbols2`/`SetFrameValues2` frame row's content
+        -- the "frame-content string" the task's Acceptance Criteria asks to
+        be asserted byte-for-byte. `datum_entries` (already parsed via
+        `_parse_gtol_datum_entry`) fill `datum1`/`datum2`/`datum3` in order;
+        `mc_key` (`"MMC"`/`"LMC"`/`"RFS"`/`None`) becomes `tol_mc1`.
+        """
+        datum_strs = ["", "", ""]
+        for i, (letter, token) in enumerate(datum_entries[:3]):
+            datum_strs[i] = f"{letter}{token}"
+        return {
+            "gcs": gcs, "tol_dia1": False,
+            "tol_mc1": _GTOL_MATERIAL_CONDITIONS.get(mc_key, "") if mc_key else "",
+            "tol_dia2": False, "tol_mc2": "",
+            "tol1": self._format_gtol_number(tolerance), "tol2": "",
+            "datum1": datum_strs[0], "datum2": datum_strs[1], "datum3": datum_strs[2],
+        }
+
+    def _apply_gtol_frame(self, gtol_obj: Any, frame_number: int, row: Dict[str, Any]) -> Optional[Dict]:
+        """`gtol_obj.SetFrameSymbols2(...)` then `.SetFrameValues2(...)` for
+        one frame row -- shared by `add_gtol`'s primary frame (1) and its
+        optional `composite` second row (2). Returns an error dict, or
+        `None` on success."""
+        try:
+            args = SET_FRAME_SYMBOLS2.bind(
+                units=self._units, frame_number=frame_number, gcs=row["gcs"],
+                tol_dia1=row["tol_dia1"], tol_mc1=row["tol_mc1"],
+                tol_dia2=row["tol_dia2"], tol_mc2=row["tol_mc2"],
+                datum_mc1="", datum_mc2="", datum_mc3="",
+            )
+            gtol_obj.SetFrameSymbols2(*args)
+        except Exception as e:
+            logger.error(f"add_gtol: SetFrameSymbols2(frame {frame_number}) error: {e}")
+            return self._result(False, f"Set frame {frame_number} symbols error: {e}", SwErrors.swFeatureError)
+
+        try:
+            status = gtol_obj.SetFrameValues2(
+                frame_number, row["tol1"], row["tol2"], row["datum1"], row["datum2"], row["datum3"],
+            )
+        except Exception as e:
+            logger.error(f"add_gtol: SetFrameValues2(frame {frame_number}) error: {e}")
+            return self._result(False, f"Set frame {frame_number} values error: {e}", SwErrors.swFeatureError)
+        if status is False:
+            return self._result(
+                False, f"Could not set frame {frame_number} values (SetFrameValues2 returned False)",
+                SwErrors.swFeatureError,
+            )
+        return None
+
+    def _iter_view_datum_tags(self, view: Any):
+        """Walk every datum tag attached to `view` via `IView::
+        GetFirstDatumTag` / `IDatumTag::GetNext` -- the datum-tag analog of
+        `_iter_view_notes`'s `GetFirstNote`/`GetNext` walk (sw-1xx.3), per
+        docs/api/03-annotations.md's sw-1xx.4 addendum."""
+        try:
+            tag = view.GetFirstDatumTag()
+        except Exception as e:
+            logger.warning(f"_iter_view_datum_tags: GetFirstDatumTag failed: {e}")
+            tag = None
+        while tag is not None:
+            yield tag
+            try:
+                nxt = tag.GetNext()
+            except Exception as e:
+                logger.warning(f"_iter_view_datum_tags: GetNext failed: {e}")
+                nxt = None
+            tag = nxt if nxt else None
+
+    def _describe_datum(self, tag: Any, view_name: Optional[str]) -> Dict:
+        """`list_datums`'s per-tag description: label, position, and the
+        view it was found on -- mirrors `_describe_note`'s shape."""
+        try:
+            annotation = tag.GetAnnotation()
+        except Exception:
+            annotation = None
+
+        label = self._read_prop(tag, "GetLabel")
+        name = self._read_prop(annotation, "GetName") if annotation is not None else None
+
+        x = y = None
+        position = self._read_prop(annotation, "GetPosition") if annotation is not None else None
+        if isinstance(position, (list, tuple)) and len(position) >= 2:
+            try:
+                x = self._units.from_meters(float(position[0]))
+                y = self._units.from_meters(float(position[1]))
+            except (TypeError, ValueError):
+                x = y = None
+
+        return {"label": label, "name": name, "x": x, "y": y, "view_name": view_name}
+
+    def list_datums(self, sheet_name: Optional[str] = None) -> Dict:
+        """
+        Enumerate existing datum tags -- label, position, view -- via
+        `IView::GetFirstDatumTag`/`IDatumTag::GetNext`, so `add_gtol`'s
+        datum-letter validation and `add_datum_feature`'s auto-lettering have
+        something to read.
+
+        Args:
+            sheet_name: Restrict to datum tags on this sheet's own real
+                views (and its sheet-level pseudo-view). Omitted: every
+                datum tag in the whole document.
+
+        Returns:
+            Result dict. `data["datums"]` is the per-tag list (see
+            `_describe_datum`); `data["letters"]` is the sorted, deduplicated
+            set of labels found, in uppercase -- what `add_gtol`/
+            `add_datum_feature` compare candidate datum letters against.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        allowed_view_names = None
+        if sheet_name:
+            sheet, err = self._resolve_sheet(doc, sheet_name)
+            if err:
+                return err
+            try:
+                views_raw = sheet.GetViews() or []
+            except Exception as e:
+                logger.error(f"list_datums(sheet_name={sheet_name!r}) error: {e}")
+                return self._result(False, f"List datums error: {e}", SwErrors.swUnknownError)
+            allowed_view_names = {
+                self._read_prop(v, "GetName2") for v in views_raw
+                if self._read_prop(v, "GetName2")
+            }
+
+        sheet_type_code = int(SwDrawingViewTypes.swDrawingSheet)
+        datums: List[Dict] = []
+        for view in self._iter_document_views(doc):
+            v_name = self._read_prop(view, "GetName2")
+            type_code = self._read_prop(view, "Type")
+            is_sheet_pseudo = (
+                isinstance(type_code, (int, float)) and not isinstance(type_code, bool)
+                and int(type_code) == sheet_type_code
+            )
+            include = True
+            if allowed_view_names is not None:
+                include = (v_name in allowed_view_names) or (is_sheet_pseudo and v_name == sheet_name)
+            if include:
+                datums.extend(self._describe_datum(t, v_name) for t in self._iter_view_datum_tags(view))
+
+        letters = sorted({
+            str(d["label"]).strip().upper() for d in datums
+            if d.get("label") and str(d["label"]).strip()
+        })
+        return self._result(
+            True, f"{len(datums)} datum tag(s)" + (f" on sheet {sheet_name!r}" if sheet_name else ""),
+            SwErrors.swSuccess, {"sheet_name": sheet_name, "datums": datums, "letters": letters},
+        )
+
+    def add_datum_feature(self, view_name: str, entity: Dict[str, Any], label: Optional[str] = None,
+                           x: float = None, y: float = None, style: Optional[str] = None) -> Dict:
+        """
+        Place a datum feature symbol (A, B, C...) on a selected edge/face/
+        dimension via `IModelDoc2::InsertDatumTag2`.
+
+        Args:
+            view_name: Drawing view the entity lives in.
+            entity: Entity reference in the shape `list_view_entities`
+                returns (`{"kind": "edge"/"face"/"dimension"/"vertex", "x",
+                "y", "z"}`).
+            label: Datum letter, up to 2 characters (e.g. `"A"`). Omitted:
+                auto-assigned as the next unused letter A-Z, reading existing
+                datum tags via `list_datums`, skipping the reserved letters
+                I, O, Q. Explicitly passing one of those three fails with
+                `swInvalidInput` rather than silently accepting it.
+            x, y: Datum symbol placement, caller's default unit -- converted
+                to meters and applied via `IAnnotation::SetPosition2` after
+                creation.
+            style: Optional display style -- `"default"`, `"square"`, or
+                `"round"` (`IDatumTag::SetDisplayStyle`'s `swDatumDisplayType_e`).
+                Omitted: SolidWorks' own document default, no extra call made.
+
+        Returns:
+            Result dict. `data["label"]` is the letter actually assigned
+            (whether given or auto-picked); `data["name"]` is
+            `IAnnotation::GetName`'s value, read back best-effort.
+        """
+        parsed_entity, entity_err = _parse_entity_ref(entity)
+        if entity_err:
+            return self._result(
+                False, f"entity: {entity_err}", SwErrors.swInvalidInput, {"entity": entity},
+            )
+
+        if x is None or y is None:
+            return self._result(
+                False, "x/y are required", SwErrors.swInvalidInput, {"x": x, "y": y},
+            )
+        if isinstance(x, bool) or isinstance(y, bool) \
+                or not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+            return self._result(
+                False, f"x/y must be numbers, got x={x!r}, y={y!r}", SwErrors.swInvalidInput,
+            )
+
+        style_key = None
+        style_enum = None
+        if style is not None:
+            style_key = style.strip().lower() if isinstance(style, str) else ""
+            style_enum = _DATUM_DISPLAY_STYLES.get(style_key)
+            if style_enum is None:
+                return self._result(
+                    False,
+                    f"Unknown style {style!r}; expected one of {sorted(_DATUM_DISPLAY_STYLES)!r}",
+                    SwErrors.swInvalidInput, {"style": style},
+                )
+
+        label_final = None
+        if label is not None:
+            # Pure input-shape validation on an explicit `label` never needs
+            # `list_datums`'s document walk -- validated (and, on failure,
+            # rejected) before any COM call at all, same ordering
+            # `_validate_note_geometry` uses. Only the omitted-`label`
+            # auto-lettering path actually needs existing drawing state.
+            if not isinstance(label, str) or not label.strip():
+                return self._result(
+                    False, f"label must be a non-empty string, got {label!r}",
+                    SwErrors.swInvalidInput, {"label": label},
+                )
+            label_final = label.strip().upper()
+            if len(label_final) > 2:
+                return self._result(
+                    False, f"label {label_final!r} must be at most 2 characters",
+                    SwErrors.swInvalidInput, {"label": label_final},
+                )
+            if label_final in _GTOL_RESERVED_DATUM_LETTERS:
+                return self._result(
+                    False,
+                    f"{label_final!r} is a reserved datum letter (I, O, Q are never assigned)",
+                    SwErrors.swInvalidInput, {"label": label_final},
+                )
+        else:
+            existing = self.list_datums()
+            if not existing["success"]:
+                return existing
+            existing_letters = set(existing["data"]["letters"])
+            label_final = self._next_datum_letter(existing_letters)
+            if label_final is None:
+                return self._result(
+                    False, "No unused datum letters remain (A-Z minus reserved I/O/Q exhausted)",
+                    SwErrors.swFeatureError, {"existing_datums": sorted(existing_letters)},
+                )
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        activated = self.select_view_by_name(view_name)
+        if not activated["success"]:
+            return activated
+
+        type_str, ex, ey, ez = parsed_entity
+        data = {
+            "view_name": view_name, "label": label_final, "x": x, "y": y, "style": style_key,
+        }
+
+        with self.selected("", type_str, ex, ey, ez) as sel:
+            if not sel["success"]:
+                return sel
+
+            try:
+                tag = doc.InsertDatumTag2()
+            except Exception as e:
+                logger.error(f"add_datum_feature({view_name!r}) InsertDatumTag2 error: {e}")
+                return self._result(False, f"Insert datum tag error: {e}", SwErrors.swFeatureError, data)
+            if tag is None:
+                return self._result(
+                    False, "InsertDatumTag2 returned nothing -- datum tag not created",
+                    SwErrors.swFeatureError, data,
+                )
+
+            try:
+                labeled = tag.SetLabel(label_final)
+            except Exception as e:
+                logger.error(f"add_datum_feature({view_name!r}) SetLabel error: {e}")
+                return self._result(False, f"Set datum label error: {e}", SwErrors.swFeatureError, data)
+            if labeled is False:
+                return self._result(
+                    False, f"Could not set datum label {label_final!r} (SetLabel returned False)",
+                    SwErrors.swFeatureError, data,
+                )
+
+            if style_enum is not None:
+                try:
+                    styled = tag.SetDisplayStyle(False, int(style_enum))
+                except Exception as e:
+                    logger.error(f"add_datum_feature({view_name!r}) SetDisplayStyle error: {e}")
+                    return self._result(
+                        False, f"Set datum display style error: {e}", SwErrors.swFeatureError, data,
+                    )
+                if styled is False:
+                    return self._result(
+                        False, f"Could not set datum display style {style_key!r} "
+                               "(SetDisplayStyle returned False)",
+                        SwErrors.swFeatureError, data,
+                    )
+
+            try:
+                annotation = tag.GetAnnotation()
+            except Exception as e:
+                logger.error(f"add_datum_feature({view_name!r}) GetAnnotation error: {e}")
+                return self._result(False, f"Get datum annotation error: {e}", SwErrors.swFeatureError, data)
+            if annotation is None:
+                return self._result(
+                    False, "Datum tag has no IAnnotation wrapper (GetAnnotation returned nothing) "
+                    "-- cannot set position", SwErrors.swFeatureError, data,
+                )
+
+            try:
+                x_m, y_m = self._units.to_meters(x), self._units.to_meters(y)
+                positioned = annotation.SetPosition2(x_m, y_m, 0.0)
+            except Exception as e:
+                logger.error(f"add_datum_feature({view_name!r}) SetPosition2 error: {e}")
+                return self._result(False, f"Set position error: {e}", SwErrors.swFeatureError, data)
+            if positioned is False:
+                return self._result(
+                    False, "Could not set datum tag position (SetPosition2 returned False)",
+                    SwErrors.swFeatureError, data,
+                )
+
+            data["name"] = self._read_prop(annotation, "GetName")
+
+        return self._result(True, f"Added datum feature {label_final!r}", SwErrors.swSuccess, data)
+
+    def add_gtol(self, view_name: str, entity: Dict[str, Any], symbol: str, tolerance: float,
+                 datums: Optional[List[Any]] = None, x: Optional[float] = None,
+                 y: Optional[float] = None, material_condition: Optional[str] = None,
+                 projected_zone: Optional[float] = None, leader: bool = True,
+                 composite: Optional[Dict[str, Any]] = None) -> Dict:
+        """
+        Add a geometric tolerance feature control frame via `IModelDoc2::
+        InsertGtol` + `IGtol::SetFrameSymbols2`/`SetFrameValues2` (the
+        SOLIDWORKS-pre-2022 "legacy" frame-content mechanism -- see
+        docs/api/03-annotations.md's GD&T section for why: it's the only
+        mechanism with a full official worked example, and this project's
+        fake-COM test harness has no live document to probe which format
+        `InsertGtol()` actually produces).
+
+        Args:
+            view_name: Drawing view the entity lives in.
+            entity: Entity reference in the shape `list_view_entities`
+                returns (`{"kind": "edge"/"face"/"dimension"/"vertex", "x",
+                "y", "z"}`).
+            symbol: One of the 14 geometric characteristics -- see
+                `_GTOL_SYMBOLS` for the exact keys (`"position"`,
+                `"flatness"`, `"perpendicularity"`, `"parallelism"`,
+                `"concentricity"`, `"straightness"`, `"circularity"`,
+                `"cylindricity"`, `"profile_of_a_line"`,
+                `"profile_of_a_surface"`, `"angularity"`, `"symmetry"`,
+                `"circular_runout"`, `"total_runout"`).
+            tolerance: Tolerance zone value, a positive number in the
+                caller's default unit -- formatted as GTol frame display text
+                via `_format_gtol_number` (NOT converted to meters; see that
+                method's own docstring).
+            datums: Ordered list of up to 3 datum references (primary,
+                secondary, tertiary), each either a bare letter string
+                (`"A"`) or `{"letter": "A", "modifier": "MMC"|"LMC"|"RFS"}`.
+                Form tolerances (`_GTOL_FORM_SYMBOLS`) must omit this;
+                orientation/location/runout characteristics
+                (`_GTOL_DATUM_REQUIRED_SYMBOLS`) require at least one entry.
+                Every letter given must already exist on the drawing (see
+                `list_datums`) -- validated before any COM call.
+            x, y: Optional GTol placement, caller's default unit --
+                converted to meters and applied via `IAnnotation::
+                SetPosition2` after creation. Both-or-neither.
+            material_condition: Optional `"MMC"`/`"LMC"`/`"RFS"` modifier on
+                the tolerance value itself (`SetFrameSymbols2`'s `TolMC1`) --
+                distinct from each datum's own per-reference modifier.
+            projected_zone: Optional projected-tolerance-zone height, a
+                positive number in the caller's default unit -- applied via
+                `IGtol::SetPTZHeight2` (sw-1xx.4 dossier addendum) after the
+                frame content is set.
+            leader: `True` (default) selects `entity` before `InsertGtol()`
+                so the GTol gets a leader attached to it, per the dossier's
+                own documented `InsertGtol` selection-driven-leader behavior.
+                `False` skips selection entirely, producing a freestanding
+                GTol at the document origin (SolidWorks' own documented
+                fallback for "no selection").
+            composite: Optional second stacked frame row --
+                `{"tolerance": ..., "datums": [...], "material_condition": ...}`
+                (same shapes as the top-level params) -- written to frame 2
+                of the same `IGtol` object via a second `SetFrameSymbols2`/
+                `SetFrameValues2` call pair with an empty `gcs` (inheriting
+                `symbol`'s characteristic visually, per the dossier
+                addendum's documented convention for the analogous XML
+                mechanism, applied here by analogy).
+
+        Returns:
+            Result dict. `data["frame"]`/`data["composite_frame"]` are the
+            exact frame-content strings built and sent to COM (`gcs`,
+            `tol_mc1`, `tol1`, `datum1`/`datum2`/`datum3`) -- what the task's
+            Acceptance Criteria's byte-for-byte assertions check.
+        """
+        symbol_key = (symbol or "").strip().lower() if isinstance(symbol, str) else ""
+        gtol_token = _GTOL_SYMBOLS.get(symbol_key)
+        if gtol_token is None:
+            return self._result(
+                False, f"Unknown GD&T symbol {symbol!r}; expected one of {sorted(_GTOL_SYMBOLS)!r}",
+                SwErrors.swInvalidInput, {"symbol": symbol},
+            )
+
+        if isinstance(tolerance, bool) or not isinstance(tolerance, (int, float)) or tolerance <= 0:
+            return self._result(
+                False, f"tolerance must be a positive number, got {tolerance!r}",
+                SwErrors.swInvalidInput, {"symbol": symbol_key, "tolerance": tolerance},
+            )
+
+        mc_key = None
+        if material_condition is not None:
+            mc_key = material_condition.strip().upper() if isinstance(material_condition, str) else ""
+            if mc_key not in _GTOL_MATERIAL_CONDITIONS:
+                return self._result(
+                    False,
+                    f"material_condition {material_condition!r} must be one of "
+                    f"{sorted(_GTOL_MATERIAL_CONDITIONS)!r}",
+                    SwErrors.swInvalidInput, {"material_condition": material_condition},
+                )
+
+        parsed_entity, entity_err = _parse_entity_ref(entity)
+        if entity_err:
+            return self._result(
+                False, f"entity: {entity_err}", SwErrors.swInvalidInput, {"entity": entity},
+            )
+
+        datum_entries, err = self._parse_gtol_datums(datums, "datums")
+        if err:
+            return err
+        req_err = self._validate_gtol_datum_requirement(symbol_key, datum_entries, "datums")
+        if req_err:
+            return req_err
+
+        composite_tol = None
+        composite_entries: List[Tuple[str, str]] = []
+        composite_mc_key = None
+        if composite is not None:
+            if not isinstance(composite, dict):
+                return self._result(
+                    False, f"composite must be an object, got {type(composite).__name__}",
+                    SwErrors.swInvalidInput, {"composite": composite},
+                )
+            composite_tol = composite.get("tolerance")
+            if isinstance(composite_tol, bool) or not isinstance(composite_tol, (int, float)) \
+                    or composite_tol <= 0:
+                return self._result(
+                    False, f"composite.tolerance must be a positive number, got {composite_tol!r}",
+                    SwErrors.swInvalidInput, {"composite": composite},
+                )
+            composite_entries, err = self._parse_gtol_datums(composite.get("datums"), "composite.datums")
+            if err:
+                return err
+            req_err = self._validate_gtol_datum_requirement(symbol_key, composite_entries, "composite")
+            if req_err:
+                return req_err
+
+            composite_mc = composite.get("material_condition")
+            if composite_mc is not None:
+                composite_mc_key = composite_mc.strip().upper() if isinstance(composite_mc, str) else ""
+                if composite_mc_key not in _GTOL_MATERIAL_CONDITIONS:
+                    return self._result(
+                        False,
+                        f"composite.material_condition {composite_mc!r} must be one of "
+                        f"{sorted(_GTOL_MATERIAL_CONDITIONS)!r}",
+                        SwErrors.swInvalidInput, {"composite": composite},
+                    )
+
+        if (x is None) != (y is None):
+            return self._result(
+                False, "x/y must both be given or both omitted", SwErrors.swInvalidInput,
+                {"x": x, "y": y},
+            )
+        if x is not None and (
+            isinstance(x, bool) or isinstance(y, bool)
+            or not isinstance(x, (int, float)) or not isinstance(y, (int, float))
+        ):
+            return self._result(
+                False, f"x/y must be numbers, got x={x!r}, y={y!r}", SwErrors.swInvalidInput,
+            )
+
+        if projected_zone is not None and (
+            isinstance(projected_zone, bool) or not isinstance(projected_zone, (int, float))
+            or projected_zone <= 0
+        ):
+            return self._result(
+                False, f"projected_zone must be a positive number, got {projected_zone!r}",
+                SwErrors.swInvalidInput, {"projected_zone": projected_zone},
+            )
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        activated = self.select_view_by_name(view_name)
+        if not activated["success"]:
+            return activated
+
+        existing = self.list_datums()
+        if not existing["success"]:
+            return existing
+        existing_letters = set(existing["data"]["letters"])
+
+        requested_letters = {letter for letter, _ in datum_entries + composite_entries}
+        missing = sorted(requested_letters - existing_letters)
+        if missing:
+            return self._result(
+                False,
+                f"Datum letter(s) {missing!r} not found on the drawing -- create them first "
+                f"via add_datum_feature (existing: {sorted(existing_letters)!r})",
+                SwErrors.swInvalidInput,
+                {"missing_datums": missing, "existing_datums": sorted(existing_letters)},
+            )
+
+        row1 = self._build_gtol_row(f"<IGTOL-{gtol_token}>", tolerance, datum_entries, mc_key)
+        row2 = None
+        if composite is not None:
+            row2 = self._build_gtol_row("", composite_tol, composite_entries, composite_mc_key)
+
+        type_str, ex, ey, ez = parsed_entity
+        data = {
+            "view_name": view_name, "symbol": symbol_key, "tolerance": tolerance,
+            "material_condition": mc_key, "leader": bool(leader),
+            "frame": row1, "composite_frame": row2,
+        }
+
+        def _create_gtol():
+            try:
+                gtol_obj = doc.InsertGtol()
+            except Exception as e:
+                logger.error(f"add_gtol({view_name!r}) InsertGtol error: {e}")
+                return None, self._result(False, f"Insert GTol error: {e}", SwErrors.swFeatureError, data)
+            if gtol_obj is None:
+                return None, self._result(
+                    False, "InsertGtol returned nothing -- GTol not created",
+                    SwErrors.swFeatureError, data,
+                )
+            return gtol_obj, None
+
+        if leader:
+            with self.selected("", type_str, ex, ey, ez) as sel:
+                if not sel["success"]:
+                    return sel
+                gtol_obj, create_err = _create_gtol()
+                if create_err:
+                    return create_err
+        else:
+            self.clear_selection()
+            gtol_obj, create_err = _create_gtol()
+            if create_err:
+                return create_err
+
+        frame_err = self._apply_gtol_frame(gtol_obj, 1, row1)
+        if frame_err:
+            frame_err["data"] = {**data, **frame_err.get("data", {})}
+            return frame_err
+        if row2 is not None:
+            frame_err = self._apply_gtol_frame(gtol_obj, 2, row2)
+            if frame_err:
+                frame_err["data"] = {**data, **frame_err.get("data", {})}
+                return frame_err
+
+        if projected_zone is not None:
+            try:
+                ptz_ok = gtol_obj.SetPTZHeight2(1, 1, True, self._format_gtol_number(projected_zone))
+            except Exception as e:
+                logger.error(f"add_gtol({view_name!r}) SetPTZHeight2 error: {e}")
+                return self._result(
+                    False, f"Set projected tolerance zone error: {e}", SwErrors.swFeatureError, data,
+                )
+            if ptz_ok is False:
+                return self._result(
+                    False, "Could not set projected tolerance zone (SetPTZHeight2 returned False)",
+                    SwErrors.swFeatureError, data,
+                )
+
+        try:
+            annotation = gtol_obj.GetAnnotation()
+        except Exception as e:
+            logger.warning(f"add_gtol({view_name!r}) GetAnnotation error: {e}")
+            annotation = None
+
+        if x is not None:
+            if annotation is None:
+                return self._result(
+                    False, "GTol has no IAnnotation wrapper (GetAnnotation returned nothing) "
+                    "-- cannot set position", SwErrors.swFeatureError, data,
+                )
+            try:
+                x_m, y_m = self._units.to_meters(x), self._units.to_meters(y)
+                positioned = annotation.SetPosition2(x_m, y_m, 0.0)
+            except Exception as e:
+                logger.error(f"add_gtol({view_name!r}) SetPosition2 error: {e}")
+                return self._result(False, f"Set position error: {e}", SwErrors.swFeatureError, data)
+            if positioned is False:
+                return self._result(
+                    False, "Could not set GTol position (SetPosition2 returned False)",
+                    SwErrors.swFeatureError, data,
+                )
+
+        data["name"] = self._read_prop(annotation, "GetName") if annotation is not None else None
+        data["x"] = x
+        data["y"] = y
+        return self._result(
+            True, f"Added {symbol_key} GTol" + (f" {data['name']!r}" if data["name"] else ""),
+            SwErrors.swSuccess, data,
+        )
+
+    def add_datum_target(self, view_name: str, entity: Dict[str, Any], label: str, area_type: str,
+                          size: float, x: float, y: float) -> Dict:
+        """
+        Add a datum target symbol via `IModelDocExtension::
+        InsertDatumTargetSymbol3`.
+
+        Args:
+            view_name: Drawing view the entity lives in.
+            entity: Entity reference in the shape `list_view_entities`
+                returns -- a face is required per the dossier's own official
+                worked example, but any `_ENTITY_KIND_TYPE_STR` kind is
+                accepted here (SolidWorks itself rejects an unsupported
+                selection type at the COM call).
+            label: Datum target label (`InsertDatumTargetSymbol3`'s
+                `Datum1`), e.g. `"a1"`.
+            area_type: `"point"`, `"circle"`, or `"rectangle"`
+                (`AreaStyle`).
+            size: Target area diameter/width, a non-negative number in the
+                caller's default unit -- converted to meters for `Value1`
+                and formatted as display text for `ValueStr1` (via
+                `_format_gtol_number`).
+            x, y: Placement, caller's default unit -- converted to meters
+                and applied via `IAnnotation::SetPosition2` after creation.
+
+        Returns:
+            Result dict. `data["name"]` is read back best-effort via
+            `IAnnotation::GetName` (see the sw-1xx.4 dossier addendum's
+            `IGtol::GetAnnotation` record -- `IDatumTargetSym` is assumed to
+            follow the same pattern by analogy, unverified).
+        """
+        area_key = (area_type or "").strip().lower() if isinstance(area_type, str) else ""
+        area_style = _DATUM_TARGET_AREA_TYPES.get(area_key)
+        if area_style is None:
+            return self._result(
+                False,
+                f"Unknown area_type {area_type!r}; expected one of "
+                f"{sorted(_DATUM_TARGET_AREA_TYPES)!r}",
+                SwErrors.swInvalidInput, {"area_type": area_type},
+            )
+
+        if not isinstance(label, str) or not label.strip():
+            return self._result(
+                False, f"label must be a non-empty string, got {label!r}",
+                SwErrors.swInvalidInput, {"label": label},
+            )
+
+        parsed_entity, entity_err = _parse_entity_ref(entity)
+        if entity_err:
+            return self._result(
+                False, f"entity: {entity_err}", SwErrors.swInvalidInput, {"entity": entity},
+            )
+
+        if isinstance(size, bool) or not isinstance(size, (int, float)) or size < 0:
+            return self._result(
+                False, f"size must be a non-negative number, got {size!r}",
+                SwErrors.swInvalidInput, {"size": size},
+            )
+        if isinstance(x, bool) or isinstance(y, bool) \
+                or not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+            return self._result(
+                False, f"x/y must be numbers, got x={x!r}, y={y!r}", SwErrors.swInvalidInput,
+            )
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        activated = self.select_view_by_name(view_name)
+        if not activated["success"]:
+            return activated
+
+        type_str, ex, ey, ez = parsed_entity
+        data = {
+            "view_name": view_name, "label": label, "area_type": area_key, "size": size,
+            "x": x, "y": y,
+        }
+
+        with self.selected("", type_str, ex, ey, ez) as sel:
+            if not sel["success"]:
+                return sel
+
+            try:
+                args = INSERT_DATUM_TARGET_SYMBOL3.bind(
+                    units=self._units, datum1=label, datum2="", datum3="",
+                    area_style=area_style, area_outside=False,
+                    value1=size, value2=0.0,
+                    value_str1=self._format_gtol_number(size), value_str2="",
+                    arrows_smart=True, arrow_style=0, leader_line_style=0,
+                    leader_bent=False, show_area=True, show_symbol=True,
+                    moveable_datum_style=0,
+                )
+                created = doc.Extension.InsertDatumTargetSymbol3(*args)
+            except Exception as e:
+                logger.error(f"add_datum_target({view_name!r}) InsertDatumTargetSymbol3 error: {e}")
+                return self._result(
+                    False, f"Insert datum target error: {e}", SwErrors.swFeatureError, data,
+                )
+            if created is None:
+                return self._result(
+                    False, "InsertDatumTargetSymbol3 returned nothing -- datum target not created",
+                    SwErrors.swFeatureError, data,
+                )
+
+            try:
+                annotation = created.GetAnnotation()
+            except Exception as e:
+                logger.warning(f"add_datum_target({view_name!r}) GetAnnotation error: {e}")
+                annotation = None
+
+            if annotation is None:
+                return self._result(
+                    False, "Datum target has no IAnnotation wrapper (GetAnnotation returned nothing) "
+                    "-- cannot set position", SwErrors.swFeatureError, data,
+                )
+
+            try:
+                x_m, y_m = self._units.to_meters(x), self._units.to_meters(y)
+                positioned = annotation.SetPosition2(x_m, y_m, 0.0)
+            except Exception as e:
+                logger.error(f"add_datum_target({view_name!r}) SetPosition2 error: {e}")
+                return self._result(False, f"Set position error: {e}", SwErrors.swFeatureError, data)
+            if positioned is False:
+                return self._result(
+                    False, "Could not set datum target position (SetPosition2 returned False)",
+                    SwErrors.swFeatureError, data,
+                )
+
+            data["name"] = self._read_prop(annotation, "GetName")
+
+        return self._result(True, f"Added datum target {label!r}", SwErrors.swSuccess, data)
