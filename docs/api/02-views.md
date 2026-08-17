@@ -2564,3 +2564,172 @@ compiled-type-library transcription. Treat this specific numeric value with more
 caution than this dossier's other enums; if `SetUserPreferenceToggle(86, ...)`
 is ever observed to toggle the wrong system option against a live SolidWorks
 session, this is the record to revisit first.
+
+## View layout, alignment locking, and deletion (added for sw-8ww.6)
+
+Backing `move_view`/`align_view`/`delete_view`/`auto_arrange_views` — the "make a
+generated pack presentable" tool set. `help.solidworks.com` 403'd on every direct
+fetch attempted for these records (the same standing WAF block noted throughout this
+dossier, including with a browser `User-Agent`, which unblocked several 02-views.md
+records during the original research pass but not these); each is sourced from a
+type-library mirror plus an independent search-engine synthesis (which itself reads
+official help pages at fetch time even though this tool's own direct fetch is
+blocked), the same corroboration tier already used here for `swDetViewStyle_e` and
+`SwUserPreferenceToggle`.
+
+### IView::GetOutline
+
+- **Interface:** IView
+- **Method:** GetOutline
+- **Minimum SW version:** unverified — no accessible page states it.
+
+**Signature:**
+
+```vb
+Function GetOutline() As System.Object   ' cast to a 4-element Double array
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| *(none)* | — | — | — | No parameters | — |
+
+**Returns:** `System.Object`, cast to a 4-element `Double` array: `[Xmin, Ymin, Xmax,
+Ymax]` — the view's bounding box on the drawing sheet, in meters (sheet space, same
+convention as `IView::Position`).
+
+**Prior selection required:** None — direct method call on an `IView` reference.
+
+**Source URL(s):**
+- Search-engine synthesis of the official 2012–2023 `help.solidworks.com` `IView::GetOutline` pages (direct fetch 403'd for all of them; the synthesis independently states "gets the bounding box for a view ... in meters on the drawing page" and the `[Xmin, Ymin, Xmax, Ymax]` return shape)
+- https://www.rimptec.com/rsolidworks/net/lehal/sw/IView.html (type-library mirror: confirms a no-argument `getOutline() -> Object` member, plus a typed `iGetOutline()` sibling — the same `Get*`/`IGet*` dual-form pattern as `GetBaseView`/`IGetBaseView` elsewhere in this dossier)
+
+**status:** unverified against a primary help.solidworks.com page body — same
+sourcing tier as `swDetViewStyle_e`/`SwUserPreferenceToggle` above.
+
+**Gotchas:**
+- **Units are meters, sheet space** — same convention as `IView::Position`, not
+  model space.
+- `auto_arrange_views` (this issue) treats this as the view's placement footprint:
+  it never tries to reposition a view whose bounding box it can't read, skipping
+  such a view rather than failing the whole call (defensive, since no source
+  documents this method's failure return).
+- A typed `IGetOutline` sibling exists per the type-library mirror (mirroring
+  `GetBaseView`/`IGetBaseView`); this project calls the `Object`-returning
+  `GetOutline` form, consistent with every other `Get*`/`IGet*` pair in this
+  dossier (`ReferencedDocument`, `GetBaseView`, ...).
+
+### IView::RemoveAlignment / IView::UseDefaultAlignment
+
+- **Interface:** IView
+- **Method:** RemoveAlignment (breaks an established alignment) /
+  UseDefaultAlignment (resets to SolidWorks' default alignment) — both referenced by
+  name only, without a signature, in this dossier's own `IView::GetAlignment` Gotchas
+  above ("There is no `SetAlignment`... cleared via `IView::RemoveAlignment`, and
+  reset to default via `IView::UseDefaultAlignment`"); this record supplies the
+  signature `align_view`'s `alignment="break"`/`"default"` cases need to call them.
+- **Minimum SW version:** unverified — no accessible page states it for either.
+
+**Signature:**
+
+```vb
+Sub RemoveAlignment()
+Sub UseDefaultAlignment()
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| *(none)* | — | — | — | No parameters — both are zero-argument `Sub`s | — |
+
+**Returns:** None (`Sub`) for both — no success/failure indicator. `align_view`
+therefore reports success once the call returns without raising, same as
+`ISldWorks::SetUserPreferenceToggle`'s bare-`Sub` handling elsewhere in this dossier.
+
+**Prior selection required:** None — direct method call on the `IView` reference
+being un-aligned/reset, same calling convention as `AlignWithView`.
+
+**Source URL(s):**
+- https://www.rimptec.com/rsolidworks/net/lehal/sw/IView.html (type-library mirror: confirms both as no-argument, `void`-returning members — `removeAlignment()` / `useDefaultAlignment()` in the mirror's Java-derived rendering)
+
+**status:** unverified against a primary help.solidworks.com page body — single-source
+(type-library mirror only); treat with the same caution as this dossier's other
+single-source records until corroborated against a live SolidWorks session.
+
+**Gotchas:**
+- **No boolean return, unlike `AlignWithView`** — a caller that needs certainty the
+  break/reset applied must round-trip through `IView::GetAlignment` afterward.
+- `align_view`'s `alignment="none"` input calls `RemoveAlignment` (not
+  `AlignWithView(swNoViewAlignment, ...)`) — the dedicated method this dossier's own
+  `GetAlignment` Gotchas point to, rather than treating `swNoViewAlignment` as just
+  another `AlignWithView` input.
+
+#### swViewAlignment_e (added for sw-8ww.6)
+
+Returned by `IView::GetAlignment` (see that record above); indicates whether a view
+is itself aligned to a base/parent view and/or has other views aligned to it as
+children. A different enum from `swAlignViewTypes_e` (`AlignWithView`'s input type) —
+see `GetAlignment`'s own Gotchas for why these two are not interchangeable.
+
+| Value | Number | Meaning |
+| --- | --- | --- |
+| swViewAlignNone | 0 | Not aligned to a parent; no children aligned to it |
+| swViewAlignedChildren | 1 | Other views are aligned to this view (this view has aligned children) |
+| swViewAligned | 2 | This view is itself aligned to a base/parent view |
+| swViewAlignBoth | 3 | Both of the above at once (`swViewAlignedChildren \| swViewAligned`) |
+
+Note: member names/count corroborated by the type-library mirror below; numeric
+values corroborated by an independent search-engine synthesis of the (403-blocked)
+official `swViewAlignment_e` enumeration page, in the same order the mirror lists
+the members — consistent with a `0,1,2,3` sequential (not bitmask-power-of-2) enum.
+`move_view`'s alignment-lock check tests bit `2` (`value & int(swViewAligned)`),
+which correctly matches both `swViewAligned` (2) and `swViewAlignBoth` (3) — the two
+values that mean "this view is aligned to a parent."
+
+**Source URL(s):**
+- https://www.rimptec.com/rsolidworks/net/lehal/sw/swViewAlignment_e.html (type-library mirror: member names and ordering, no numeric values published)
+- Search-engine synthesis of the (403-blocked) official `help.solidworks.com` `swViewAlignment_e` page: `swViewAlignNone=0, swViewAlignedChildren=1, swViewAligned=2, swViewAlignBoth=3`
+
+**status:** unverified against a primary help.solidworks.com page body — two
+independent secondary sources agree on both names and (for the search synthesis)
+values, the same corroboration tier as `swDetViewStyle_e` above, but treat the
+*numeric* values with more caution than a directly-fetched page until verified
+against a live SolidWorks session.
+
+#### swDisplayMode_e (added for sw-8ww.6)
+
+`IView::SetDisplayMode3`/`SetDisplayMode4`'s `Mode` parameter (see that record
+above) — restated here as its own Enums-section entry since every other enum this
+dossier references gets one; the member list itself was already transcribed
+verbatim into that record's Gotchas from the (successfully fetched, browser
+`User-Agent`) `SetDisplayMode3` help page, not a new fetch.
+
+| Value | Number | Meaning |
+| --- | --- | --- |
+| swWIREFRAME | 0 | Wireframe |
+| swHIDDEN_GREYED | 1 | Hidden lines visible (greyed) |
+| swHIDDEN | 2 | Hidden lines removed |
+| swSHADED | 3 | Shaded |
+| swFACETED_WIREFRAME | 4 | Wireframe, faceted-only variant (see `SetDisplayMode3`'s Gotchas: `Facetted` drives faceting, not this value) |
+| swFACETED_HIDDEN_GREYED | 5 | Hidden lines visible, faceted-only variant |
+| swFACETED_HIDDEN | 6 | Hidden lines removed, faceted-only variant |
+| swSHADED_EDGES | 7 | Shaded with edges |
+| swDisplayModeDEFAULT | 8 | Default display mode |
+| swDisplayModeUNKNOWN | -1 | Unknown |
+
+Note: a **distinct, separate enum from `swViewDisplayMode_e`** above — see
+`SetDisplayMode3`'s own Gotchas for why the two must not be conflated.
+`set_view_display_mode` (this issue) only exposes the five non-faceted-variant,
+non-sentinel members (`wireframe`/`hidden-lines-visible`/`hidden-lines-removed`/
+`shaded`/`shaded-with-edges`) per its own task spec; `Facetted`-ness is controlled
+by that call's separate boolean parameter instead of by picking a `*_FACETED_*`
+`Mode` value.
+
+Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swDisplayMode_e.html
+(the `SetDisplayMode3` record's Source URL(s), fetched with a browser User-Agent
+during the original research pass — see that record above)
+
+**status:** verified (transcribed from the same fetched page cited on
+`SetDisplayMode3` above).

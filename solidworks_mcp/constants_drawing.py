@@ -405,6 +405,54 @@ class SwBreakLineOrientation(IntEnum):
     swBreakLineVertical = 2
 
 
+class SwViewAlignment(IntEnum):
+    """Alignment state returned by IView::GetAlignment (swViewAlignment_e).
+
+    Distinct from :class:`SwAlignViewTypes` (``AlignWithView``'s input type) --
+    this one reports whether a view is aligned to a parent and/or has aligned
+    children, not what alignment to set.
+
+    Not independently confirmed against a primary help.solidworks.com page body
+    (added for sw-8ww.6; same corroboration tier as :class:`SwDetViewStyle`) --
+    member names from a type-library mirror, numeric values from an independent
+    search-engine synthesis of the (blocked) official enumeration page, in
+    agreeing order. Treat the numeric values with more caution than this
+    module's directly-fetched enums until verified against a live SolidWorks
+    session.
+
+    Source: docs/api/02-views.md (Enums section, swViewAlignment_e).
+    """
+
+    swViewAlignNone = 0
+    swViewAlignedChildren = 1
+    swViewAligned = 2
+    swViewAlignBoth = 3
+
+
+class SwDisplayMode(IntEnum):
+    """Drawing view display mode for IView::SetDisplayMode3/4's ``Mode``
+    parameter (swDisplayMode_e).
+
+    Distinct from :class:`SwViewDisplayMode` (``swViewDisplayMode_e``, above) --
+    ``SetDisplayMode3``/``4`` take this legacy enum specifically, not
+    ``swViewDisplayMode_e``; see :class:`SwViewDisplayMode`'s own docstring.
+
+    Source: docs/api/02-views.md (SetDisplayMode3 record's Gotchas, and the
+    Enums section's swDisplayMode_e entry added for sw-8ww.6).
+    """
+
+    swWIREFRAME = 0
+    swHIDDEN_GREYED = 1
+    swHIDDEN = 2
+    swSHADED = 3
+    swFACETED_WIREFRAME = 4
+    swFACETED_HIDDEN_GREYED = 5
+    swFACETED_HIDDEN = 6
+    swSHADED_EDGES = 7
+    swDisplayModeDEFAULT = 8
+    swDisplayModeUNKNOWN = -1
+
+
 # ============================================================================
 # 03-annotations.md
 # ============================================================================

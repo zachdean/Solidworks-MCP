@@ -7,6 +7,7 @@ Access and operate on drawing (.slddrw) documents.
 import os
 import logging
 from contextlib import ExitStack
+from math import ceil, sqrt
 from typing import Any, Dict, List, Optional, Tuple
 
 from .. import com_backend
@@ -15,16 +16,19 @@ from .com_params import (
 )
 from ..constants import SwErrors, SwDocumentTypes, SwFileTypes
 from ..constants_drawing import (
+    SwAlignViewTypes,
     SwCreateSectionViewAtOptions,
     SwCustomInfoType,
     SwCustomPropertyAddOption,
     SwDetCircleShowType,
     SwDetViewStyle,
+    SwDisplayMode,
     SwDrawingViewTypes,
     SwDwgPaperSizes,
     SwSaveAsOptions,
     SwSaveAsVersion,
     SwUserPreferenceToggle,
+    SwViewAlignment,
     decode_save_error,
 )
 from ..utils import find_template
@@ -2294,4 +2298,760 @@ class DrawingOperations:
         return self._result(
             True, f"Inserted broken-out section on {parent_view_name!r}",
             SwErrors.swSuccess, data,
+        )
+
+    # ========================================================================
+    # View placement, alignment, display, and deletion (sw-8ww.6)
+    # ========================================================================
+
+    def move_view(self, view_name: str, x: float, y: float,
+                   sheet_name: Optional[str] = None) -> Dict:
+        """
+        Move a drawing view to an exact sheet-space position via
+        `IView::Position`.
+
+        Args:
+            view_name: Name of the view to move (`IView::GetName2`, e.g.
+                from `list_views`).
+            x, y: New center position, in the caller's default unit
+                (`set_units`).
+            sheet_name: Sheet `view_name` lives on, resolved the same way
+                `list_views` does. Omitted: whichever sheet
+                `IDrawingDoc::GetCurrentSheet` reports as active.
+
+        Returns:
+            Result dict. If the view is aligned to a parent view
+            (`IView::GetAlignment` reports the `swViewAligned` bit --
+            docs/api/02-views.md's `IView::Position` Gotchas: such a view
+            "can only move along the alignment vector" regardless of what's
+            requested), this fails with `swFeatureError` rather than
+            silently moving the view somewhere other than `(x, y)` or
+            no-op'ing -- call `align_view(view_name, alignment="break")`
+            first if the view needs to move freely.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        view, names, find_err = self._find_view_by_name(doc, view_name, sheet_name)
+        if find_err:
+            return find_err
+        if view is None:
+            return self._result(
+                False,
+                f"Unknown view {view_name!r}; available views: {names!r}",
+                SwErrors.swInvalidInput,
+                {"view_name": view_name, "available_views": names},
+            )
+
+        data = {"view_name": view_name, "x": x, "y": y, "sheet_name": sheet_name}
+
+        try:
+            alignment_code = view.GetAlignment()
+        except Exception:
+            alignment_code = None
+        if (isinstance(alignment_code, (int, float)) and not isinstance(alignment_code, bool)
+                and int(alignment_code) & int(SwViewAlignment.swViewAligned)):
+            return self._result(
+                False,
+                f"View {view_name!r} is alignment-locked to a parent view "
+                "and can only move along its alignment vector, not to an "
+                "arbitrary position -- call align_view(view_name, "
+                "alignment='break') first to move it freely",
+                SwErrors.swFeatureError, data,
+            )
+
+        try:
+            view.Position = [self._units.to_meters(x), self._units.to_meters(y)]
+            doc.EditRebuild3()
+        except Exception as e:
+            logger.error(f"move_view error: {e}")
+            return self._result(False, f"Move view error: {e}", SwErrors.swFeatureError, data)
+
+        return self._result(
+            True, f"Moved view {view_name!r} to ({x}, {y})", SwErrors.swSuccess, data,
+        )
+
+    # `align_view`'s `alignment` argument -> (swAlignViewTypes_e member,
+    # requires a reference view). "default" and "none"/"break" are handled
+    # separately below via the dedicated IView::UseDefaultAlignment /
+    # IView::RemoveAlignment calls docs/api/02-views.md's GetAlignment
+    # Gotchas point to, rather than routed through AlignWithView.
+    _ALIGN_VIEW_TYPES = {
+        "horizontal": SwAlignViewTypes.swAlignViewHorizontalCenter,
+        "vertical": SwAlignViewTypes.swAlignViewVerticalCenter,
+        "horizontal_origin": SwAlignViewTypes.swAlignViewHorizontalOrigin,
+        "vertical_origin": SwAlignViewTypes.swAlignViewVerticalOrigin,
+    }
+
+    def align_view(self, view_name: str, reference_view_name: Optional[str] = None,
+                    alignment: str = "horizontal",
+                    sheet_name: Optional[str] = None) -> Dict:
+        """
+        Align a drawing view to a reference view via `IView::AlignWithView`,
+        or break/reset its alignment via `IView::RemoveAlignment`/
+        `UseDefaultAlignment` -- the escape hatch for `move_view`'s
+        alignment-lock refusal.
+
+        Args:
+            view_name: Name of the view to align/un-align (the method's own
+                instance per docs/api/02-views.md -- `AlignWithView` is
+                called on the view being moved, not on the reference view
+                or the document).
+            reference_view_name: Name of the view to align with. Required
+                for `horizontal`/`vertical`/`horizontal_origin`/
+                `vertical_origin`; ignored for `default`/`none`/`break`.
+            alignment: One of (case-insensitive):
+                - `horizontal` (default): horizontal center alignment with
+                  `reference_view_name`.
+                - `vertical`: vertical center alignment.
+                - `horizontal_origin` / `vertical_origin`: aligned to the
+                  reference view's origin instead of its center.
+                - `default`: reset to SolidWorks' default alignment
+                  (`IView::UseDefaultAlignment`).
+                - `none` / `break`: remove the alignment restriction
+                  (`IView::RemoveAlignment`) so the view can move freely
+                  via `move_view`.
+            sheet_name: Sheet both views live on, resolved the same way
+                `list_views` does.
+
+        Returns:
+            Result dict.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        alignment_key = (alignment or "").strip().lower()
+        data = {
+            "view_name": view_name, "reference_view_name": reference_view_name,
+            "alignment": alignment_key, "sheet_name": sheet_name,
+        }
+
+        view, names, find_err = self._find_view_by_name(doc, view_name, sheet_name)
+        if find_err:
+            return find_err
+        if view is None:
+            return self._result(
+                False,
+                f"Unknown view {view_name!r}; available views: {names!r}",
+                SwErrors.swInvalidInput,
+                {**data, "available_views": names},
+            )
+
+        if alignment_key in ("none", "break"):
+            try:
+                view.RemoveAlignment()
+            except Exception as e:
+                logger.error(f"align_view error: {e}")
+                return self._result(False, f"Break alignment error: {e}",
+                                    SwErrors.swFeatureError, data)
+            return self._result(
+                True, f"Broke alignment on view {view_name!r}", SwErrors.swSuccess, data,
+            )
+
+        if alignment_key == "default":
+            try:
+                view.UseDefaultAlignment()
+            except Exception as e:
+                logger.error(f"align_view error: {e}")
+                return self._result(False, f"Default alignment error: {e}",
+                                    SwErrors.swFeatureError, data)
+            return self._result(
+                True, f"Reset view {view_name!r} to default alignment",
+                SwErrors.swSuccess, data,
+            )
+
+        align_type = self._ALIGN_VIEW_TYPES.get(alignment_key)
+        if align_type is None:
+            return self._result(
+                False,
+                f"Unknown alignment {alignment!r}; expected one of "
+                f"{sorted(list(self._ALIGN_VIEW_TYPES) + ['default', 'none', 'break'])!r}",
+                SwErrors.swInvalidInput, data,
+            )
+
+        if not reference_view_name:
+            return self._result(
+                False, f"alignment={alignment_key!r} requires reference_view_name",
+                SwErrors.swInvalidInput, data,
+            )
+
+        reference_view, ref_names, ref_find_err = self._find_view_by_name(
+            doc, reference_view_name, sheet_name)
+        if ref_find_err:
+            return ref_find_err
+        if reference_view is None:
+            return self._result(
+                False,
+                f"Unknown reference view {reference_view_name!r}; available views: "
+                f"{ref_names!r}",
+                SwErrors.swInvalidInput,
+                {**data, "available_views": ref_names},
+            )
+
+        try:
+            aligned = view.AlignWithView(int(align_type), reference_view)
+        except Exception as e:
+            logger.error(f"align_view error: {e}")
+            return self._result(False, f"Align view error: {e}", SwErrors.swFeatureError, data)
+
+        if not aligned:
+            return self._result(
+                False,
+                f"Failed to align view {view_name!r} ({alignment_key}) with "
+                f"{reference_view_name!r}",
+                SwErrors.swFeatureError, data,
+            )
+
+        return self._result(
+            True,
+            f"Aligned view {view_name!r} ({alignment_key}) with {reference_view_name!r}",
+            SwErrors.swSuccess, data,
+        )
+
+    def set_view_scale(self, view_name: str, scale_num: Optional[float] = None,
+                        scale_denom: Optional[float] = None, use_sheet_scale: bool = False,
+                        sheet_name: Optional[str] = None) -> Dict:
+        """
+        Set a drawing view's scale independently of the sheet scale, via
+        `IView::ScaleRatio` + `IView::UseSheetScale`.
+
+        Args:
+            view_name: Name of the view to rescale.
+            scale_num, scale_denom: The view scale as `scale_num:scale_denom`
+                (e.g. `1, 2` for 1:2). Both required together when
+                `use_sheet_scale` is False; mutually exclusive with
+                `use_sheet_scale=True`.
+            use_sheet_scale: True links this view's scale back to the
+                sheet's own scale (`IView::UseSheetScale = 1`), ignoring
+                `scale_num`/`scale_denom`. False (default) sets an explicit,
+                sheet-independent scale.
+            sheet_name: Sheet `view_name` lives on, resolved the same way
+                `list_views` does.
+
+        Returns:
+            Result dict.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        data = {
+            "view_name": view_name, "scale_num": scale_num, "scale_denom": scale_denom,
+            "use_sheet_scale": use_sheet_scale, "sheet_name": sheet_name,
+        }
+
+        if use_sheet_scale and (scale_num is not None or scale_denom is not None):
+            return self._result(
+                False,
+                "use_sheet_scale=True and an explicit scale_num/scale_denom are "
+                "mutually exclusive",
+                SwErrors.swInvalidInput, data,
+            )
+        if not use_sheet_scale:
+            if scale_num is None or scale_denom is None:
+                return self._result(
+                    False,
+                    "scale_num and scale_denom must both be given when "
+                    "use_sheet_scale is False",
+                    SwErrors.swInvalidInput, data,
+                )
+            if scale_num <= 0 or scale_denom <= 0:
+                return self._result(
+                    False, "scale_num and scale_denom must both be positive",
+                    SwErrors.swInvalidInput, data,
+                )
+
+        view, names, find_err = self._find_view_by_name(doc, view_name, sheet_name)
+        if find_err:
+            return find_err
+        if view is None:
+            return self._result(
+                False,
+                f"Unknown view {view_name!r}; available views: {names!r}",
+                SwErrors.swInvalidInput,
+                {**data, "available_views": names},
+            )
+
+        try:
+            if use_sheet_scale:
+                view.UseSheetScale = 1
+            else:
+                view.ScaleRatio = [float(scale_num), float(scale_denom)]
+                view.UseSheetScale = 0
+            doc.EditRebuild3()
+        except Exception as e:
+            logger.error(f"set_view_scale error: {e}")
+            return self._result(False, f"Set view scale error: {e}",
+                                SwErrors.swFeatureError, data)
+
+        message = (
+            f"Set view {view_name!r} to use the sheet scale" if use_sheet_scale
+            else f"Set view {view_name!r} scale to {scale_num}:{scale_denom}"
+        )
+        return self._result(True, message, SwErrors.swSuccess, data)
+
+    # `set_view_display_mode`'s `mode` argument -> swDisplayMode_e member,
+    # per the task spec's five named modes (docs/api/02-views.md's
+    # swDisplayMode_e Enums entry, added for this issue).
+    _DISPLAY_MODES = {
+        "wireframe": SwDisplayMode.swWIREFRAME,
+        "hidden-lines-visible": SwDisplayMode.swHIDDEN_GREYED,
+        "hidden-lines-removed": SwDisplayMode.swHIDDEN,
+        "shaded": SwDisplayMode.swSHADED,
+        "shaded-with-edges": SwDisplayMode.swSHADED_EDGES,
+    }
+
+    def set_view_display_mode(self, view_name: str, mode: str, shadows: bool = False,
+                               high_quality: bool = True,
+                               sheet_name: Optional[str] = None) -> Dict:
+        """
+        Set a drawing view's display mode via `IView::SetDisplayMode3`.
+
+        Args:
+            view_name: Name of the view to update.
+            mode: wireframe, hidden-lines-visible, hidden-lines-removed,
+                shaded, or shaded-with-edges (case-insensitive, `_`/` `
+                tolerated in place of `-`).
+            shadows: `SetDisplayMode3`'s `Edges` parameter -- per
+                docs/api/02-views.md, "edges are displayed when this view is
+                in shaded mode." Named `shadows` per this issue's task spec
+                even though the underlying COM parameter is about edge
+                display, not shadow casting (no shadow-toggle parameter
+                exists on this call) -- this tool's own naming convention,
+                not a dossier term.
+            high_quality: True (default) requests precision-quality
+                geometry (`SetDisplayMode3`'s `Facetted=False`); False
+                requests draft-quality/faceted display. Per the dossier,
+                a view cannot be switched from precision back to draft
+                quality once it has precision quality.
+            sheet_name: Sheet `view_name` lives on, resolved the same way
+                `list_views` does.
+
+        Returns:
+            Result dict.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        mode_key = (mode or "").strip().lower().replace("_", "-").replace(" ", "-")
+        data = {
+            "view_name": view_name, "mode": mode_key, "shadows": shadows,
+            "high_quality": high_quality, "sheet_name": sheet_name,
+        }
+
+        mode_enum = self._DISPLAY_MODES.get(mode_key)
+        if mode_enum is None:
+            return self._result(
+                False,
+                f"Unknown mode {mode!r}; expected one of {sorted(self._DISPLAY_MODES)!r}",
+                SwErrors.swInvalidInput, data,
+            )
+
+        view, names, find_err = self._find_view_by_name(doc, view_name, sheet_name)
+        if find_err:
+            return find_err
+        if view is None:
+            return self._result(
+                False,
+                f"Unknown view {view_name!r}; available views: {names!r}",
+                SwErrors.swInvalidInput,
+                {**data, "available_views": names},
+            )
+
+        try:
+            applied = view.SetDisplayMode3(
+                False, int(mode_enum), not bool(high_quality), bool(shadows))
+        except Exception as e:
+            logger.error(f"set_view_display_mode error: {e}")
+            return self._result(False, f"Set display mode error: {e}",
+                                SwErrors.swFeatureError, data)
+
+        if not applied:
+            return self._result(
+                False, f"Failed to set display mode for view {view_name!r}",
+                SwErrors.swFeatureError, data,
+            )
+
+        return self._result(
+            True, f"Set view {view_name!r} display mode to {mode_key}",
+            SwErrors.swSuccess, data,
+        )
+
+    def _view_children_map(self, sheet: Any) -> Dict[str, List[str]]:
+        """`{parent_name: [direct_child_name, ...]}` for every real view on
+        `sheet`, via `IView::GetBaseView` -- what `delete_view` uses to find
+        a view's dependents before deleting it."""
+        try:
+            views_raw = sheet.GetViews() or []
+        except Exception:
+            views_raw = []
+        if not isinstance(views_raw, (list, tuple)):
+            views_raw = []
+
+        sheet_type_code = int(SwDrawingViewTypes.swDrawingSheet)
+        children: Dict[str, List[str]] = {}
+        for view in views_raw:
+            type_code = self._read_prop(view, "Type")
+            if (isinstance(type_code, (int, float)) and not isinstance(type_code, bool)
+                    and int(type_code) == sheet_type_code):
+                continue
+            name = self._read_prop(view, "GetName2")
+            if not name:
+                continue
+            try:
+                base = view.GetBaseView()
+            except Exception:
+                base = None
+            parent_name = self._read_prop(base, "GetName2") if base else None
+            if parent_name:
+                children.setdefault(parent_name, []).append(name)
+        return children
+
+    def _descendant_views(self, children_map: Dict[str, List[str]], name: str) -> List[str]:
+        """Every transitive descendant of `name`, deepest-first -- a child's
+        own children are listed (and would be deleted) before that child
+        itself, so `delete_view`'s cascade never orphans a grandchild."""
+        result: List[str] = []
+        for child in children_map.get(name, []):
+            result.extend(self._descendant_views(children_map, child))
+            result.append(child)
+        return result
+
+    def _delete_single_view(self, doc: Any, view_name: str) -> Dict:
+        """Select `view_name` and delete it via `IModelDocExtension::
+        DeleteSelection2` -- the shared primitive `delete_view` calls once
+        per view in its cascade, deepest descendant first."""
+        with self.selected(view_name, "DRAWINGVIEW", 0, 0, 0) as sel:
+            if not sel["success"]:
+                return sel
+            try:
+                deleted = doc.Extension.DeleteSelection2(0)
+            except Exception as e:
+                logger.error(f"delete_view error: {e}")
+                return self._result(False, f"Delete view error: {e}",
+                                    SwErrors.swFeatureError, {"view_name": view_name})
+
+        if not deleted:
+            return self._result(
+                False, f"Failed to delete view {view_name!r}",
+                SwErrors.swFeatureError, {"view_name": view_name},
+            )
+        return self._result(
+            True, f"Deleted view {view_name!r}", SwErrors.swSuccess, {"view_name": view_name},
+        )
+
+    def delete_view(self, view_name: str, cascade: bool = False,
+                     sheet_name: Optional[str] = None) -> Dict:
+        """
+        Delete a drawing view via select-then-`IModelDocExtension::
+        DeleteSelection2` (docs/api/02-views.md: there is no dedicated
+        `DeleteView2` call). Refuses to delete a view with dependent child
+        views (section/detail/projected/auxiliary views derived from it, per
+        `IView::GetBaseView`) unless `cascade=True`.
+
+        Args:
+            view_name: Name of the view to delete.
+            cascade: False (default): if `view_name` has any dependent child
+                views, fail and list them rather than deleting anything.
+                True: delete every descendant first (deepest first), then
+                `view_name` itself, reporting every view actually removed.
+            sheet_name: Sheet `view_name` lives on, resolved the same way
+                `list_views` does.
+
+        Returns:
+            Result dict. On success, `data["removed"]` lists every view
+            name deleted, in deletion order (descendants before
+            `view_name`). On a partial cascade failure, `data["removed"]`
+            lists whatever was actually deleted before the failure, so a
+            caller can tell a clean refusal (nothing deleted) from a
+            partially-completed cascade.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        data = {"view_name": view_name, "cascade": cascade, "sheet_name": sheet_name}
+
+        sheet, sheet_err = self._resolve_sheet(doc, sheet_name)
+        if sheet_err:
+            return sheet_err
+
+        view, names, find_err = self._find_view_by_name(doc, view_name, sheet_name)
+        if find_err:
+            return find_err
+        if view is None:
+            return self._result(
+                False,
+                f"Unknown view {view_name!r}; available views: {names!r}",
+                SwErrors.swInvalidInput,
+                {**data, "available_views": names},
+            )
+
+        children_map = self._view_children_map(sheet)
+        descendants = self._descendant_views(children_map, view_name)
+
+        if descendants and not cascade:
+            return self._result(
+                False,
+                f"View {view_name!r} has {len(descendants)} dependent view(s) "
+                f"{descendants!r} -- pass cascade=True to delete them too",
+                SwErrors.swFeatureError, {**data, "children": descendants},
+            )
+
+        removed: List[str] = []
+        for name in descendants:
+            del_result = self._delete_single_view(doc, name)
+            if not del_result["success"]:
+                return self._result(
+                    False,
+                    f"Deleted {removed!r} but failed to delete dependent view "
+                    f"{name!r}: {del_result['message']}",
+                    SwErrors.swFeatureError, {**data, "removed": removed},
+                )
+            removed.append(name)
+
+        del_result = self._delete_single_view(doc, view_name)
+        if not del_result["success"]:
+            return self._result(
+                False,
+                f"Deleted {removed!r} but failed to delete {view_name!r}: "
+                f"{del_result['message']}",
+                SwErrors.swFeatureError, {**data, "removed": removed},
+            )
+        removed.append(view_name)
+
+        message = f"Deleted view {view_name!r}"
+        if len(removed) > 1:
+            message += f" and {len(removed) - 1} dependent view(s)"
+        return self._result(True, message, SwErrors.swSuccess, {**data, "removed": removed})
+
+    # Fallback spacing between packed view groups when `auto_arrange_views`
+    # is called without an explicit `margin` -- an arbitrary but reasonable
+    # 10mm, this tool's own convention (not sourced from any dossier).
+    _DEFAULT_ARRANGE_MARGIN_M = 0.01
+
+    def auto_arrange_views(self, sheet_name: Optional[str] = None,
+                            margin: Optional[float] = None) -> Dict:
+        """
+        Lay out every view on a sheet with no overlapping bounding boxes,
+        via `IView::GetOutline` (per-view `[Xmin, Ymin, Xmax, Ymax]` in
+        sheet-space meters -- docs/api/02-views.md's `GetOutline` record,
+        added for this issue) + `IView::Position`.
+
+        Algorithm (deterministic grid/row packing -- intentionally simple,
+        not a compaction bin-packer):
+          1. Group views by alignment root: every view with no
+             `IView::GetBaseView` parent is a root; every other view folds
+             into its ultimate root's group. Only each group's root view is
+             ever repositioned -- an aligned child view can only move along
+             its alignment vector (see `move_view`'s own lock check), so
+             trying to set its `Position` directly would fight SolidWorks'
+             own alignment mechanism instead of respecting it. SolidWorks
+             carries aligned children along when their root moves, the same
+             way dragging a base view in the UI drags its projected views.
+             A view can also be `move_view`-locked (`IView::GetAlignment`'s
+             `swViewAligned` bit set) with *no* `GetBaseView` parent at all
+             -- e.g. a view explicitly aligned to another via `align_view`,
+             which is a different relationship than `GetBaseView`'s
+             derivation lineage. Such a view would otherwise look like a
+             free-standing root here; it is excluded from placement
+             entirely (reported in `data["locked"]`, left wherever it is)
+             rather than having a `Position` write silently clamped/ignored
+             by SolidWorks the same way `move_view` refuses it outright.
+          2. Each group's bounding box is the union of every member's own
+             `GetOutline` box, in original (pre-arrange) coordinates.
+          3. Groups are sorted by `(-original_ymin, original_xmin,
+             root_name)` -- a pure function of the input outlines/names, so
+             identical input always produces identical output.
+          4. Groups are packed into a grid of `ceil(sqrt(group_count))`
+             columns, left-to-right/top-to-bottom in sorted order, each row's
+             height set by its tallest group, cells separated by `margin` on
+             every side -- guarantees no two group boxes overlap without
+             needing the sheet's own dimensions (not available anywhere in
+             this dossier).
+          5. Each root view's `IView::Position` is shifted by the delta its
+             group's bounding-box corner moved by, then the whole document
+             is rebuilt once via `IModelDoc2::EditRebuild3`.
+
+        A view whose `GetOutline` can't be read is skipped (left wherever it
+        already is) rather than failing the whole call.
+
+        Args:
+            sheet_name: Sheet to arrange, resolved the same way `list_views`
+                does. Omitted: whichever sheet `IDrawingDoc::GetCurrentSheet`
+                reports as active.
+            margin: Spacing between packed view groups, in the caller's
+                default unit (`set_units`). Omitted: a 10mm default.
+
+        Returns:
+            Result dict. `data["arranged"]` lists each moved group's root
+            view name, its member view names, and its new position (in the
+            caller's unit).
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        sheet, sheet_err = self._resolve_sheet(doc, sheet_name)
+        if sheet_err:
+            return sheet_err
+
+        if margin is not None and margin < 0:
+            return self._result(
+                False, "margin must not be negative", SwErrors.swInvalidInput,
+                {"sheet_name": sheet_name, "margin": margin},
+            )
+        margin_m = self._units.to_meters(margin) if margin is not None else self._DEFAULT_ARRANGE_MARGIN_M
+
+        try:
+            views_raw = sheet.GetViews() or []
+        except Exception as e:
+            logger.error(f"auto_arrange_views error: {e}")
+            return self._result(False, f"List views error: {e}", SwErrors.swUnknownError)
+        if not isinstance(views_raw, (list, tuple)):
+            views_raw = []
+
+        sheet_type_code = int(SwDrawingViewTypes.swDrawingSheet)
+        by_name: Dict[str, Dict[str, Any]] = {}
+        order: List[str] = []
+        skipped: List[str] = []
+        for view in views_raw:
+            type_code = self._read_prop(view, "Type")
+            if (isinstance(type_code, (int, float)) and not isinstance(type_code, bool)
+                    and int(type_code) == sheet_type_code):
+                continue
+            name = self._read_prop(view, "GetName2")
+            if not name:
+                continue
+            outline = self._read_prop(view, "GetOutline")
+            if not isinstance(outline, (list, tuple)) or len(outline) < 4:
+                skipped.append(name)
+                continue
+            try:
+                base = view.GetBaseView()
+            except Exception:
+                base = None
+            parent_name = self._read_prop(base, "GetName2") if base else None
+
+            try:
+                alignment_code = view.GetAlignment()
+            except Exception:
+                alignment_code = None
+            locked = (
+                isinstance(alignment_code, (int, float)) and not isinstance(alignment_code, bool)
+                and bool(int(alignment_code) & int(SwViewAlignment.swViewAligned))
+            )
+
+            by_name[name] = {
+                "name": name, "view": view, "parent_name": parent_name, "locked": locked,
+                "xmin": float(outline[0]), "ymin": float(outline[1]),
+                "xmax": float(outline[2]), "ymax": float(outline[3]),
+            }
+            order.append(name)
+
+        data = {"sheet_name": sheet_name, "margin": margin, "skipped": skipped}
+
+        if not by_name:
+            return self._result(
+                True, "No views with a readable outline to arrange", SwErrors.swSuccess,
+                {**data, "locked": [], "arranged": []},
+            )
+
+        def root_of(name: str) -> str:
+            seen = set()
+            while True:
+                entry = by_name.get(name)
+                parent_name = entry["parent_name"] if entry else None
+                if not parent_name or parent_name not in by_name or name in seen:
+                    return name
+                seen.add(name)
+                name = parent_name
+
+        groups: Dict[str, List[str]] = {}
+        for name in order:
+            root_name = root_of(name)
+            groups.setdefault(root_name, []).append(name)
+
+        # A group's root can itself be `move_view`-locked with no
+        # `GetBaseView` parent (see this method's own docstring) -- such a
+        # group is reported, never placed, rather than writing a Position
+        # SolidWorks would clamp/ignore.
+        locked_views: List[str] = []
+        for root_name in [r for r in groups if by_name[r]["locked"]]:
+            locked_views.extend(groups.pop(root_name))
+        data["locked"] = locked_views
+
+        if not groups:
+            return self._result(
+                True, "No movable views to arrange (all locked/skipped)",
+                SwErrors.swSuccess, {**data, "arranged": []},
+            )
+
+        group_boxes = []
+        for root_name, member_names in groups.items():
+            group_boxes.append({
+                "root_name": root_name, "members": member_names,
+                "xmin": min(by_name[n]["xmin"] for n in member_names),
+                "ymin": min(by_name[n]["ymin"] for n in member_names),
+                "xmax": max(by_name[n]["xmax"] for n in member_names),
+                "ymax": max(by_name[n]["ymax"] for n in member_names),
+            })
+        group_boxes.sort(key=lambda g: (-g["ymin"], g["xmin"], g["root_name"]))
+
+        columns = max(1, ceil(sqrt(len(group_boxes))))
+        placements: Dict[str, Tuple[float, float]] = {}
+        cursor_x = margin_m
+        cursor_y = margin_m
+        row_height = 0.0
+        for i, g in enumerate(group_boxes):
+            if i > 0 and i % columns == 0:
+                cursor_y += row_height + margin_m
+                cursor_x = margin_m
+                row_height = 0.0
+            width = g["xmax"] - g["xmin"]
+            height = g["ymax"] - g["ymin"]
+            placements[g["root_name"]] = (cursor_x, cursor_y)
+            cursor_x += width + margin_m
+            row_height = max(row_height, height)
+
+        arranged = []
+        try:
+            for g in group_boxes:
+                new_xmin, new_ymin = placements[g["root_name"]]
+                delta_x = new_xmin - g["xmin"]
+                delta_y = new_ymin - g["ymin"]
+
+                root_entry = by_name[g["root_name"]]
+                root_view = root_entry["view"]
+                root_position = self._read_prop(root_view, "Position")
+                if isinstance(root_position, (list, tuple)) and len(root_position) >= 2:
+                    root_x_m, root_y_m = float(root_position[0]), float(root_position[1])
+                else:
+                    root_x_m, root_y_m = 0.0, 0.0
+
+                new_root_x_m = root_x_m + delta_x
+                new_root_y_m = root_y_m + delta_y
+                root_view.Position = [new_root_x_m, new_root_y_m]
+
+                arranged.append({
+                    "view_name": g["root_name"], "members": g["members"],
+                    "x": self._units.from_meters(new_root_x_m),
+                    "y": self._units.from_meters(new_root_y_m),
+                })
+            doc.EditRebuild3()
+        except Exception as e:
+            logger.error(f"auto_arrange_views error: {e}")
+            return self._result(
+                False, f"Auto-arrange views error: {e}", SwErrors.swFeatureError,
+                {**data, "arranged": arranged},
+            )
+
+        return self._result(
+            True,
+            f"Arranged {len(group_boxes)} view group(s) ({len(by_name)} view(s)) "
+            f"on sheet {sheet_name!r}",
+            SwErrors.swSuccess, {**data, "arranged": arranged},
         )

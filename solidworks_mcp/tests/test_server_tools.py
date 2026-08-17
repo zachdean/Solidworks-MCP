@@ -59,6 +59,13 @@ EXPECTED_TOOL_NAMES = {
     "insert_detail_view",
     "insert_broken_out_section",
     "list_views",
+    # Drawing View Placement, Alignment, Display, and Deletion Tools
+    "move_view",
+    "align_view",
+    "set_view_scale",
+    "set_view_display_mode",
+    "delete_view",
+    "auto_arrange_views",
     # Sketch Tools
     "create_sketch",
     "create_sketch_on_face",
