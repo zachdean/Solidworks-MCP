@@ -117,11 +117,40 @@ def _paper_size_name(code: Any) -> Optional[str]:
     return _PAPER_SIZE_NAMES.get(code_int, f"unknown paper size {code_int}")
 
 
+def _resolve_paper_size_code(paper_size: Any) -> Tuple[Optional[int], Optional[str]]:
+    """`swDwgPaperSizes_e` code for one of this tool layer's short paper-size
+    names (`"A"`-`"E"`, `"A0"`-`"A4"`, case-insensitive), or
+    `swDwgPapersUserDefined` for `"custom"`.
+
+    Returns `(code, None)`, or `(None, message)` for an unrecognized name.
+    Shared by `add_sheet` and `set_sheet_properties`, which accept exactly
+    this spelling -- keeping one copy of the accepted set and of the
+    valid-values message they report on a miss.
+
+    `new_drawing_from_template` deliberately does *not* route through here:
+    it takes a separate `orientation` argument, so it needs the full
+    `(landscape, portrait)` tuple, and it has no `"custom"` spelling to
+    offer in its own error message.
+    """
+    key = str(paper_size or "").strip().upper()
+    if key == "CUSTOM":
+        return int(SwDwgPaperSizes.swDwgPapersUserDefined), None
+    sizes = _PAPER_SIZES.get(key)
+    if sizes is None:
+        valid = sorted(_PAPER_SIZES) + ["custom"]
+        return None, f"Unknown paper_size {paper_size!r}; expected one of {valid!r}"
+    return int(sizes[0]), None
+
+
 def _template_in_name(code: Any) -> Optional[str]:
     """Readable `SwDwgTemplates` member name for a `templateIn` code read
     back off `ISheet::GetProperties2` (index 1) -- e.g. `"swDwgTemplateNone"`
     or `"swDwgTemplateCustom"`, or `f"unknown template {code!r}"` for
     anything unrecognized. `None` only when `code` itself couldn't be read.
+
+    Deliberately not routed through `_enum_name`: that helper's fallback
+    reads `"unknown status ..."`, which is the wrong noun for a
+    `templateIn` code.
     """
     if code is None:
         return None
@@ -165,6 +194,45 @@ def _normalize_sheet_names(raw: Any) -> List[str]:
     if isinstance(raw, (list, tuple)):
         return list(raw)
     return []
+
+
+def _parse_sheet_properties(props: Any) -> Optional[Dict[str, Any]]:
+    """The one parser for `ISheet::GetProperties2`'s documented 8-element
+    `Double` array -- `{paper_size_code, template_in_code, scale_num,
+    scale_denom, first_angle, width_m, height_m}`, with `width_m`/`height_m`
+    still in COM's meters (callers convert).
+
+    Returns `None` for anything that isn't that array -- `None`, a
+    short/empty sequence, a non-sequence auto-vivified COM stand-in, or a
+    sequence whose elements aren't the numbers they're documented to be.
+    Every consumer of this array (`_sheet_properties`' rendered view and
+    `_read_sheet_setup_state`' raw one) goes through here, so the index
+    mapping and the defensiveness live in exactly one place.
+    """
+    if not isinstance(props, (list, tuple)) or len(props) < 7:
+        return None
+    try:
+        return {
+            "paper_size_code": int(props[0]),
+            "template_in_code": int(props[1]),
+            "scale_num": float(props[2]),
+            "scale_denom": float(props[3]),
+            "first_angle": bool(props[4]),
+            "width_m": float(props[5]),
+            "height_m": float(props[6]),
+        }
+    except (TypeError, ValueError):
+        return None
+
+
+def _projection_name(first_angle: Any) -> str:
+    """`swDrawingProjectionType_e` member name for `GetProperties2`'s
+    `firstAngle` flag -- the rendering `list_sheets`/`get_active_sheet`/
+    `get_sheet_properties` all report as `projection`."""
+    return (
+        SwDrawingProjectionType.swDrawing1stAngleProjection.name if first_angle
+        else SwDrawingProjectionType.swDrawing3rdAngleProjection.name
+    )
 
 
 # `IDrawingDoc::NewSheet4`'s positional signature, in the exact order
@@ -345,7 +413,7 @@ def _com_bool(value: Any) -> Optional[bool]:
 
     A `VARIANT_BOOL` reaches Python as a genuine `bool` through some interop
     layers and as a plain `int` (`0`/`-1`) through others -- the same
-    numeric/Boolean duality `_count_sheet_views` guards against for
+    numeric/Boolean duality `_iter_real_views` guards against for
     `IView::Type`. An identity test (`is False`) silently misses the `int`
     form, so `ILayer::Visible == 0` would read as "not hidden" and the whole
     show-hidden-layers pass would become a no-op. Anything that is neither
@@ -2751,8 +2819,7 @@ class DrawingOperations:
         if err:
             return err
 
-        paper_key = (paper_size or "").strip().upper()
-        is_custom = paper_key == "CUSTOM"
+        is_custom = (paper_size or "").strip().upper() == "CUSTOM"
 
         if is_custom:
             if width is None or height is None:
@@ -2771,15 +2838,9 @@ class DrawingOperations:
                     SwErrors.swInvalidInput,
                     {"paper_size": paper_size},
                 )
-            sizes = _PAPER_SIZES.get(paper_key)
-            if sizes is None:
-                valid = sorted(_PAPER_SIZES) + ["custom"]
-                return self._result(
-                    False,
-                    f"Unknown paper_size {paper_size!r}; expected one of {valid!r}",
-                    SwErrors.swInvalidInput,
-                )
-            paper_size_value = int(sizes[0])
+            paper_size_value, size_err = _resolve_paper_size_code(paper_size)
+            if size_err:
+                return self._result(False, size_err, SwErrors.swInvalidInput)
 
         if template_path:
             template_in = int(SwDwgTemplates.swDwgTemplateCustom)
@@ -2850,32 +2911,55 @@ class DrawingOperations:
             return self._result(False, f"Activate sheet error: {e}", SwErrors.swUnknownError)
 
         if not ok:
-            try:
-                available = _normalize_sheet_names(doc.GetSheetNames())
-            except Exception:
-                available = []
-            return self._result(
-                False,
-                f"Sheet {name!r} not found; available sheets: {available!r}",
-                SwErrors.swInvalidInput,
-                {"name": name, "available_sheets": available},
-            )
+            # A failed name read here is reported as "no sheets available"
+            # rather than surfaced: `ActivateSheet` already told us the real
+            # failure, and `_sheet_names`' own error would replace it.
+            available, _ = self._sheet_names(doc, "activate_sheet")
+            return self._sheet_not_found(name, available)
 
         return self._result(True, f"Activated sheet {name!r}", SwErrors.swSuccess, {"name": name})
+
+    def _sheet_names(self, doc: Any, context: str) -> Tuple[List[str], Optional[Dict]]:
+        """`IDrawingDoc::GetSheetNames`, normalized (`_normalize_sheet_names`)
+        and with the COM-failure branch reported rather than swallowed --
+        the single read every sheet-management tool goes through.
+
+        Returns `(names, None)`, or `([], error)` with `context` naming the
+        operation that wanted them (e.g. `"copy_sheet"`), so the "could not
+        read sheet names" failure has one shape across all of them.
+        """
+        try:
+            return _normalize_sheet_names(doc.GetSheetNames()), None
+        except Exception as e:
+            logger.error(f"{context} error: {e}")
+            return [], self._result(
+                False, f"Could not read sheet names: {e}", SwErrors.swUnknownError)
+
+    def _sheet_not_found(self, name: str, available: List[str]) -> Dict:
+        """The one "no such sheet" result: `swInvalidInput`, the message
+        listing what does exist, and `{"name", "available_sheets"}` in
+        `data` -- shared by `activate_sheet`, `_resolve_named_sheet`,
+        `copy_sheet`, `delete_sheet`, and `rename_sheet` so a caller can
+        handle the case uniformly whichever tool raised it."""
+        return self._result(
+            False,
+            f"Sheet {name!r} not found; available sheets: {available!r}",
+            SwErrors.swInvalidInput,
+            {"name": name, "available_sheets": available},
+        )
 
     def _sheet_properties(self, sheet: Any) -> Dict[str, Any]:
         """`ISheet::GetProperties2` -> `{scale_num, scale_denom,
         paper_size_code, paper_size, projection, width, height}`, shared by
         `list_sheets` and `get_active_sheet`.
 
-        Defensive against anything other than the documented 8-element
-        `Double` array -- `None`, a short/empty sequence, a non-sequence
-        auto-vivified COM stand-in, or a sequence whose individual elements
-        aren't the numbers they're documented to be -- every field comes
-        back `None` rather than raising, so a sheet whose properties can't
-        be read still shows up in `list_sheets`' results instead of the
-        whole call raising out of the tool (this project's own "never raise
-        out of a tool" rule).
+        A rendered view over `_parse_sheet_properties` (the shared array
+        parser): paper-size code and first-angle flag become readable names,
+        dimensions become the caller's unit. Every field comes back `None`
+        rather than raising whenever that parse fails, so a sheet whose
+        properties can't be read still shows up in `list_sheets`' results
+        instead of the whole call raising out of the tool (this project's
+        own "never raise out of a tool" rule).
         """
         empty = {
             "scale_num": None, "scale_denom": None,
@@ -2888,47 +2972,19 @@ class DrawingOperations:
         except Exception:
             return empty
 
-        if not isinstance(props, (list, tuple)) or len(props) < 7:
+        parsed = _parse_sheet_properties(props)
+        if parsed is None:
             return empty
 
-        try:
-            paper_size_code = int(props[0])
-            first_angle = bool(props[4])
-            return {
-                "scale_num": float(props[2]),
-                "scale_denom": float(props[3]),
-                "paper_size_code": paper_size_code,
-                "paper_size": _paper_size_name(paper_size_code),
-                "projection": (
-                    SwDrawingProjectionType.swDrawing1stAngleProjection.name if first_angle
-                    else SwDrawingProjectionType.swDrawing3rdAngleProjection.name
-                ),
-                "width": self._units.from_meters(float(props[5])),
-                "height": self._units.from_meters(float(props[6])),
-            }
-        except (TypeError, ValueError):
-            return empty
-
-    def _count_sheet_views(self, sheet: Any) -> int:
-        """Real (non-sheet-pseudo-view) view count on `sheet` via
-        `ISheet::GetViews`, filtered the same way `list_views` filters its
-        own results (docs/api/02-views.md's Gotchas on that pseudo-entry)."""
-        try:
-            views_raw = sheet.GetViews() or []
-        except Exception:
-            views_raw = []
-        if not isinstance(views_raw, (list, tuple)):
-            return 0
-
-        sheet_type_code = int(SwDrawingViewTypes.swDrawingSheet)
-        count = 0
-        for view in views_raw:
-            type_code = self._read_prop(view, "Type")
-            if (isinstance(type_code, (int, float)) and not isinstance(type_code, bool)
-                    and int(type_code) == sheet_type_code):
-                continue
-            count += 1
-        return count
+        return {
+            "scale_num": parsed["scale_num"],
+            "scale_denom": parsed["scale_denom"],
+            "paper_size_code": parsed["paper_size_code"],
+            "paper_size": _paper_size_name(parsed["paper_size_code"]),
+            "projection": _projection_name(parsed["first_angle"]),
+            "width": self._units.from_meters(parsed["width_m"]),
+            "height": self._units.from_meters(parsed["height_m"]),
+        }
 
     def list_sheets(self) -> Dict:
         """
@@ -2946,13 +3002,9 @@ class DrawingOperations:
         if err:
             return err
 
-        try:
-            raw_names = doc.GetSheetNames()
-        except Exception as e:
-            logger.error(f"list_sheets error: {e}")
-            return self._result(False, f"List sheets error: {e}", SwErrors.swUnknownError)
-
-        names = _normalize_sheet_names(raw_names)
+        names, err = self._sheet_names(doc, "list_sheets")
+        if err:
+            return err
 
         sheets = []
         for sheet_name in names:
@@ -2960,17 +3012,14 @@ class DrawingOperations:
                 sheet = doc.Sheet(sheet_name)
             except Exception:
                 sheet = None
-            if not sheet:
-                sheets.append({
-                    "name": sheet_name, "scale_num": None, "scale_denom": None,
-                    "paper_size_code": None, "paper_size": None, "projection": None,
-                    "width": None, "height": None, "view_count": 0,
-                })
-                continue
+            # No special case for an unresolvable `sheet`: `_sheet_properties`
+            # already answers all-`None` and `_sheet_view_names` an empty list
+            # when the COM reads on it fail, which is exactly what such a
+            # sheet should report.
             sheets.append({
                 "name": sheet_name,
                 **self._sheet_properties(sheet),
-                "view_count": self._count_sheet_views(sheet),
+                "view_count": sum(1 for _ in self._iter_real_views(sheet)),
             })
 
         return self._result(
@@ -3027,16 +3076,8 @@ class DrawingOperations:
                 return None, None, self._result(
                     False, f"Resolve sheet error: {e}", SwErrors.swUnknownError)
             if not sheet:
-                try:
-                    available = _normalize_sheet_names(doc.GetSheetNames())
-                except Exception:
-                    available = []
-                return None, None, self._result(
-                    False,
-                    f"Sheet {sheet_name!r} not found; available sheets: {available!r}",
-                    SwErrors.swInvalidInput,
-                    {"name": sheet_name, "available_sheets": available},
-                )
+                available, _ = self._sheet_names(doc, "resolve sheet")
+                return None, None, self._sheet_not_found(sheet_name, available)
             return sheet, sheet_name, None
 
         try:
@@ -3068,36 +3109,36 @@ class DrawingOperations:
         `GetProperties2` array below.
 
         Returns `None` on anything that isn't the documented 8-element
-        `GetProperties2` array -- mirrors `_sheet_properties`'s own
-        defensiveness, but returns `None` rather than an all-`None` dict
-        since callers here need to distinguish "couldn't read current
+        `GetProperties2` array (`_parse_sheet_properties`, the same parser
+        `_sheet_properties` renders from) -- `None` rather than an all-`None`
+        dict, since callers here need to distinguish "couldn't read current
         state" (an error) from "read it, every field happened to be None".
         """
         try:
             props = sheet.GetProperties2()
         except Exception:
             return None
-        if not isinstance(props, (list, tuple)) or len(props) < 7:
+        parsed = _parse_sheet_properties(props)
+        if parsed is None:
             return None
+
         try:
             template_path = sheet.GetTemplateName()
         except Exception:
             template_path = None
         if not template_path or template_path == "*.drt":
             template_path = None
-        try:
-            return {
-                "paper_size_code": int(props[0]),
-                "template_in_code": int(props[1]),
-                "scale_num": float(props[2]),
-                "scale_denom": float(props[3]),
-                "first_angle": bool(props[4]),
-                "width": self._units.from_meters(float(props[5])),
-                "height": self._units.from_meters(float(props[6])),
-                "template_path": template_path,
-            }
-        except (TypeError, ValueError):
-            return None
+
+        return {
+            "paper_size_code": parsed["paper_size_code"],
+            "template_in_code": parsed["template_in_code"],
+            "scale_num": parsed["scale_num"],
+            "scale_denom": parsed["scale_denom"],
+            "first_angle": parsed["first_angle"],
+            "width": self._units.from_meters(parsed["width_m"]),
+            "height": self._units.from_meters(parsed["height_m"]),
+            "template_path": template_path,
+        }
 
     def set_sheet_properties(
         self, sheet_name: Optional[str] = None, paper_size: Optional[str] = None,
@@ -3204,19 +3245,9 @@ class DrawingOperations:
             )
 
         if paper_size is not None:
-            paper_key = paper_size.strip().upper()
-            if paper_key == "CUSTOM":
-                effective_paper_size = int(SwDwgPaperSizes.swDwgPapersUserDefined)
-            else:
-                sizes = _PAPER_SIZES.get(paper_key)
-                if sizes is None:
-                    valid = sorted(_PAPER_SIZES) + ["custom"]
-                    return self._result(
-                        False,
-                        f"Unknown paper_size {paper_size!r}; expected one of {valid!r}",
-                        SwErrors.swInvalidInput,
-                    )
-                effective_paper_size = int(sizes[0])
+            effective_paper_size, size_err = _resolve_paper_size_code(paper_size)
+            if size_err:
+                return self._result(False, size_err, SwErrors.swInvalidInput)
         else:
             effective_paper_size = current["paper_size_code"]
 
@@ -3363,11 +3394,7 @@ class DrawingOperations:
             "paper_size": _paper_size_name(current["paper_size_code"]),
             "scale_num": current["scale_num"], "scale_denom": current["scale_denom"],
             "scale_ratio": _scale_ratio_string(current["scale_num"], current["scale_denom"]),
-            "projection": (
-                SwDrawingProjectionType.swDrawing1stAngleProjection.name
-                if current["first_angle"]
-                else SwDrawingProjectionType.swDrawing3rdAngleProjection.name
-            ),
+            "projection": _projection_name(current["first_angle"]),
             "width": current["width"], "height": current["height"],
             "template_in": _template_in_name(current["template_in_code"]),
             "template_path": current["template_path"],
@@ -3398,18 +3425,23 @@ class DrawingOperations:
                 (SolidWorks auto-names each copy, e.g. `"Sheet1(2)"`), and
                 this tool does not guess a naming pattern for multiple
                 copies -- `new_name` with `count != 1` fails with
-                `swInvalidInput` before any COM call.
+                `swInvalidInput` before any COM call. The rename itself is
+                delegated to `rename_sheet`, which owns the `SetName`
+                no-failure-signal protocol.
             count: Number of copies to create. Must be a positive integer.
 
         Returns:
             Result dict. `data["created"]` lists the new sheet name(s), in
-            creation order; `data["sheets"]` is the full sheet list
-            re-read after the last copy. Fails with `swInvalidInput` if
-            `source_sheet` doesn't exist, `new_name` already exists, or
-            `count`/`new_name` are combined invalidly -- none of these make
-            any COM call. Fails with `swFeatureError` if `PasteSheet`
-            itself returns `False`, or if the sheet count doesn't actually
-            increase by one after a `PasteSheet` that returned `True`.
+            creation order; `data["sheets"]` is the sheet list as of the
+            last read (the final copy's, or `rename_sheet`'s own post-rename
+            read). Fails with `swInvalidInput` if `source_sheet` doesn't
+            exist, `new_name` already exists, or `count`/`new_name` are
+            combined invalidly -- none of these make any COM call. Fails
+            with `swFeatureError` if `PasteSheet` itself returns `False`, or
+            if the sheet count doesn't actually increase by one after a
+            `PasteSheet` that returned `True`. A rename failure propagates
+            `rename_sheet`'s own error code, with `data["created"]` still
+            reporting the copy that did succeed.
         """
         if not isinstance(count, int) or isinstance(count, bool) or count < 1:
             return self._result(
@@ -3429,19 +3461,12 @@ class DrawingOperations:
         if err:
             return err
 
-        try:
-            before_names = _normalize_sheet_names(doc.GetSheetNames())
-        except Exception as e:
-            logger.error(f"copy_sheet error: {e}")
-            return self._result(False, f"Could not read sheet names: {e}", SwErrors.swUnknownError)
+        before_names, err = self._sheet_names(doc, "copy_sheet")
+        if err:
+            return err
 
         if source_sheet not in before_names:
-            return self._result(
-                False,
-                f"Sheet {source_sheet!r} not found; available sheets: {before_names!r}",
-                SwErrors.swInvalidInput,
-                {"name": source_sheet, "available_sheets": before_names},
-            )
+            return self._sheet_not_found(source_sheet, before_names)
         if new_name is not None and new_name in before_names:
             return self._result(
                 False, f"Sheet {new_name!r} already exists", SwErrors.swInvalidInput,
@@ -3456,6 +3481,7 @@ class DrawingOperations:
 
         seen = set(before_names)
         created: List[str] = []
+        after_names = before_names
 
         for i in range(count):
             with self.selected(source_sheet, "SHEET", 0, 0, 0) as sel:
@@ -3541,50 +3567,30 @@ class DrawingOperations:
             created.append(pasted_name)
             before_count = after_count
 
+        # The last iteration's re-read is already the current sheet list --
+        # nothing has touched the document since. Only the rename path below
+        # needs a fresh one, and `rename_sheet` takes its own.
+        final_names = after_names
+
         if new_name is not None:
+            # Delegate rather than re-implement: `rename_sheet` already owns
+            # the `ISheet::SetName` protocol (a bare Sub with no return
+            # value/failure signal, per docs/api/01-documents-and-sheets.md's
+            # SetName record -- so it re-reads GetSheetNames afterward to
+            # confirm the rename actually took). Its pre-flight collision
+            # check is redundant with this method's own at the top, which is
+            # deliberate: that one fails before any COM call at all.
             [only] = created
-            try:
-                sheet = doc.Sheet(only)
-            except Exception as e:
+            renamed = self.rename_sheet(only, new_name)
+            if not renamed["success"]:
                 return self._result(
-                    False, f"Created {only!r} but could not resolve it to rename: {e}",
-                    SwErrors.swUnknownError, {"created": created},
-                )
-            if not sheet:
-                return self._result(
-                    False, f"Created {only!r} but could not resolve it to rename",
-                    SwErrors.swUnknownError, {"created": created},
-                )
-            try:
-                sheet.SetName(new_name)
-            except Exception as e:
-                return self._result(
-                    False, f"Created {only!r} but rename to {new_name!r} failed: {e}",
-                    SwErrors.swUnknownError, {"created": created},
-                )
-
-        try:
-            final_names = _normalize_sheet_names(doc.GetSheetNames())
-        except Exception as e:
-            return self._result(
-                False,
-                f"Copies created ({created!r}) but could not re-read the final "
-                f"sheet list: {e}",
-                SwErrors.swUnknownError, {"created": created},
-            )
-
-        if new_name is not None:
-            # SetName is a bare Sub with no return value/failure signal
-            # (docs/api/01-documents-and-sheets.md's SetName record) -- same
-            # "confirm what actually happened" check rename_sheet does.
-            if new_name not in final_names:
-                return self._result(
-                    False,
-                    f"SetName({new_name!r}) did not raise, but {new_name!r} does "
-                    f"not appear in the sheet list afterward: {final_names!r}",
-                    SwErrors.swUnknownError, {"created": created, "sheets": final_names},
+                    False, f"Created {only!r} but rename to {new_name!r} failed: "
+                    f"{renamed['message']}",
+                    SwErrors(renamed["error_code"]),
+                    {"created": created, **renamed.get("data", {})},
                 )
             created = [new_name]
+            final_names = renamed.get("data", {}).get("sheets", final_names)
 
         return self._result(
             True, f"Created {len(created)} sheet(s): {created!r}", SwErrors.swSuccess,
@@ -3617,19 +3623,12 @@ class DrawingOperations:
         if err:
             return err
 
-        try:
-            before_names = _normalize_sheet_names(doc.GetSheetNames())
-        except Exception as e:
-            logger.error(f"delete_sheet error: {e}")
-            return self._result(False, f"Could not read sheet names: {e}", SwErrors.swUnknownError)
+        before_names, err = self._sheet_names(doc, "delete_sheet")
+        if err:
+            return err
 
         if name not in before_names:
-            return self._result(
-                False,
-                f"Sheet {name!r} not found; available sheets: {before_names!r}",
-                SwErrors.swInvalidInput,
-                {"name": name, "available_sheets": before_names},
-            )
+            return self._sheet_not_found(name, before_names)
         if len(before_names) <= 1:
             return self._result(
                 False,
@@ -3697,19 +3696,12 @@ class DrawingOperations:
         if err:
             return err
 
-        try:
-            before_names = _normalize_sheet_names(doc.GetSheetNames())
-        except Exception as e:
-            logger.error(f"rename_sheet error: {e}")
-            return self._result(False, f"Could not read sheet names: {e}", SwErrors.swUnknownError)
+        before_names, err = self._sheet_names(doc, "rename_sheet")
+        if err:
+            return err
 
         if old_name not in before_names:
-            return self._result(
-                False,
-                f"Sheet {old_name!r} not found; available sheets: {before_names!r}",
-                SwErrors.swInvalidInput,
-                {"name": old_name, "available_sheets": before_names},
-            )
+            return self._sheet_not_found(old_name, before_names)
         if new_name in before_names:
             return self._result(
                 False, f"Sheet {new_name!r} already exists", SwErrors.swInvalidInput,
@@ -3722,11 +3714,7 @@ class DrawingOperations:
             logger.error(f"rename_sheet error: {e}")
             return self._result(False, f"Resolve sheet error: {e}", SwErrors.swUnknownError)
         if not sheet:
-            return self._result(
-                False, f"Sheet {old_name!r} not found; available sheets: {before_names!r}",
-                SwErrors.swInvalidInput,
-                {"name": old_name, "available_sheets": before_names},
-            )
+            return self._sheet_not_found(old_name, before_names)
 
         try:
             sheet.SetName(new_name)
@@ -4115,6 +4103,33 @@ class DrawingOperations:
 
         return sheet, None
 
+    def _iter_real_views(self, sheet: Any):
+        """Yield every real (non-sheet-pseudo-view) view on `sheet` via
+        `ISheet::GetViews` -- the one place the pseudo-view filter
+        (docs/api/02-views.md's Gotchas on that entry) is enforced for the
+        helpers that walk a sheet's views: `list_sheets`' view count,
+        `_sheet_view_names`, and `_sheet_view_fill_state`.
+
+        Only filters when `Type` was actually readable, matching
+        `list_views`' own rule -- a real view with an unreadable `Type` must
+        not silently vanish. Yields nothing (never raises) if `GetViews`
+        fails or answers something other than a sequence.
+        """
+        try:
+            views_raw = sheet.GetViews() or []
+        except Exception:
+            return
+        if not isinstance(views_raw, (list, tuple)):
+            return
+
+        sheet_type_code = int(SwDrawingViewTypes.swDrawingSheet)
+        for view in views_raw:
+            type_code = self._read_prop(view, "Type")
+            if (isinstance(type_code, (int, float)) and not isinstance(type_code, bool)
+                    and int(type_code) == sheet_type_code):
+                continue
+            yield view
+
     def _sheet_view_fill_state(self, sheet: Any) -> Dict[str, bool]:
         """`{view_name: has_referenced_model}` for every real
         (non-sheet-pseudo-view) view on `sheet`, via `ISheet::GetViews` +
@@ -4132,20 +4147,8 @@ class DrawingOperations:
         once a model has actually been inserted into it) is what actually
         flips across the call, so that -- not name-appearance -- is the
         fill signal."""
-        try:
-            views_raw = sheet.GetViews() or []
-        except Exception:
-            views_raw = []
-        if not isinstance(views_raw, (list, tuple)):
-            views_raw = []
-
-        sheet_type_code = int(SwDrawingViewTypes.swDrawingSheet)
         state: Dict[str, bool] = {}
-        for view in views_raw:
-            type_code = self._read_prop(view, "Type")
-            if (isinstance(type_code, (int, float)) and not isinstance(type_code, bool)
-                    and int(type_code) == sheet_type_code):
-                continue
+        for view in self._iter_real_views(sheet):
             name = self._read_prop(view, "GetName2")
             if not name:
                 continue
@@ -6134,20 +6137,8 @@ class DrawingOperations:
         `ISheet::GetViews` -- what `insert_model_items` iterates for
         `all_views=True`, mirroring `list_views`'s own sheet-pseudo-view
         filter."""
-        try:
-            views_raw = sheet.GetViews() or []
-        except Exception:
-            views_raw = []
-        if not isinstance(views_raw, (list, tuple)):
-            views_raw = []
-
-        sheet_type_code = int(SwDrawingViewTypes.swDrawingSheet)
         names = []
-        for view in views_raw:
-            type_code = self._read_prop(view, "Type")
-            if (isinstance(type_code, (int, float)) and not isinstance(type_code, bool)
-                    and int(type_code) == sheet_type_code):
-                continue
+        for view in self._iter_real_views(sheet):
             name = self._read_prop(view, "GetName2")
             if name:
                 names.append(name)

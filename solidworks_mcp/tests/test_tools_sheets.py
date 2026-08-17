@@ -13,19 +13,9 @@ import pytest
 from solidworks_mcp.constants_drawing import SwDwgPaperSizes, SwDwgTemplates
 from solidworks_mcp.tools import dispatch, sw_automation
 
-
-@pytest.fixture
-def tool_sw(make_sw):
-    """Factory mirroring test_tools_views_basic.py's `tool_sw`, connecting
-    the shared `tools.sw_automation` singleton (what `dispatch()` actually
-    calls through) to a fresh fake `SldWorks.Application`."""
-    def _make(doc_type="drawing", **kwargs):
-        fake = make_sw(doc_type, **kwargs)
-        connected = sw_automation.connect()
-        assert connected["success"], connected
-        return fake
-    yield _make
-    sw_automation.disconnect()
+# `tool_sw` (the drawing-mode factory connecting the shared
+# `tools.sw_automation` singleton that `dispatch()` calls through) comes from
+# conftest.py.
 
 
 class TestAddSheet:

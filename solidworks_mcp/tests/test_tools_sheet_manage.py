@@ -13,23 +13,11 @@ argument order, plus the "verify the count/name actually changed" guards
 called for by this issue's acceptance criteria.
 """
 
-import pytest
+from solidworks_mcp.tools import dispatch, registered_names
 
-from solidworks_mcp.tools import dispatch, registered_names, sw_automation
-
-
-@pytest.fixture
-def tool_sw(make_sw):
-    """Factory mirroring test_tools_sheets.py's `tool_sw`, connecting the
-    shared `tools.sw_automation` singleton (what `dispatch()` actually calls
-    through) to a fresh fake `SldWorks.Application`."""
-    def _make(doc_type="drawing", **kwargs):
-        fake = make_sw(doc_type, **kwargs)
-        connected = sw_automation.connect()
-        assert connected["success"], connected
-        return fake
-    yield _make
-    sw_automation.disconnect()
+# `tool_sw` (the drawing-mode factory connecting the shared
+# `tools.sw_automation` singleton that `dispatch()` calls through) comes from
+# conftest.py.
 
 
 def test_all_three_tools_are_registered():
@@ -86,8 +74,12 @@ class TestCopySheet:
 
     def test_new_name_renames_the_single_copy(self, tool_sw):
         fake_sw = tool_sw("drawing")
+        # Four reads: copy_sheet's own before/after pair, then the delegated
+        # rename_sheet's own pre-flight collision read and its post-SetName
+        # verification read.
         fake_sw.ActiveDoc.set_sequence("GetSheetNames", [
             ("Sheet1",),
+            ("Sheet1", "Sheet1(2)"),
             ("Sheet1", "Sheet1(2)"),
             ("Sheet1", "Detail"),
         ])
@@ -113,6 +105,7 @@ class TestCopySheet:
             ("Sheet1",),
             ("Sheet1", "Sheet1(2)"),
             ("Sheet1", "Sheet1(2)"),
+            ("Sheet1", "Sheet1(2)"),
         ])
         fake_sw.ActiveDoc.set_sequence("GetSheetCount", [1, 2])
         fake_sw.ActiveDoc.Extension.set_return("SelectByID2", True)
@@ -124,6 +117,9 @@ class TestCopySheet:
 
         assert result["success"] is False
         assert result["error_name"] == "swUnknownError"
+        # The copy itself is still reported, so a caller can see what was
+        # actually created before the rename failed.
+        assert result["data"]["created"] == ["Sheet1(2)"]
 
     def test_new_name_with_count_other_than_one_errors_without_com_call(self, tool_sw):
         fake_sw = tool_sw("drawing")
