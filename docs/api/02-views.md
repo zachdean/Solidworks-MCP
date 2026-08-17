@@ -299,6 +299,65 @@ failure mode beyond returning the toggle's actual state.
   calling the 3-view/model-view insertion methods if deterministic scaling behavior
   is required in an automation pipeline.
 
+### ISldWorks::SetUserPreferenceToggle
+
+- **Interface:** ISldWorks
+- **Method:** SetUserPreferenceToggle
+- **Minimum SW version:** unverified — help page fetch 403'd directly (same WAF
+  block noted throughout this dossier); paired with `GetUserPreferenceToggle`
+  (also unverified on Availability), so treat as available on the same versions.
+
+**Signature:**
+
+```vb
+Sub SetUserPreferenceToggle( _
+   ByVal UserPreferenceToggle As System.Integer, _
+   ByVal Value As System.Boolean _
+)
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| UserPreferenceToggle | Integer | n/a | Yes | Identifies which toggle-type system option to write. For 3-view auto-scale, pass `swAutomaticScaling3ViewDrawings` | `swUserPreferenceToggle_e` |
+| Value | Boolean | n/a | Yes | `True` to turn the toggle on, `False` to turn it off | — |
+
+**Returns:** None (`Sub`) — no success/failure indicator; read the toggle back via
+`GetUserPreferenceToggle` to confirm the write took effect.
+
+**Prior selection required:** None — writes an application-level user preference.
+
+**Source URL(s):**
+- https://www.rimptec.com/rsolidworks/net/lehal/sw/ISldWorks.html (type-library mirror: confirms 2-argument `(Integer, Boolean) -> void` signature)
+- https://help.solidworks.com/2023/English/api/sldworksapi/SOLIDWORKS.Interop.sldworks~SOLIDWORKS.Interop.sldworks.ISldWorks~SetUserPreferenceToggle.html (indexed by search; direct fetch 403'd)
+
+**status:** verified (type-library signature corroborated by search-indexed page
+titles across multiple SW versions; page body itself inaccessible per this
+dossier's standing WAF caveat)
+
+**Gotchas:**
+- **No boolean return** — unlike most `Set*` calls in this API that return success as
+  a `Boolean`, this is a bare `Sub`. A caller that needs certainty the write applied
+  must round-trip through `GetUserPreferenceToggle`.
+- **Version-dependent value convention reported in community sources**: SOLIDWORKS
+  2012-2013 era discussion describes an inverted/integer convention (0 = on, 1 = off)
+  for this call, later normalized to a plain `Boolean` (`True` = on) in subsequent
+  versions. Current (2025-era) signature takes `System.Boolean` per the type-library
+  mirror — treat `True`/`False` as the correct convention for any currently
+  supported SOLIDWORKS version; the old integer convention is a historical footnote,
+  not something to code defensively around.
+- Pair with `GetUserPreferenceToggle` (same enum) to snapshot-then-restore a toggle
+  around a scoped operation, e.g. `swAutomaticScaling3ViewDrawings` around a
+  standard-3-view insertion — read the current value first, set the desired value,
+  perform the operation, then set the value back to what was read, in a `finally`
+  so the operator's SolidWorks install setting isn't silently changed on an
+  exception path.
+- Same one-argument-vs-two-argument caveat as `GetUserPreferenceToggle` applies here:
+  `IModelDocExtension::SetUserPreferenceToggle` is a different, document-scoped,
+  3-argument overload — do not confuse it with this one-preference-plus-value,
+  application-level `ISldWorks` member.
+
 ### IDrawingDoc::InsertModelInPredefinedView
 
 - **Interface:** IDrawingDoc
@@ -1264,6 +1323,212 @@ Property Set UseSheetScale(ByVal value As System.Integer)
   `IModelDoc2::EditRebuild3` afterward to force a regenerate.
 - Units: n/a (a link/state flag, not a measurement).
 
+## View enumeration and metadata
+
+These four records back a "list every view on a sheet, with what it's called, what
+kind it is, and what it references" tool -- not itself part of the original research
+issue's requested-method list, but needed to make the view-creation tools' output
+addressable (a caller can't target a view by name without first discovering that
+name). Added per this issue's working agreement: fetched from help.solidworks.com
+where reachable, and from the same type-library mirror plus a working VBA example
+this dossier already relies on elsewhere where help.solidworks.com 403'd.
+
+### IDrawingDoc::Sheet
+
+- **Interface:** IDrawingDoc
+- **Method:** Sheet
+- **Minimum SW version:** unverified — help page fetch 403'd directly (same WAF
+  block noted throughout this dossier).
+
+**Signature:**
+
+```vb
+Function Sheet( _
+   ByVal Name As System.String _
+) As System.Object
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| Name | String | n/a | Yes | Name of the sheet to retrieve, e.g. one of the strings returned by `GetSheetNames` | — |
+
+**Returns:** `System.Object`, which is actually an `ISheet` interface pointer wrapped
+as `Object` — same casting pattern as `GetSheetNames`/`GetCurrentSheet` documented
+above. `Nothing`/`Empty` if no sheet by that name exists (inferred by symmetry with
+this API's other name-lookup accessors; not independently confirmed on an
+inaccessible page).
+
+**Prior selection required:** None — a direct by-name lookup, unlike
+`GetCurrentSheet` (whichever sheet happens to be active).
+
+**Source URL(s):**
+- https://www.rimptec.com/rsolidworks/net/lehal/sw/IDrawingDoc.html (type-library mirror: confirms `Sheet(String) -> ISheet` signature; also lists `Sheet` in the authoritative Sheet-related member set already cited by this dossier's sheet-deletion record)
+
+**status:** verified (type-library signature only; help page itself inaccessible)
+
+**Gotchas:**
+- Same `Object` → `ISheet` cast requirement as `GetSheetNames`/`GetCurrentSheet` —
+  not a typed return.
+- Distinct from `GetCurrentSheet` (returns whichever sheet is active) and
+  `ActivateSheet` (changes which sheet is active, returns `Boolean`, not an `ISheet`
+  reference) — `Sheet(Name)` is the one accessor that resolves an arbitrary sheet by
+  name without changing what's currently active in the UI.
+
+### ISheet::GetViews
+
+- **Interface:** ISheet
+- **Method:** GetViews
+- **Minimum SW version:** unverified — help page fetch 403'd directly (same WAF
+  block noted throughout this dossier).
+
+**Signature:**
+
+```vb
+Function GetViews() As System.Object
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| *(none)* | — | — | — | No parameters | — |
+
+**Returns:** `System.Object`, cast to an array of `IView` (`View`) objects — every
+view placed on this specific sheet. A working VBA example (source below) iterates
+this array directly with `For Each` and reads `.Name` off each element with no
+skip-the-first-entry step, so (unlike `IDrawingDoc::GetViews`, which returns one
+array per sheet with the sheet itself as that sub-array's first element — see that
+method's own record) this per-sheet accessor's array holds only placed views, not
+the sheet.
+
+**Prior selection required:** None — called on an already-resolved `ISheet`
+reference (e.g. from `IDrawingDoc::Sheet`/`GetCurrentSheet`).
+
+**Source URL(s):**
+- https://www.rimptec.com/rsolidworks/net/lehal/sw/ISheet.html (type-library mirror: confirms no-argument, `Object`-returning signature)
+- https://thecadcoder.com/solidworks-vba-macros/drawing-loop-all-views-in-drawing/ (working VBA example: `views = swSheet.GetViews` then `For Each vView In views` reading `.Name` directly)
+- https://help.solidworks.com/2016/english/api/sldworksapi/solidworks.interop.sldworks~solidworks.interop.sldworks.isheet~getviews.html (indexed by search; direct fetch 403'd)
+
+**status:** verified (type-library signature + working macro corroborate each
+other; help page body itself inaccessible)
+
+**Gotchas:**
+- **Does not include the sheet itself** — contrast with `IDrawingDoc::GetViews`,
+  whose per-sheet sub-arrays are headed by the sheet's own pseudo-view entry (Type
+  `swDrawingSheet`). Enumerating via `ISheet::GetViews` needs no such skip. This is
+  itself an inference (see the working-example caveat two paragraphs below), not an
+  independently stated fact — `list_views` (this issue's consumer of this record)
+  filters out any `swDrawingSheet`-typed entry defensively rather than trusting it,
+  so a wrong assumption here degrades to a no-op filter instead of a bogus
+  "Sheet1"-named view leaking into every downstream view/annotation tool's view list.
+- An empty sheet (no views placed yet) returns an empty array, not `Nothing`/`Empty`
+  — inferred from the working example's unconditional `For Each` with no
+  nil-guard, not independently stated on an accessible help page; treat as the
+  working assumption, verify empirically if a zero-view sheet behaves unexpectedly.
+- `Object` return needs the same array cast as `GetSheetNames`/`GetCurrentSheet`.
+- **Getting a resolved `ISheet`'s own name:** the type-library mirror lists it as a
+  Java `getName()` accessor, the standard COM4Java rendering of a VB `Property Get
+  Name` — i.e. the real member is the property `ISheet::Name`, not a `GetName()`
+  method (contrast with `IView::GetName2`, whose Java form is `getName2()` because
+  that one really is a VB `Function`, not a property). Not independently verified
+  against a fetchable help page; low-stakes enough (display-only) not to block this
+  issue on it.
+
+### IView::ReferencedDocument
+
+- **Interface:** IView
+- **Method:** ReferencedDocument (property)
+- **Minimum SW version:** unverified — help page fetch 403'd directly (same WAF
+  block noted throughout this dossier).
+
+**Signature:**
+
+```vb
+ReadOnly Property ReferencedDocument As System.Object
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| *(none)* | — | — | — | No parameters (property get only) | — |
+
+**Returns:** `System.Object`, cast to `IModelDoc2` — the model document this view
+was created from. Per search-indexed page text, **section and detail views have no
+referenced document of their own** and this property does not return a usable model
+reference for them; get the base/parent view first via `IView::GetBaseView` and read
+`ReferencedDocument` off that instead.
+
+**Prior selection required:** None — direct property get on an `IView` reference.
+
+**Source URL(s):**
+- https://www.rimptec.com/rsolidworks/net/lehal/sw/IView.html (type-library mirror: confirms get-only, `IModelDoc2`-returning property)
+- https://help.solidworks.com/2018/english/api/sldworksapi/SOLIDWORKS.Interop.sldworks~SOLIDWORKS.Interop.sldworks.IView~ReferencedDocument.html (indexed by search, snippet quoted above; direct fetch 403'd)
+
+**status:** verified (type-library signature + search-indexed page snippet
+corroborate each other; full help page body itself inaccessible)
+
+**Gotchas:**
+- **Section/detail views: no referenced document of their own** — walk to the base
+  view via `GetBaseView`/`IGetBaseView` first (see that record below) before reading
+  this property, or the call returns nothing usable.
+- A companion `IView::GetReferencedModelName` (String-returning, confirmed to exist
+  by an indexed help-page title, not independently fetched) gives just the model's
+  name without a full `IModelDoc2` handle — cheaper if only the name is needed and
+  the model may not be loaded/resolvable as a live document object.
+- Get-only — there is no `SetReferencedDocument`; a view's model reference is fixed
+  by how it was created (`CreateDrawViewFromModelView3`'s `ModelName`, etc.).
+
+### IView::GetBaseView / IView::IGetBaseView
+
+- **Interface:** IView
+- **Method:** GetBaseView (returns `Dispatch`) / IGetBaseView (typed `IView`
+  variant, same pattern as `GetFirstView`/`IGetFirstView` elsewhere in this API)
+- **Minimum SW version:** unverified — help page fetch 403'd directly (same WAF
+  block noted throughout this dossier).
+
+**Signature:**
+
+```vb
+Function GetBaseView() As System.Object   ' cast to IView
+Function IGetBaseView() As IView          ' typed variant
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| *(none)* | — | — | — | No parameters | — |
+
+**Returns:** `IView` — the parent/base view this view was derived from (e.g. a
+section, detail, auxiliary, or projected view's originating standard view), or
+`Nothing`/`Empty` for a view with no parent (e.g. a plain model view placed directly
+via `CreateDrawViewFromModelView3`, or the sheet's first standard view).
+
+**Prior selection required:** None — direct method call on an `IView` reference.
+
+**Source URL(s):**
+- https://www.rimptec.com/rsolidworks/net/lehal/sw/IView.html (type-library mirror: confirms both `GetBaseView`/`IGetBaseView` exist, no-argument)
+- https://www.javelin-tech.com/blog/2015/07/find-parent-view-solidworks/ (vendor blog: "use IView::GetBaseView or IView::IGetBaseView to get the parent view of a section [or detail] view"; direct fetch of this page itself 403'd, corroborated via search index)
+
+**status:** verified (type-library signature + independent vendor-blog corroboration
+via search index; neither source's full page body was directly fetchable)
+
+**Gotchas:**
+- **This is the answer to "what is this view's parent view"** — there is no
+  `IView::Parent`/`ParentView` property; searches for one turn up nothing (see this
+  section's introductory note). `GetBaseView`/`IGetBaseView` is the real member.
+- Documented use case is specifically section/detail views reaching back to the
+  standard view they were cut/detailed from; behavior for other derived-view types
+  (projected/auxiliary/alternate-position) is not independently confirmed here —
+  treat a `Nothing`/`Empty` return as "no parent" regardless of view type rather than
+  assuming it only applies to section/detail views.
+- Combine with `ReferencedDocument`'s section/detail-view gap above: for a view
+  whose own `ReferencedDocument` is empty, `GetBaseView().ReferencedDocument` is the
+  documented fallback path to the underlying model.
+
 ## View naming, type, alignment, and lifecycle
 
 ### IView::GetName2
@@ -1759,3 +2024,36 @@ break-line direction: `IView::InsertBreak3`'s `Orientation` parameter and
 | swBreakLineVertical | 2 | Vertical break line |
 
 Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swBreakLineOrientation_e.html
+
+#### swUserPreferenceToggle_e (view-relevant member)
+
+`swUserPreferenceToggle_e` has hundreds of members covering every SOLIDWORKS system
+option; per this dossier's `GetUserPreferenceToggle`/`SetUserPreferenceToggle`
+records above, and per `docs/api/05-export-and-layers.md`'s own curated-subset
+disclaimer for the same enum, its help.solidworks.com enumeration page publishes no
+numeric values for any member. This view-creation epic needs exactly one member's
+numeric value (to snapshot-then-restore the toggle around `insert_standard_3_view`),
+so it was tracked down independently rather than left as a named-only constant:
+
+| Member | Number | Meaning |
+| --- | --- | --- |
+| swAutomaticScaling3ViewDrawings | 86 (`0x56`) | Auto-scale newly inserted drawing views to fit the sheet (see `CreateDrawViewFromModelView3`'s and `Create3rdAngleViews2`'s Gotchas above for its documented effect) |
+
+**Source:** a community-hosted Delphi/Pascal transcription of the compiled
+`SwConst.tlb` type library (`SwConst_TLB.pas`, from the `pisfu/PlanetGear` GitHub
+repository — a student CAD project's checked-in API bindings, not an official
+SOLIDWORKS source), which enumerates the full `swUserPreferenceToggle_e` block as
+consecutive hex constants: `swAutomaticScaling3ViewDrawings = $00000056` (86),
+immediately followed by `swDrawingAutomaticBomUpdate = $00000057` (87),
+`swDrawingSelectHiddenEntities = $00000058` (88), etc. — a monotonic, gap-free
+sequence consistent with a genuine compiled-in enum rather than a guess.
+https://github.com/pisfu/PlanetGear (file path contains Cyrillic directory names;
+see this dossier's git history / research notes for the exact URL used).
+
+**status:** unverified against a primary help.solidworks.com/swconst page (none
+publish numeric values for this enum at all, per every source checked in this and
+the export dossier's research passes) — corroborated only by one third-party
+compiled-type-library transcription. Treat this specific numeric value with more
+caution than this dossier's other enums; if `SetUserPreferenceToggle(86, ...)`
+is ever observed to toggle the wrong system option against a live SolidWorks
+session, this is the record to revisit first.

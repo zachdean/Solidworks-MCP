@@ -13,9 +13,11 @@ from ..constants import SwErrors, SwDocumentTypes, SwFileTypes
 from ..constants_drawing import (
     SwCustomInfoType,
     SwCustomPropertyAddOption,
+    SwDrawingViewTypes,
     SwDwgPaperSizes,
     SwSaveAsOptions,
     SwSaveAsVersion,
+    SwUserPreferenceToggle,
     decode_save_error,
 )
 from ..utils import find_template
@@ -51,6 +53,25 @@ _PAPER_SIZES = {
 # `_VIEW_ENTITY_TYPES`.
 _OPEN_DOC_OPTION_READ_ONLY = 2
 _OPEN_DOC_OPTION_LOAD_LIGHTWEIGHT = 128
+
+# `IDrawingDoc::CreateDrawViewFromModelView3`'s `ViewName` argument accepts the
+# asterisk-prefixed standard-orientation names (docs/api/02-views.md's "Front"
+# vs "*Front" gotcha -- every working example uses the "*"-prefixed form).
+# Keyed lowercase with no leading "*", so callers can pass "Front", "front",
+# or "*Front" interchangeably; `insert_model_view` rejects anything else
+# rather than guessing at an unprefixed custom named view.
+_STANDARD_MODEL_VIEWS = {
+    "front": "*Front",
+    "top": "*Top",
+    "right": "*Right",
+    "left": "*Left",
+    "bottom": "*Bottom",
+    "back": "*Back",
+    "isometric": "*Isometric",
+    "dimetric": "*Dimetric",
+    "trimetric": "*Trimetric",
+    "current": "*Current",
+}
 
 
 class DrawingOperations:
@@ -533,4 +554,334 @@ class DrawingOperations:
             overall_success, message,
             SwErrors.swSuccess if overall_success else SwErrors.swUnknownError,
             {"configuration": config_name, "results": results},
+        )
+
+    # ========================================================================
+    # View creation / discovery tools
+    # ========================================================================
+
+    @staticmethod
+    def _read_prop(obj: Any, name: str) -> Any:
+        """Read a COM member that some SolidWorks interop layers expose as a
+        bare attribute and others as a zero-arg method -- the same
+        property/method duality `_get_doc_type` above works around, reused
+        here for `IView::Type`/`ScaleDecimal`/`Position` and `ISheet::Name`
+        (all documented as VB properties in docs/api/02-views.md, but the
+        fake-COM harness's dual-purpose wrapper -- and, per this project's
+        prior experience, some real interop layers -- makes every one of
+        them callable too).
+
+        Returns `None` (never raises) if the member is missing or the read
+        itself fails, so callers can treat a failed/unsupported read the
+        same as "no data" rather than special-casing it.
+        """
+        try:
+            value = getattr(obj, name)
+        except Exception:
+            return None
+        if callable(value):
+            try:
+                return value()
+            except Exception:
+                return None
+        return value
+
+    def _resolve_model_view_name(self, view_name: str) -> Tuple[Optional[str], Optional[str]]:
+        """Map a friendly orientation name to the `*Name` form
+        `CreateDrawViewFromModelView3` expects (docs/api/02-views.md's
+        "Front" vs "*Front" gotcha).
+
+        Returns `(resolved_name, None)` on success, or `(None,
+        error_message)` for anything not in `_STANDARD_MODEL_VIEWS` --
+        listing the valid names, rather than passing an unrecognized string
+        straight through to SolidWorks and letting a typo silently fail as
+        `CreateDrawViewFromModelView3` returning `Nothing`.
+        """
+        key = (view_name or "").strip().lstrip("*").lower()
+        resolved = _STANDARD_MODEL_VIEWS.get(key)
+        if resolved is None:
+            valid = ", ".join(
+                _STANDARD_MODEL_VIEWS[k] for k in sorted(_STANDARD_MODEL_VIEWS)
+            )
+            return None, f"Unknown view_name {view_name!r}; expected one of: {valid}"
+        return resolved, None
+
+    def insert_model_view(self, model_path: str, view_name: str = "*Front",
+                           x: float = 0, y: float = 0,
+                           sheet_name: Optional[str] = None) -> Dict:
+        """
+        Place a model view on a drawing sheet via
+        `IDrawingDoc::CreateDrawViewFromModelView3`.
+
+        Args:
+            model_path: Full pathname of the model document
+                (.sldprt/.sldasm) to project a view of.
+            view_name: One of Front/Top/Right/Left/Bottom/Back/Isometric/
+                Dimetric/Trimetric/Current (case-insensitive, with or
+                without a leading "*") -- resolved to the `*Name` form via
+                `_resolve_model_view_name`. Anything else fails with
+                `swInvalidInput` listing the valid names.
+            x, y: View center, in the caller's default unit (`set_units`) --
+                converted to sheet-space meters here. `LocZ` is always `0`:
+                sheet space is 2D, and the dossier confirms it's inert.
+            sheet_name: Sheet to place the view on, activated via
+                `IDrawingDoc::ActivateSheet` first. Omitted: whichever sheet
+                is already active.
+
+        Returns:
+            Result dict. On success, `data["view_name"]` is the created
+            view's actual name (`IView::GetName2`) -- what later
+            annotation/view tools address it by. A `None` return from
+            `CreateDrawViewFromModelView3` (the dossier's documented
+            failure signal -- no error code, just `Nothing`) fails with
+            `swFeatureError`, naming the model path and resolved view name.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        resolved_view_name, error_message = self._resolve_model_view_name(view_name)
+        if resolved_view_name is None:
+            return self._result(
+                False, error_message, SwErrors.swInvalidInput, {"view_name": view_name},
+            )
+
+        if sheet_name:
+            try:
+                activated = doc.ActivateSheet(sheet_name)
+            except Exception as e:
+                logger.error(f"insert_model_view activate sheet error: {e}")
+                return self._result(False, f"Activate sheet error: {e}", SwErrors.swInvalidInput)
+            if not activated:
+                return self._result(
+                    False, f"Sheet {sheet_name!r} not found", SwErrors.swInvalidInput,
+                    {"sheet_name": sheet_name},
+                )
+
+        x_m = self._units.to_meters(x)
+        y_m = self._units.to_meters(y)
+
+        try:
+            view = doc.CreateDrawViewFromModelView3(model_path, resolved_view_name, x_m, y_m, 0.0)
+        except Exception as e:
+            logger.error(f"insert_model_view error: {e}")
+            return self._result(False, f"Insert model view error: {e}", SwErrors.swFeatureError)
+
+        if view is None:
+            return self._result(
+                False,
+                f"Failed to create view {resolved_view_name!r} from model {model_path!r}",
+                SwErrors.swFeatureError,
+                {"model_path": model_path, "view_name": resolved_view_name},
+            )
+
+        created_name = self._read_prop(view, "GetName2")
+
+        return self._result(
+            True, f"Inserted view {created_name or resolved_view_name!r}", SwErrors.swSuccess,
+            {
+                "model_path": model_path, "view_name": created_name,
+                "requested_view_name": resolved_view_name,
+                "x": x, "y": y, "sheet_name": sheet_name,
+            },
+        )
+
+    def insert_standard_3_view(self, model_path: str, first_angle: bool = False,
+                                auto_scale: bool = True) -> Dict:
+        """
+        Insert the standard three-view set via
+        `IDrawingDoc::Create3rdAngleViews2` (ANSI/third-angle, the default)
+        or `Create1stAngleViews2` (ISO/first-angle, `first_angle=True`).
+
+        Both methods respect the `swAutomaticScaling3ViewDrawings` user
+        preference rather than taking a scale argument of their own
+        (docs/api/02-views.md's Gotchas on both records). This wrapper
+        snapshots the preference's current value via
+        `ISldWorks::GetUserPreferenceToggle`, writes `auto_scale` via
+        `SetUserPreferenceToggle` for the duration of the call, and restores
+        the original value afterward in a `finally` -- on both the success
+        and the exception path -- so the operator's SolidWorks install
+        setting is never silently left changed by an automation run.
+
+        Args:
+            model_path: Full pathname of the model document to build the
+                3-view set from.
+            first_angle: `False` (default) uses `Create3rdAngleViews2`
+                (ANSI); `True` uses `Create1stAngleViews2` (ISO).
+            auto_scale: Value to write to `swAutomaticScaling3ViewDrawings`
+                for the duration of this call.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        toggle = int(SwUserPreferenceToggle.swAutomaticScaling3ViewDrawings)
+        try:
+            original_auto_scale = self._sw_app.GetUserPreferenceToggle(toggle)
+        except Exception as e:
+            logger.error(f"insert_standard_3_view read preference error: {e}")
+            return self._result(False, f"Read preference error: {e}", SwErrors.swUnknownError)
+
+        try:
+            self._sw_app.SetUserPreferenceToggle(toggle, bool(auto_scale))
+        except Exception as e:
+            logger.error(f"insert_standard_3_view set preference error: {e}")
+            return self._result(False, f"Set preference error: {e}", SwErrors.swUnknownError)
+
+        data = {"model_path": model_path, "first_angle": first_angle, "auto_scale": auto_scale}
+        try:
+            if first_angle:
+                created = doc.Create1stAngleViews2(model_path)
+            else:
+                created = doc.Create3rdAngleViews2(model_path)
+        except Exception as e:
+            logger.error(f"insert_standard_3_view error: {e}")
+            return self._result(False, f"Insert standard 3 view error: {e}",
+                                SwErrors.swFeatureError, data)
+        finally:
+            try:
+                self._sw_app.SetUserPreferenceToggle(toggle, bool(original_auto_scale))
+            except Exception as e:
+                logger.error(f"insert_standard_3_view restore preference error: {e}")
+
+        if not created:
+            return self._result(
+                False, f"Failed to create standard 3-view set from {model_path!r}",
+                SwErrors.swFeatureError, data,
+            )
+
+        return self._result(
+            True, f"Inserted standard 3-view set from {model_path!r}", SwErrors.swSuccess, data,
+        )
+
+    def _view_referenced_model(self, view: Any, base_view: Any = None) -> Optional[str]:
+        """Best-effort "what model does this view come from", via
+        `IView::ReferencedDocument` -- falling back to the base/parent
+        view's `ReferencedDocument` for section/detail views, which have
+        none of their own (docs/api/02-views.md's `ReferencedDocument`
+        record's Gotchas).
+        """
+        for candidate in (view, base_view):
+            if candidate is None:
+                continue
+            ref_doc = self._read_prop(candidate, "ReferencedDocument")
+            if not ref_doc:
+                continue
+            path = self._get_doc_path(ref_doc)
+            if path:
+                return path
+            title = self._get_doc_title(ref_doc)
+            if title and title != "Unknown":
+                return title
+        return None
+
+    def _describe_view(self, view: Any) -> Dict:
+        """One view's `list_views` record: name, type, scale, position
+        (docs/api/02-views.md's "View naming, type, alignment" and "View
+        properties" records), plus referenced model and parent view (this
+        issue's "View enumeration and metadata" addendum to that dossier).
+        """
+        name = self._read_prop(view, "GetName2")
+
+        type_code = self._read_prop(view, "Type")
+        type_name = None
+        if isinstance(type_code, (int, float)) and not isinstance(type_code, bool):
+            try:
+                type_name = SwDrawingViewTypes(int(type_code)).name
+            except ValueError:
+                type_name = f"unknown type {int(type_code)}"
+
+        scale = self._read_prop(view, "ScaleDecimal")
+        if not isinstance(scale, (int, float)) or isinstance(scale, bool):
+            scale = None
+
+        position = self._read_prop(view, "Position")
+        x = y = None
+        if isinstance(position, (list, tuple)) and len(position) >= 2:
+            try:
+                x = self._units.from_meters(float(position[0]))
+                y = self._units.from_meters(float(position[1]))
+            except (TypeError, ValueError):
+                x = y = None
+
+        base_view = None
+        try:
+            candidate = view.GetBaseView()
+        except Exception:
+            candidate = None
+        if candidate:
+            base_view = candidate
+        parent_view = self._read_prop(base_view, "GetName2") if base_view else None
+
+        return {
+            "name": name,
+            "type": type_name,
+            "type_code": int(type_code) if isinstance(type_code, (int, float))
+                and not isinstance(type_code, bool) else None,
+            "scale": scale,
+            "x": x,
+            "y": y,
+            "referenced_model": self._view_referenced_model(view, base_view),
+            "parent_view": parent_view,
+        }
+
+    def list_views(self, sheet_name: Optional[str] = None) -> Dict:
+        """
+        Enumerate views on a sheet -- name, type, scale, position,
+        referenced model, and parent view -- via `ISheet::GetViews`. The
+        discovery tool every later view/annotation tool needs to address a
+        view by name.
+
+        Args:
+            sheet_name: Sheet to enumerate, resolved via `IDrawingDoc::Sheet`.
+                Omitted: whichever sheet `IDrawingDoc::GetCurrentSheet`
+                reports as active.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        try:
+            if sheet_name:
+                sheet = doc.Sheet(sheet_name)
+                if not sheet:
+                    return self._result(
+                        False, f"Sheet {sheet_name!r} not found", SwErrors.swInvalidInput,
+                        {"sheet_name": sheet_name},
+                    )
+            else:
+                sheet = doc.GetCurrentSheet()
+                if not sheet:
+                    return self._result(False, "No active sheet", SwErrors.swFeatureError)
+                raw_name = self._read_prop(sheet, "Name")
+                sheet_name = raw_name if isinstance(raw_name, str) else None
+
+            views_raw = sheet.GetViews()
+        except Exception as e:
+            logger.error(f"list_views error: {e}")
+            return self._result(False, f"List views error: {e}", SwErrors.swUnknownError)
+
+        if not isinstance(views_raw, (list, tuple)):
+            views_raw = []
+
+        # `ISheet::GetViews`'s own record documents it as *not* heading its
+        # array with the sheet's own pseudo-view entry, unlike
+        # `IDrawingDoc::GetViews` -- but that's an inference from one working
+        # macro's unconditional `For Each`, flagged unverified in the
+        # dossier. Filtering defensively here costs nothing on a harness
+        # that behaves as documented, and avoids surfacing a bogus
+        # "Sheet1"/`swDrawingSheet` entry as an addressable view if it
+        # doesn't. Only filter when `type_code` was actually readable --
+        # a real view with an unreadable `Type` must not silently vanish.
+        sheet_type_code = int(SwDrawingViewTypes.swDrawingSheet)
+        views = []
+        for view in views_raw:
+            described = self._describe_view(view)
+            if described["type_code"] == sheet_type_code:
+                continue
+            views.append(described)
+
+        return self._result(
+            True, f"{len(views)} view(s) on sheet {sheet_name!r}", SwErrors.swSuccess,
+            {"sheet_name": sheet_name, "views": views},
         )

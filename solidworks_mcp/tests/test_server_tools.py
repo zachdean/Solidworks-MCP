@@ -49,6 +49,10 @@ EXPECTED_TOOL_NAMES = {
     "save_drawing",
     "get_custom_properties",
     "set_custom_properties",
+    # Drawing View Creation & Discovery Tools
+    "insert_model_view",
+    "insert_standard_3_view",
+    "list_views",
     # Sketch Tools
     "create_sketch",
     "create_sketch_on_face",

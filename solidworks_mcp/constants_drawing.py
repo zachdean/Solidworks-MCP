@@ -344,6 +344,26 @@ class SwBreakLineStyle(IntEnum):
     swBreakLine_Jagged = 5
 
 
+class SwUserPreferenceToggle(IntEnum):
+    """Curated subset of application-level toggle system options
+    (swUserPreferenceToggle_e), consumed by ISldWorks::GetUserPreferenceToggle /
+    SetUserPreferenceToggle.
+
+    This enum has hundreds of members and its own help.solidworks.com
+    enumeration page publishes no numeric values for any of them (confirmed
+    directly, and independently again in docs/api/05-export-and-layers.md's own
+    curated subset of this same enum). Only the one member this issue's
+    insert_standard_3_view needs was tracked down -- via a third-party compiled
+    SwConst.tlb transcription, not an official source -- so this class carries
+    just that member rather than the whole enum. See that record's "status" line
+    in docs/api/02-views.md's Enums section for the sourcing caveat.
+
+    Source: docs/api/02-views.md (Enums section, swUserPreferenceToggle_e).
+    """
+
+    swAutomaticScaling3ViewDrawings = 86
+
+
 class SwBreakLineOrientation(IntEnum):
     """Break line orientation (swBreakLineOrientation_e).
 
