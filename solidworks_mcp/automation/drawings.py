@@ -10868,6 +10868,13 @@ class DrawingOperations:
                 SwErrors.swFeatureError, data,
             )
 
+        # Record the table's name *before* the optional column-hiding pass:
+        # the table already exists on the sheet at this point, so if hiding
+        # fails the caller still needs `data["name"]` to address it with
+        # `delete_table`. Without it, a failed `hidden_columns` leaves an
+        # unnamed stray table behind and no way to clean it up.
+        name = self._record_table(table, data, x, y)
+
         if hidden_columns:
             for idx in hidden_columns:
                 try:
@@ -10875,12 +10882,14 @@ class DrawingOperations:
                 except Exception as e:
                     logger.error(f"insert_bom_table({view_name!r}) ColumnHidden({idx}) error: {e}")
                     return self._result(
-                        False, f"Hide column {idx} error: {e}", SwErrors.swFeatureError,
+                        False,
+                        f"Hide column {idx} error: {e} -- the BOM table"
+                        + (f" {name!r}" if name else "")
+                        + " was created and is still on the sheet",
+                        SwErrors.swFeatureError,
                         {**data, "hidden_columns": hidden_columns},
                     )
             data["hidden_columns"] = list(hidden_columns)
-
-        name = self._record_table(table, data, x, y)
 
         return self._result(
             True,
@@ -11524,12 +11533,15 @@ class DrawingOperations:
                 plain `int`, not `bool`.
             order: Only `'by_position'` (default) is implemented --
                 balloons are sorted by sheet position, **top-left first**:
-                primary key descending `y` (top of the sheet first),
-                secondary key ascending `x` (left of the sheet first),
-                tertiary key the balloon's own name (a stable tie-break for
-                two balloons at the exact same position) -- so the same
-                document state always produces the same order, independent
-                of `GetFirstNote`/`GetNext` walk order.
+                primary key the sheet (document order, so a multi-sheet
+                renumber finishes one sheet before starting the next rather
+                than interleaving them -- `GetPosition` is sheet-local, so
+                comparing `y` across sheets is meaningless), then descending
+                `y` (top of the sheet first), then ascending `x` (left of
+                the sheet first), then the balloon's own name (a stable
+                tie-break for two balloons at the exact same position) -- so
+                the same document state always produces the same order,
+                independent of `GetFirstNote`/`GetNext` walk order.
 
         Returns:
             Result dict. `data["count"]` is how many balloons were
@@ -11568,24 +11580,38 @@ class DrawingOperations:
         if err:
             return err
 
+        # `sheet_index` groups the sort below by sheet. `x`/`y` come from
+        # `IAnnotation::GetPosition`, which is *sheet* space -- so across a
+        # multi-sheet document a raw `(-y, x)` sort interleaves sheets (a
+        # sheet-2 balloon high on its page sorts ahead of a sheet-1 balloon
+        # lower on its own), and the documented "top-left first" contract
+        # stops meaning anything. `_iter_document_views` walks sheet-by-sheet,
+        # each sheet's own pseudo-view first (see its docstring), so counting
+        # pseudo-views recovers the sheet grouping without a second COM walk.
         if view_name:
             view, err = self._require_view(doc, view_name, None)
             if err:
                 return err
-            views = [(view, view_name)]
+            views = [(view, view_name, 0)]
         else:
-            views = [(v, self._read_prop(v, "GetName2")) for v in self._iter_document_views(doc)]
+            views = []
+            sheet_index = -1
+            for v in self._iter_document_views(doc):
+                if self._is_sheet_pseudo_view(v):
+                    sheet_index += 1
+                views.append((v, self._read_prop(v, "GetName2"), max(sheet_index, 0)))
 
         balloons: List[Dict[str, Any]] = []
-        for view, v_name in views:
+        for view, v_name, sheet_index in views:
             for note, annotation in self._iter_view_balloons(view, "renumber_balloons:"):
                 name, x, y = self._annotation_name_position(annotation)
-                balloons.append({"note": note, "name": name, "x": x, "y": y, "view_name": v_name})
+                balloons.append({"note": note, "name": name, "x": x, "y": y,
+                                 "view_name": v_name, "sheet_index": sheet_index})
 
-        def _sort_key(b: Dict[str, Any]) -> Tuple[float, float, str]:
+        def _sort_key(b: Dict[str, Any]) -> Tuple[int, float, float, str]:
             y = b["y"] if isinstance(b["y"], (int, float)) else float("-inf")
             x = b["x"] if isinstance(b["x"], (int, float)) else float("inf")
-            return (-y, x, b["name"] or "")
+            return (b["sheet_index"], -y, x, b["name"] or "")
 
         balloons.sort(key=_sort_key)
 
@@ -12391,6 +12417,22 @@ class DrawingOperations:
             if sheet_err:
                 return sheet_err
             sheet_name = self._sheet_name(sheet)
+            if not sheet_name:
+                # `_scoped_views(doc, None, ...)` treats a falsy `sheet_name`
+                # as "no sheet scope -- walk the whole document" (see its own
+                # `if sheet_name:` branch). Falling through would silently
+                # widen this tool from "every table on the active sheet" to
+                # "every table in the document" -- and unlike a listing, this
+                # one *writes* (a `Visible` toggle per table). Same guard
+                # `auto_balloon_view` applies for the same reason.
+                return self._result(
+                    False,
+                    "Could not read the active sheet's name (ISheet::GetName) "
+                    "-- refusing to update every table in the document instead "
+                    "of the active sheet's",
+                    SwErrors.swUnknownError,
+                    {"table_name": table_name, "all_tables": all_tables},
+                )
             scoped, scoped_err = self._scoped_views(doc, sheet_name, "update_table", "Update table")
             if scoped_err:
                 return scoped_err
@@ -12435,12 +12477,38 @@ class DrawingOperations:
             if annotation is not None:
                 visibility = _com_int(self._read_prop(annotation, "Visible"))
                 if visibility == visible_code:
+                    # Hide and restore are two separate COM writes, so they
+                    # get separate handling: a failed *hide* changed nothing
+                    # and is just a warned non-refresh, but a hide that
+                    # succeeded followed by a restore that did not leaves the
+                    # table hidden in the user's drawing. That is a visible
+                    # side effect of a tool documented (04-tables.md,
+                    # IAnnotation::Visible "Side-effect discipline") to
+                    # toggle-and-restore, so it fails loudly instead of being
+                    # logged as a warning under an overall `success: True`.
+                    hidden = False
                     try:
                         annotation.Visible = hidden_code
-                        annotation.Visible = visible_code
-                        refreshed = True
+                        hidden = True
                     except Exception as e:
-                        logger.warning(f"update_table({name!r}) Visible toggle error: {e}")
+                        logger.warning(f"update_table({name!r}) Visible hide error: {e}")
+
+                    if hidden:
+                        try:
+                            annotation.Visible = visible_code
+                            refreshed = True
+                        except Exception as e:
+                            logger.error(
+                                f"update_table({name!r}) Visible restore error: {e}")
+                            return self._result(
+                                False,
+                                f"Table {name!r} was hidden for its refresh and could "
+                                f"not be made visible again ({e}) -- it is still hidden "
+                                "in the drawing; restore it manually or undo",
+                                SwErrors.swFeatureError,
+                                {"table_name": table_name, "all_tables": all_tables,
+                                 "name": name, "view_name": v_name, "left_hidden": True},
+                            )
 
             if refreshed:
                 refreshed_count += 1
@@ -12530,15 +12598,25 @@ class DrawingOperations:
         Args:
             table_name: `IAnnotation::GetName` value. Searched across every
                 view in the document.
-            row, column: 0-based cell indices -- the same indexing
-                `Text2`/`IsCellTextEditable` document, so no conversion
-                happens at this boundary.
+            row, column: 0-based cell indices in the **visible-only** index
+                space -- the space `Text` and `IsCellTextEditable` address,
+                neither of which takes `Text2`'s `IncludeHidden` parameter
+                (`Text`'s record: it "always behaves as if
+                `IncludeHidden = False`"). Bounds, editability check, write,
+                and read-back therefore all use `RowCount`/`ColumnCount` and
+                `Text2(..., IncludeHidden=False)`, never the hidden-inclusive
+                `TotalRowCount`/`TotalColumnCount` that `get_table_contents`
+                reads with: mixing the two would let a table with a hidden
+                column (which `insert_bom_table`'s own `hidden_columns` can
+                create) pass a bounds check in one index space, write in a
+                second, and verify in a third -- silently hitting the wrong
+                cell and then reporting the mismatch as a failed write.
             text: New driving text for the cell.
 
         Returns:
             Result dict. Fails with `swInvalidInput` before any write COM
             call if `table_name` is unknown, `row`/`column` are out of range
-            (checked against `TotalRowCount`/`TotalColumnCount`), or
+            (checked against the visible-only `RowCount`/`ColumnCount`), or
             `IsCellTextEditable` returns a definite `False`. If
             `IsCellTextEditable` itself raises, the write is attempted
             anyway (a raise is not evidence one way or the other about
@@ -12578,14 +12656,22 @@ class DrawingOperations:
         if err:
             return err
 
-        row_count, column_count, dim_err = self._table_dimensions(table, table_name)
-        if dim_err:
-            return dim_err
+        # Visible-only counts, not `_table_dimensions`' hidden-inclusive
+        # `TotalRowCount`/`TotalColumnCount`: the write below goes through
+        # `Text`, which has no `IncludeHidden` parameter and so addresses the
+        # visible-only grid. See this method's own docstring.
+        row_count = _com_int(self._read_prop(table, "RowCount"))
+        column_count = _com_int(self._read_prop(table, "ColumnCount"))
+        if row_count is None or column_count is None:
+            return self._result(
+                False, f"Could not read row/column count for table {table_name!r}",
+                SwErrors.swFeatureError, {"table_name": table_name},
+            )
         if row >= row_count or column >= column_count:
             return self._result(
                 False,
                 f"row={row}, column={column} out of range for table {table_name!r} "
-                f"({row_count} row(s) x {column_count} column(s))",
+                f"({row_count} visible row(s) x {column_count} visible column(s))",
                 SwErrors.swInvalidInput,
                 {"table_name": table_name, "row": row, "column": column,
                  "row_count": row_count, "column_count": column_count},
@@ -12618,7 +12704,9 @@ class DrawingOperations:
             return self._result(False, f"Set table cell error: {e}", SwErrors.swFeatureError, data)
 
         try:
-            written = table.Text2(row, column, True)
+            # `IncludeHidden=False` to read back in the same visible-only
+            # index space `Text` just wrote in.
+            written = table.Text2(row, column, False)
         except Exception as e:
             # A raised read-back is not evidence the *write* failed -- only a
             # read-back that succeeds and disagrees is. Treating a raise the

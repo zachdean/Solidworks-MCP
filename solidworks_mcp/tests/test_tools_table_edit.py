@@ -230,6 +230,74 @@ class TestUpdateTable:
         assert result["data"]["tables"][0]["refreshed"] is False
         assert result["data"]["refreshed_count"] == 0
 
+    def test_failed_restore_after_successful_hide_is_an_error_not_a_warning(self, tool_sw):
+        """The hide and the restore are two separate COM writes. If the hide
+        lands and the restore does not, the table is left *hidden* in the
+        user's drawing -- a real side effect of a tool documented to
+        toggle-and-restore, so it must fail loudly rather than be logged as a
+        warning under an overall success."""
+        fake_sw = tool_sw("drawing")
+        table, _ann = _table(fake_sw, "t1", name="Table1", row_count=1, column_count=1)
+        view = _view(fake_sw, "v1", "Drawing View1", first_table=table)
+        fake_sw.ActiveDoc.set_return("GetFirstView", view)
+        fake_sw.ActiveDoc.set_return("ForceRebuild3", True)
+
+        # The fake harness stores property sets verbatim, so it cannot make
+        # the *second* write to `Visible` fail. A stand-in annotation can --
+        # it is the only object `update_table` touches on this path.
+        writes = []
+
+        class _FlakyAnnotation:
+            GetName = "Table1"
+
+            @property
+            def Visible(self):
+                return int(SwAnnotationVisibilityState.swAnnotationVisible)
+
+            @Visible.setter
+            def Visible(self, value):
+                writes.append(value)
+                if len(writes) > 1:
+                    raise RuntimeError("annotation invalidated by rebuild")
+
+        table.set_return("t1.GetAnnotation", _FlakyAnnotation())
+
+        result = dispatch("update_table", {"table_name": "Table1"})
+
+        assert result["success"] is False
+        assert result["error_name"] == "swFeatureError"
+        assert result["data"]["left_hidden"] is True
+        assert "still hidden" in result["message"]
+        assert writes == [
+            int(SwAnnotationVisibilityState.swAnnotationHidden),
+            int(SwAnnotationVisibilityState.swAnnotationVisible),
+        ]
+
+    def test_all_tables_refuses_to_widen_to_the_document_when_sheet_name_unreadable(
+            self, tool_sw):
+        """`_scoped_views(doc, None, ...)` treats a falsy sheet name as "walk
+        the whole document". `all_tables=True` *writes* (a Visible toggle per
+        table), so an unreadable active-sheet name must fail rather than
+        silently toggle every table in the file."""
+        fake_sw = tool_sw("drawing")
+        table1, _a1 = _table(fake_sw, "t1", name="Table1", row_count=1, column_count=1)
+        table2, _a2 = _table(fake_sw, "t2", name="Table2", row_count=1, column_count=1)
+        view1 = _view(fake_sw, "v1", "Drawing View1", first_table=table1)
+        view2 = _view(fake_sw, "v2", "Drawing View2", first_table=table2)
+        _chain_views(view1, view2)
+        fake_sw.ActiveDoc.set_return("GetFirstView", view1)
+
+        sheet = fake_sw.new_object("sheet_nameless")
+        sheet.set_raises("sheet_nameless.GetName", RuntimeError("no name"))
+        sheet.set_raises("sheet_nameless.Name", RuntimeError("no name"))
+        fake_sw.ActiveDoc.set_return("GetCurrentSheet", sheet)
+
+        result = dispatch("update_table", {"all_tables": True})
+
+        assert result["success"] is False
+        assert result["error_name"] == "swUnknownError"
+        assert not fake_sw.call_log.calls_to("ForceRebuild3")
+
 
 class TestGetTableContents:
     def test_returns_rectangular_grid_matching_row_column_counts(self, tool_sw):
@@ -286,7 +354,7 @@ class TestSetTableCell:
     def test_writes_and_verifies_via_read_back(self, tool_sw):
         fake_sw = tool_sw("drawing")
         table, _ann = _table(
-            fake_sw, "t1", name="Table1", total_row_count=2, column_count=2,
+            fake_sw, "t1", name="Table1", row_count=2, column_count=2,
         )
         view = _view(fake_sw, "v1", "Drawing View1", first_table=table)
         fake_sw.ActiveDoc.set_return("GetFirstView", view)
@@ -310,7 +378,7 @@ class TestSetTableCell:
         write against an interop layer where Text2 is flaky/unavailable."""
         fake_sw = tool_sw("drawing")
         table, _ann = _table(
-            fake_sw, "t1", name="Table1", total_row_count=1, column_count=1,
+            fake_sw, "t1", name="Table1", row_count=1, column_count=1,
         )
         view = _view(fake_sw, "v1", "Drawing View1", first_table=table)
         fake_sw.ActiveDoc.set_return("GetFirstView", view)
@@ -332,7 +400,7 @@ class TestSetTableCell:
         Text/IsCellTextEditable as literal 0, 0."""
         fake_sw = tool_sw("drawing")
         table, _ann = _table(
-            fake_sw, "t1", name="Table1", total_row_count=1, column_count=1,
+            fake_sw, "t1", name="Table1", row_count=1, column_count=1,
         )
         view = _view(fake_sw, "v1", "Drawing View1", first_table=table)
         fake_sw.ActiveDoc.set_return("GetFirstView", view)
@@ -355,7 +423,7 @@ class TestSetTableCell:
         table, _ann = _table(
             fake_sw, "t1", name="HoleTable1",
             type_code=SwTableAnnotationType.swTableAnnotation_HoleChart,
-            total_row_count=2, column_count=2,
+            row_count=2, column_count=2,
         )
         view = _view(fake_sw, "v1", "Drawing View1", first_table=table)
         fake_sw.ActiveDoc.set_return("GetFirstView", view)
@@ -372,7 +440,7 @@ class TestSetTableCell:
     def test_out_of_range_row_is_rejected_before_any_write(self, tool_sw):
         fake_sw = tool_sw("drawing")
         table, _ann = _table(
-            fake_sw, "t1", name="Table1", total_row_count=2, column_count=2,
+            fake_sw, "t1", name="Table1", row_count=2, column_count=2,
         )
         view = _view(fake_sw, "v1", "Drawing View1", first_table=table)
         fake_sw.ActiveDoc.set_return("GetFirstView", view)
@@ -389,7 +457,7 @@ class TestSetTableCell:
     def test_out_of_range_column_is_rejected_before_any_write(self, tool_sw):
         fake_sw = tool_sw("drawing")
         table, _ann = _table(
-            fake_sw, "t1", name="Table1", total_row_count=2, column_count=2,
+            fake_sw, "t1", name="Table1", row_count=2, column_count=2,
         )
         view = _view(fake_sw, "v1", "Drawing View1", first_table=table)
         fake_sw.ActiveDoc.set_return("GetFirstView", view)
@@ -405,7 +473,7 @@ class TestSetTableCell:
     def test_write_mismatch_on_read_back_is_a_feature_error_not_false_success(self, tool_sw):
         fake_sw = tool_sw("drawing")
         table, _ann = _table(
-            fake_sw, "t1", name="Table1", total_row_count=1, column_count=1,
+            fake_sw, "t1", name="Table1", row_count=1, column_count=1,
         )
         view = _view(fake_sw, "v1", "Drawing View1", first_table=table)
         fake_sw.ActiveDoc.set_return("GetFirstView", view)
@@ -432,6 +500,46 @@ class TestSetTableCell:
 
         assert result["success"] is False
         assert result["error_name"] == "swInvalidInput"
+
+    def test_bounds_and_read_back_use_the_visible_only_index_space(self, tool_sw):
+        """`Text` and `IsCellTextEditable` take no `IncludeHidden` parameter,
+        so they address the *visible* grid. Bounding against the
+        hidden-inclusive `TotalRowCount`/`TotalColumnCount` (as
+        `get_table_contents` does) while writing through `Text` would let a
+        table with a hidden column -- which `insert_bom_table`'s own
+        `hidden_columns` can create -- pass the bounds check, write one cell,
+        and verify a different one.
+
+        Here the table has 4 total columns but only 2 visible: column 2 is
+        out of range for the write and must be rejected, and the read-back
+        must pass `IncludeHidden=False` to match what `Text` wrote.
+        """
+        fake_sw = tool_sw("drawing")
+        table, _ann = _table(
+            fake_sw, "t1", name="Table1",
+            row_count=2, total_row_count=2, column_count=2, total_column_count=4,
+        )
+        view = _view(fake_sw, "v1", "Drawing View1", first_table=table)
+        fake_sw.ActiveDoc.set_return("GetFirstView", view)
+
+        rejected = dispatch("set_table_cell", {
+            "table_name": "Table1", "row": 0, "column": 2, "text": "X",
+        })
+
+        assert rejected["success"] is False
+        assert rejected["error_name"] == "swInvalidInput"
+        assert not fake_sw.call_log.calls_to("Text")
+
+        table.set_return("IsCellTextEditable", True)
+        table.set_return("Text", True)
+        table.set_return("Text2", "Visible")
+
+        accepted = dispatch("set_table_cell", {
+            "table_name": "Table1", "row": 0, "column": 1, "text": "Visible",
+        })
+
+        assert accepted["success"] is True, accepted
+        assert fake_sw.call_log.calls_to("Text2")[0].args == (0, 1, False)
 
 
 class TestSetTablePosition:

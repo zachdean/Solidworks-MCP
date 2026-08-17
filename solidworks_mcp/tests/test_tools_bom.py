@@ -290,6 +290,30 @@ class TestInsertBomTable:
         calls = fake_sw.call_log.calls_to("ColumnHidden")
         assert [c.args for c in calls] == [(0, True), (2, True)]
 
+    def test_failed_column_hide_still_reports_the_created_tables_name(self, tool_sw):
+        """`ColumnHidden` runs *after* `InsertBomTable6` already put a table
+        on the sheet, and nothing rolls it back. If hiding fails the caller
+        still needs `data["name"]` to reach that stray table with
+        `delete_table` -- reporting the failure without a name would strand
+        it."""
+        fake_sw = tool_sw("drawing")
+        sheet = fake_sw.ActiveDoc.GetCurrentSheet()
+        view = _view(fake_sw, "v1", "Drawing View1")
+        sheet.set_return("GetViews", [view])
+        table, _ann = _table(fake_sw, "t1", name="BomTable1")
+        view.set_return("v1.InsertBomTable6", table)
+        table.set_raises("t1.ColumnHidden", RuntimeError("not an indexed property setter"))
+
+        result = dispatch("insert_bom_table", {
+            "view_name": "Drawing View1", "template_path": "/tpl/bom-standard.sldbomtbt",
+            "hidden_columns": [1],
+        })
+
+        assert result["success"] is False
+        assert result["error_name"] == "swFeatureError"
+        assert result["data"]["name"] == "BomTable1"
+        assert "still on the sheet" in result["message"]
+
 
 class TestListTables:
     def test_lists_tables_across_every_view_in_document(self, tool_sw):

@@ -472,6 +472,43 @@ class TestRenumberBalloons:
         assert result["data"]["count"] == 0
         assert not fake_sw.call_log.calls_to("SetBomBalloonText")
 
+    def test_document_wide_numbering_finishes_one_sheet_before_the_next(self, tool_sw):
+        """`GetPosition` is sheet-local, so a raw `(-y, x)` sort interleaves
+        sheets: sheet 2's balloon high on its own page would sort ahead of
+        sheet 1's lower one, and "top-left first" would stop meaning anything
+        for a multi-sheet drawing. Sheet 1's balloons must all be numbered
+        before sheet 2's, top-left first *within* each sheet.
+        """
+        fake_sw = tool_sw("drawing")
+        sw_automation._units.default_unit = "mm"
+
+        # Sheet 1's balloon sits LOW on its page (y=0.01); sheet 2's sits
+        # HIGH on its own (y=0.09). A sheet-blind sort would put sheet 2 first.
+        s1_low, _ = _balloon_note(fake_sw, "n1", name="S1Low", position=(0.01, 0.01, 0.0))
+        s1_high, _ = _balloon_note(fake_sw, "n2", name="S1High", position=(0.01, 0.05, 0.0))
+        _chain_notes(s1_high, s1_low)
+        s2_high, _ = _balloon_note(fake_sw, "n3", name="S2High", position=(0.01, 0.09, 0.0))
+
+        # `_iter_document_views` order: sheet 1's pseudo-view, its real
+        # views, then sheet 2's pseudo-view, then its real views.
+        sheet1_pseudo = _view(fake_sw, "v0", "Sheet1",
+                              type_code=SwDrawingViewTypes.swDrawingSheet)
+        view1 = _view(fake_sw, "v1", "Drawing View1", first_note=s1_high)
+        sheet2_pseudo = _view(fake_sw, "v2", "Sheet2",
+                              type_code=SwDrawingViewTypes.swDrawingSheet)
+        view2 = _view(fake_sw, "v3", "Drawing View2", first_note=s2_high)
+        for a, b in zip([sheet1_pseudo, view1, sheet2_pseudo],
+                        [view1, sheet2_pseudo, view2]):
+            a.set_return(f"{a._path}.GetNextView", b)
+        fake_sw.ActiveDoc.set_return("GetFirstView", sheet1_pseudo)
+
+        result = dispatch("renumber_balloons", {"start": 1})
+
+        assert result["success"] is True, result
+        names = [b["name"] for b in result["data"]["balloons"]]
+        assert names == ["S1High", "S1Low", "S2High"]
+        assert [b["item_number"] for b in result["data"]["balloons"]] == [1, 2, 3]
+
     def test_no_balloons_is_success_with_zero_count(self, tool_sw):
         fake_sw = tool_sw("drawing")
         view = _view(fake_sw, "v1", "Drawing View1")

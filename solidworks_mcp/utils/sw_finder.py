@@ -69,6 +69,21 @@ class SolidWorksFinder:
         "weldment": ".sldwldtbt",
     }
 
+    # Preferred stem (filename minus extension, lowercased) per table template
+    # type, tried before falling back to "first match in sort order". A stock
+    # English install ships several BOM templates -- `bom-indented`,
+    # `bom-material`, `bom-partsonly`, `bom-standard`, ... -- so an
+    # alphabetical pick alone would hand `insert_bom_table()`'s default
+    # `bom_type="top_level"` the *indented* template, silently contradicting
+    # the requested layout. "cut list" is the name docs/api/04-tables.md
+    # confirms for the installed weldment template. A type with no entry (or
+    # whose preferred stem isn't installed) still falls back to the
+    # deterministic first-in-sort-order pick.
+    PREFERRED_TABLE_TEMPLATE_STEMS = {
+        "bom": "bom-standard",
+        "weldment": "cut list",
+    }
+
     # ProgramData template paths
     PROGRAMDATA_TEMPLATE_PATHS = [
         r"C:\ProgramData\SolidWorks\SOLIDWORKS 2025\templates",
@@ -272,14 +287,23 @@ class SolidWorksFinder:
         a type-specific extension (`.sldbomtbt` for BOM, e.g.
         `bom-standard.sldbomtbt`) -- there is no fixed filename to look up the
         way `Part.prtdot`/`Assembly.asmdot`/`Drawing.drwdot` are, so this
-        globs each installed language folder under `lang/` for the first
-        file with that extension, preferring an "english" locale folder if
-        more than one is installed.
+        globs each installed language folder under `lang/` for a file with
+        that extension, preferring an "english" locale folder if more than
+        one is installed.
+
+        Within a locale folder, `PREFERRED_TABLE_TEMPLATE_STEMS`' entry for
+        this type wins if it is installed; otherwise the first match in sort
+        order is used. That preference matters because a stock install ships
+        several templates per extension and the alphabetically-first one is
+        not the standard one -- see that constant's own comment.
         """
         extension = cls.TABLE_TEMPLATE_EXTENSIONS.get(template_type)
         if extension is None:
             logger.error(f"Unknown table template type: {template_type}")
             return None
+
+        preferred = cls.PREFERRED_TABLE_TEMPLATE_STEMS.get(template_type)
+        preferred_name = (preferred + extension).lower() if preferred else None
 
         sw_dir = cls._install_dir(sw_exe_path)
         if not sw_dir:
@@ -307,9 +331,12 @@ class SolidWorksFinder:
             try:
                 # Filter before ordering: a real `lang/<locale>` folder holds
                 # thousands of entries, and only the matching extension's
-                # order decides which template wins.
+                # order decides which template wins. The preferred stem sorts
+                # ahead of everything else so it wins when installed, leaving
+                # the plain alphabetical pick as the fallback.
                 filename = min(
                     (f for f in os.listdir(locale_dir) if f.lower().endswith(extension)),
+                    key=lambda f: (f.lower() != preferred_name, f.lower()),
                     default=None,
                 )
             except OSError:

@@ -262,6 +262,15 @@ method's target view is the `IView` instance itself.
   `IModelDocExtension::InsertBomTable4` above — `<SOLIDWORKS_install_dir>\lang\<language>\*.sldbomtbt`,
   and "the template and table must be of the same type." Empty-string/invalid-path
   fallback behavior is not documented on this page either — unverified.
+- **Which template the omitted-`template_path` fallback picks (sw-gnl).** A stock
+  install ships several `.sldbomtbt` templates side by side (`bom-indented`,
+  `bom-material`, `bom-partsonly`, `bom-standard`, …), so "first match by extension"
+  is not a safe rule: alphabetically it lands on `bom-indented`, handing
+  `insert_bom_table()`'s default `bom_type="top_level"` an indented-layout template.
+  `SolidWorksFinder.PREFERRED_TABLE_TEMPLATE_STEMS` therefore names the standard
+  stem per type (`bom-standard`, and `cut list` for weldment, the name this dossier
+  confirms for the installed weldment template), falling back to the deterministic
+  first-in-sort-order pick only when the preferred stem is not installed.
 - If `BomType = swBomType_e.swBomType_TopLevelOnly`, do **not** pass `Configuration` —
   use `IBomFeature::GetConfigurations`/`SetConfigurations` afterward instead (explicit
   Remarks statement, not documented further in this dossier).
@@ -864,6 +873,14 @@ clobbering the lower text as a result).
   balloon's *current* `LowerTextStyle`/`LowerText` via `GetBomBalloonTextStyle`/
   `GetBomBalloonText` first and passes them straight through unchanged, so a
   split-circle balloon's lower half survives a renumber pass.
+- **Multi-sheet ordering (sw-gnl).** `renumber_balloons`' documented "top-left
+  first" order sorts on `IAnnotation::GetPosition`, which is **sheet-local**. In its
+  document-wide mode (`view_name` omitted) the sort therefore keys on the sheet
+  first, then `-y`, then `x`, then the balloon name: comparing a `y` from one sheet
+  against a `y` from another is meaningless, and a sheet-blind sort interleaved the
+  sheets' item numbers. The sheet grouping comes from `_iter_document_views`' own
+  walk order — each sheet's pseudo-view precedes that sheet's real views — so it
+  costs no extra COM walk.
 
 ## Hole tables
 
@@ -1510,6 +1527,13 @@ reached from a table annotation via `ITableAnnotation::GetAnnotation` like
   `swAnnotationVisible` is toggled `swAnnotationHidden` → `swAnnotationVisible`;
   anything else (`swAnnotationHidden`, `swAnnotationHalfHidden`, or an unreadable/
   `swAnnotationVisibilityUnknown` state) is left untouched.
+- **A failed restore is an error, not a warning (sw-gnl).** The hide and the restore
+  are two separate COM writes. A failed *hide* changed nothing and is only a warned
+  non-refresh, but a hide that succeeded followed by a restore that did not leaves
+  the table hidden in the user's drawing — the exact side effect the discipline
+  above exists to prevent. `update_table` fails that case with `swFeatureError` and
+  `data["left_hidden"] = True` rather than logging a warning under an overall
+  `success: True`.
 
 ---
 
@@ -2106,9 +2130,19 @@ members already documented above (`Text`/`Text2`, `IsCellTextEditable`, `RowCoun
   three positional arguments, index(es)-then-value — `set_table_cell` writes through
   the same predecessor property, `Text`, not `Text2` (whose real 4-argument setter
   shape, `IncludeHidden` ahead of or behind the value, is unconfirmed against a real
-  install; see `Text2`'s own Gotchas). Reads (`get_table_contents`, and
-  `set_table_cell`'s own post-write verification) use `Text2(row, col, True)`,
-  matching `get_bom_contents`.
+  install; see `Text2`'s own Gotchas). `get_table_contents` reads with
+  `Text2(row, col, True)`, matching `get_bom_contents`.
+- **`set_table_cell`'s index space (sw-gnl).** Because it writes through `Text`,
+  which takes no `IncludeHidden` parameter and so addresses the **visible-only**
+  grid (see `Text`'s own Gotchas), `set_table_cell` bounds-checks against
+  `RowCount`/`ColumnCount` and verifies with `Text2(row, col, False)` — *not* the
+  hidden-inclusive `TotalRowCount`/`TotalColumnCount` its sibling readers use.
+  `IsCellTextEditable` takes no `IncludeHidden` either, so all four operations
+  (bounds, editability, write, read-back) share one index space. Mixing them —
+  bounding hidden-inclusive while writing visible-only — silently addressed the
+  wrong cell on any table with a hidden column, which `insert_bom_table`'s own
+  `hidden_columns` parameter can create, and then reported the resulting
+  read-back disagreement as a failed write.
 - **`set_table_position` vs. `Anchored`.** `ITableAnnotation::Anchored`'s own Remarks
   (see that record above) state an anchored table's origin snaps back to the sheet
   anchor point, overriding an explicit `SetPosition`. Rather than relying on
