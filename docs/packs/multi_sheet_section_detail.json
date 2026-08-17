@@ -1,0 +1,66 @@
+{
+  "drawing_template": "C:\\Templates\\part_drawing.drwdot",
+  "output": "C:\\Output\\housing.slddrw",
+  "sheets": [
+    {
+      "name": "Sheet1",
+      "model_path": "C:\\Parts\\housing.sldprt",
+      "paper_size": "A2",
+      "scale": {"num": 1, "denom": 1},
+      "views": [
+        {
+          "kind": "model",
+          "name": "FrontView",
+          "model_path": "C:\\Parts\\housing.sldprt",
+          "orientation": "*Front",
+          "x": 120,
+          "y": 150
+        },
+        {
+          "kind": "section",
+          "name": "SectionA",
+          "parent": "FrontView",
+          "cut_points": [[80, 100], [80, 220]],
+          "x": 260,
+          "y": 150,
+          "label": "A",
+          "section_type": "full"
+        }
+      ],
+      "annotations": [],
+      "tables": [],
+      "properties": {}
+    },
+    {
+      "name": "Sheet2",
+      "model_path": "C:\\Parts\\housing.sldprt",
+      "paper_size": "A2",
+      "scale": {"num": 2, "denom": 1},
+      "views": [
+        {
+          "kind": "model",
+          "name": "TopView",
+          "model_path": "C:\\Parts\\housing.sldprt",
+          "orientation": "*Top",
+          "x": 120,
+          "y": 150
+        },
+        {
+          "kind": "detail",
+          "name": "DetailB",
+          "parent": "TopView",
+          "center_x": 140,
+          "center_y": 160,
+          "radius": 8,
+          "x": 260,
+          "y": 150,
+          "label": "B",
+          "style": "circle"
+        }
+      ],
+      "annotations": [],
+      "tables": [],
+      "properties": {}
+    }
+  ]
+}

@@ -1,0 +1,278 @@
+{
+  "$defs": {
+    "AnnotationSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "area_type": {
+          "type": "string"
+        },
+        "datums": {
+          "items": {},
+          "type": "array"
+        },
+        "entity": {
+          "additionalProperties": {},
+          "type": "object"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "material_condition": {
+          "type": "string"
+        },
+        "size": {
+          "type": "number"
+        },
+        "style": {
+          "type": "string"
+        },
+        "symbol": {
+          "type": "string"
+        },
+        "symbol_type": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "text_content": {
+          "type": "string"
+        },
+        "tolerance": {
+          "type": "number"
+        },
+        "view": {
+          "type": "string"
+        },
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        }
+      },
+      "type": "object"
+    },
+    "ScaleSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "denom": {
+          "type": "number"
+        },
+        "num": {
+          "type": "number"
+        }
+      },
+      "type": "object"
+    },
+    "SheetSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "annotations": {
+          "items": {
+            "$ref": "#/$defs/AnnotationSpec"
+          },
+          "type": "array"
+        },
+        "model_path": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "paper_size": {
+          "type": "string"
+        },
+        "properties": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "scale": {
+          "$ref": "#/$defs/ScaleSpec"
+        },
+        "tables": {
+          "items": {
+            "$ref": "#/$defs/TableSpec"
+          },
+          "type": "array"
+        },
+        "views": {
+          "items": {
+            "$ref": "#/$defs/ViewSpec"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "TableSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "bom_type": {
+          "type": "string"
+        },
+        "configuration": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "template_path": {
+          "type": "string"
+        },
+        "view": {
+          "type": "string"
+        },
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        }
+      },
+      "type": "object"
+    },
+    "ViewSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "auto_hatch": {
+          "type": "boolean"
+        },
+        "break_orientation": {
+          "type": "string"
+        },
+        "break_style": {
+          "type": "string"
+        },
+        "center_x": {
+          "type": "number"
+        },
+        "center_y": {
+          "type": "number"
+        },
+        "cut_points": {
+          "items": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "depth": {
+          "type": "number"
+        },
+        "depth_reference": {
+          "additionalProperties": {},
+          "type": "object"
+        },
+        "direction": {
+          "type": "string"
+        },
+        "display_only": {
+          "type": "boolean"
+        },
+        "flip_direction": {
+          "type": "boolean"
+        },
+        "full_outline": {
+          "type": "boolean"
+        },
+        "gap": {
+          "type": "number"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "model_path": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "offset": {
+          "type": "number"
+        },
+        "orientation": {
+          "type": "string"
+        },
+        "parent": {
+          "type": "string"
+        },
+        "position1": {
+          "type": "number"
+        },
+        "position2": {
+          "type": "number"
+        },
+        "profile_points": {
+          "items": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "radius": {
+          "type": "number"
+        },
+        "scale_denom": {
+          "type": "number"
+        },
+        "scale_num": {
+          "type": "number"
+        },
+        "section_type": {
+          "type": "string"
+        },
+        "style": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        },
+        "use_sheet_scale": {
+          "type": "boolean"
+        },
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$id": "https://solidworks-mcp/pack/schema.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "drawing_template": {
+      "type": "string"
+    },
+    "output": {
+      "type": "string"
+    },
+    "sheets": {
+      "items": {
+        "$ref": "#/$defs/SheetSpec"
+      },
+      "type": "array"
+    }
+  },
+  "title": "PackSpec",
+  "type": "object"
+}

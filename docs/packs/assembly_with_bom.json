@@ -1,0 +1,64 @@
+{
+  "drawing_template": "C:\\Templates\\asm_drawing.drwdot",
+  "output": "C:\\Output\\gearbox_asm.slddrw",
+  "sheets": [
+    {
+      "name": "Sheet1",
+      "model_path": "C:\\Assemblies\\gearbox.sldasm",
+      "paper_size": "B",
+      "scale": {"num": 1, "denom": 1},
+      "views": [
+        {
+          "kind": "model",
+          "name": "IsoView",
+          "model_path": "C:\\Assemblies\\gearbox.sldasm",
+          "orientation": "*Isometric",
+          "x": 150,
+          "y": 150
+        }
+      ],
+      "annotations": [
+        {
+          "kind": "balloon",
+          "view": "IsoView",
+          "entity": {"kind": "component", "x": 120, "y": 140},
+          "x": 100,
+          "y": 170,
+          "style": "circular",
+          "text_content": "item_number"
+        },
+        {
+          "kind": "balloon",
+          "view": "IsoView",
+          "entity": {"kind": "component", "x": 160, "y": 160},
+          "x": 190,
+          "y": 190,
+          "style": "circular",
+          "text_content": "item_number"
+        },
+        {
+          "kind": "balloon",
+          "view": "IsoView",
+          "entity": {"kind": "component", "x": 140, "y": 120},
+          "x": 130,
+          "y": 90,
+          "style": "circular",
+          "text_content": "item_number"
+        }
+      ],
+      "tables": [
+        {
+          "kind": "bom",
+          "view": "IsoView",
+          "name": "BomTable1",
+          "x": 220,
+          "y": 250,
+          "bom_type": "top_level"
+        }
+      ],
+      "properties": {
+        "Description": "Gearbox Assembly"
+      }
+    }
+  ]
+}

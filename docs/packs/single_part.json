@@ -1,0 +1,66 @@
+{
+  "drawing_template": "C:\\Templates\\part_drawing.drwdot",
+  "output": "C:\\Output\\bracket.slddrw",
+  "sheets": [
+    {
+      "name": "Sheet1",
+      "model_path": "C:\\Parts\\bracket.sldprt",
+      "paper_size": "A3",
+      "scale": {"num": 1, "denom": 2},
+      "views": [
+        {
+          "kind": "model",
+          "name": "FrontView",
+          "model_path": "C:\\Parts\\bracket.sldprt",
+          "orientation": "*Front",
+          "x": 100,
+          "y": 150
+        },
+        {
+          "kind": "projected",
+          "name": "TopView",
+          "parent": "FrontView",
+          "direction": "up",
+          "offset": 60
+        },
+        {
+          "kind": "projected",
+          "name": "RightView",
+          "parent": "FrontView",
+          "direction": "right",
+          "offset": 60
+        }
+      ],
+      "annotations": [
+        {
+          "kind": "note",
+          "view": "FrontView",
+          "x": 200,
+          "y": 20,
+          "text": "ALL DIMENSIONS IN MM\nUNLESS OTHERWISE SPECIFIED"
+        },
+        {
+          "kind": "datum_feature",
+          "view": "FrontView",
+          "entity": {"kind": "edge", "x": 90, "y": 140},
+          "label": "A",
+          "x": 95,
+          "y": 130
+        },
+        {
+          "kind": "gtol",
+          "view": "FrontView",
+          "entity": {"kind": "face", "x": 100, "y": 150},
+          "symbol": "flatness",
+          "tolerance": 0.05,
+          "x": 110,
+          "y": 155
+        }
+      ],
+      "tables": [],
+      "properties": {
+        "Description": "Mounting Bracket"
+      }
+    }
+  ]
+}
