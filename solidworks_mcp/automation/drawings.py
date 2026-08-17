@@ -1547,7 +1547,10 @@ _LINE_STYLE_DISPLAY_NAMES = {key: key.replace("_", " ").title() for key in _LAYE
 # of which exposes `.GetAnnotation()` back to the shared `IAnnotation` that
 # carries `Layer`. GTols and weld symbols have no per-view enumeration in
 # this codebase (only `Insert*`-time creation) so are not included -- adding
-# them needs a new `GetFirstX` walk this issue's scope doesn't cover.
+# them needs a new `GetFirstX` walk this issue's scope doesn't cover. Center
+# marks do have a walk (`_view_center_marks`), but it returns an eager
+# `(list, error)` pair rather than yielding, so it doesn't fit this
+# registry's generator protocol without an adapter.
 _MOVE_ANNOTATION_TYPE_ITERATORS = {
     "note": "_iter_view_notes",
     "datum_tag": "_iter_view_datum_tags",
@@ -13123,6 +13126,39 @@ class DrawingOperations:
             return [], self._result(False, f"List layers error: {e}", SwErrors.swFeatureError)
         return names, None
 
+    def _layer_context(self, context: str, require: Optional[str] = None
+                       ) -> Tuple[Any, Any, List[str], Optional[Dict]]:
+        """The preamble every layer method opens with: resolve the drawing
+        document, its `ILayerMgr`, and the layer names currently defined --
+        and, when `require` is given, fail with `_unknown_layer_result` if
+        that name isn't among them.
+
+        `_get_layer_manager` and `_layer_names` are only ever useful in this
+        order, and `context` (their log prefix) is always the calling
+        method's own name, so folding all three into one call keeps that
+        name stated once per method instead of twice.
+
+        Returns:
+            `(doc, layer_mgr, existing_names, None)` on success, or
+            `(None, None, [], error_dict)`.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return None, None, [], err
+
+        layer_mgr, err = self._get_layer_manager(doc, context)
+        if err:
+            return None, None, [], err
+
+        existing, err = self._layer_names(layer_mgr, context)
+        if err:
+            return None, None, [], err
+
+        if require is not None and require not in existing:
+            return None, None, [], self._unknown_layer_result(require, existing)
+
+        return doc, layer_mgr, existing, None
+
     def _unknown_layer_result(self, name: str, existing: List[str]) -> Dict:
         """The shared "no such layer" failure -- `set_current_layer`'s and
         `move_annotations_to_layer`'s acceptance criteria both require
@@ -13207,15 +13243,7 @@ class DrawingOperations:
         if err:
             return err
 
-        doc, err = self.get_drawing_doc()
-        if err:
-            return err
-
-        layer_mgr, err = self._get_layer_manager(doc, "create_layer")
-        if err:
-            return err
-
-        existing, err = self._layer_names(layer_mgr, "create_layer")
+        _doc, layer_mgr, existing, err = self._layer_context("create_layer")
         if err:
             return err
         if name in existing:
@@ -13283,15 +13311,7 @@ class DrawingOperations:
             returns nothing is skipped with a logged warning rather than
             failing the whole listing.
         """
-        doc, err = self.get_drawing_doc()
-        if err:
-            return err
-
-        layer_mgr, err = self._get_layer_manager(doc, "list_layers")
-        if err:
-            return err
-
-        names, err = self._layer_names(layer_mgr, "list_layers")
+        _doc, layer_mgr, names, err = self._layer_context("list_layers")
         if err:
             return err
 
@@ -13325,19 +13345,9 @@ class DrawingOperations:
             Result dict. Fails with `swFeatureError` if `SetCurrentLayer`
             itself returns falsy despite `name` being a real layer.
         """
-        doc, err = self.get_drawing_doc()
+        _doc, layer_mgr, _existing, err = self._layer_context("set_current_layer", require=name)
         if err:
             return err
-
-        layer_mgr, err = self._get_layer_manager(doc, "set_current_layer")
-        if err:
-            return err
-
-        existing, err = self._layer_names(layer_mgr, "set_current_layer")
-        if err:
-            return err
-        if name not in existing:
-            return self._unknown_layer_result(name, existing)
 
         try:
             changed = layer_mgr.SetCurrentLayer(name)
@@ -13403,19 +13413,9 @@ class DrawingOperations:
             if err:
                 return err
 
-        doc, err = self.get_drawing_doc()
+        _doc, layer_mgr, _existing, err = self._layer_context("set_layer_properties", require=name)
         if err:
             return err
-
-        layer_mgr, err = self._get_layer_manager(doc, "set_layer_properties")
-        if err:
-            return err
-
-        existing, err = self._layer_names(layer_mgr, "set_layer_properties")
-        if err:
-            return err
-        if name not in existing:
-            return self._unknown_layer_result(name, existing)
 
         try:
             layer = layer_mgr.GetLayer(name)
@@ -13455,31 +13455,22 @@ class DrawingOperations:
                             False, f"Restore printable error: {e}", SwErrors.swFeatureError,
                             {"name": name},
                         )
-        if printable is not None:
+        # The remaining properties are plain writes with no documented
+        # side effect on each other, so they share one body -- ordered
+        # `Printable` first to keep the explicit-printable-wins guarantee
+        # above.
+        for attr, value, label in (("Printable", None if printable is None else bool(printable), "printable"),
+                                   ("Color", colorref, "color"),
+                                   ("Style", style_val, "style"),
+                                   ("Width", width_val, "width")):
+            if value is None:
+                continue
             try:
-                layer.Printable = bool(printable)
+                setattr(layer, attr, value)
             except Exception as e:
-                logger.error(f"set_layer_properties({name!r}) set Printable error: {e}")
+                logger.error(f"set_layer_properties({name!r}) set {attr} error: {e}")
                 return self._result(
-                    False, f"Set printable error: {e}", SwErrors.swFeatureError, {"name": name})
-        if colorref is not None:
-            try:
-                layer.Color = colorref
-            except Exception as e:
-                logger.error(f"set_layer_properties({name!r}) set Color error: {e}")
-                return self._result(False, f"Set color error: {e}", SwErrors.swFeatureError, {"name": name})
-        if style_val is not None:
-            try:
-                layer.Style = style_val
-            except Exception as e:
-                logger.error(f"set_layer_properties({name!r}) set Style error: {e}")
-                return self._result(False, f"Set style error: {e}", SwErrors.swFeatureError, {"name": name})
-        if width_val is not None:
-            try:
-                layer.Width = width_val
-            except Exception as e:
-                logger.error(f"set_layer_properties({name!r}) set Width error: {e}")
-                return self._result(False, f"Set width error: {e}", SwErrors.swFeatureError, {"name": name})
+                    False, f"Set {label} error: {e}", SwErrors.swFeatureError, {"name": name})
 
         data = self._describe_layer(name, layer)
         return self._result(True, f"Updated layer {name!r}", SwErrors.swSuccess, data)
@@ -13531,44 +13522,45 @@ class DrawingOperations:
         else:
             types = list(_MOVE_ANNOTATION_TYPE_ITERATORS)
 
-        doc, err = self.get_drawing_doc()
+        doc, _layer_mgr, _existing, err = self._layer_context(
+            "move_annotations_to_layer", require=layer_name)
         if err:
             return err
-
-        layer_mgr, err = self._get_layer_manager(doc, "move_annotations_to_layer")
-        if err:
-            return err
-
-        existing, err = self._layer_names(layer_mgr, "move_annotations_to_layer")
-        if err:
-            return err
-        if layer_name not in existing:
-            return self._unknown_layer_result(layer_name, existing)
 
         if view_name:
             activated = self.select_view_by_name(view_name, doc=doc)
             if not activated["success"]:
                 return activated
             try:
-                views = [doc.ActiveDrawingView]
+                scoped = [(doc.ActiveDrawingView, view_name)]
             except Exception as e:
                 logger.error(f"move_annotations_to_layer({view_name!r}) error: {e}")
                 return self._result(
                     False, f"Move annotations error: {e}", SwErrors.swSelectionError)
         else:
-            views = list(self._iter_document_views(doc))
+            # `_scoped_views` rather than a raw `_iter_document_views` walk --
+            # the same document-wide view resolution `list_notes`/`list_datums`/
+            # `list_tables` use, which also hands back each view's own name so
+            # the per-annotation warnings below can name the view actually
+            # being walked (not the caller's `view_name`, which is `None` here).
+            scoped, err = self._scoped_views(
+                doc, None, "move_annotations_to_layer", "Move annotations")
+            if err:
+                return err
+
+        # Resolve each requested family's walker once, not once per view.
+        iterators = [(t, getattr(self, _MOVE_ANNOTATION_TYPE_ITERATORS[t])) for t in types]
 
         moved = {t: 0 for t in types}
-        for view in views:
-            for annotation_type in types:
-                iter_method = getattr(self, _MOVE_ANNOTATION_TYPE_ITERATORS[annotation_type])
+        for view, walked_name in scoped:
+            for annotation_type, iter_method in iterators:
                 for owner in iter_method(view):
                     try:
                         annotation = owner.GetAnnotation()
                     except Exception as e:
                         logger.warning(
                             f"move_annotations_to_layer: GetAnnotation error on a "
-                            f"{annotation_type!r} in view {view_name!r}: {e}")
+                            f"{annotation_type!r} in view {walked_name!r}: {e}")
                         continue
                     if annotation is None:
                         continue
@@ -13577,7 +13569,7 @@ class DrawingOperations:
                     except Exception as e:
                         logger.warning(
                             f"move_annotations_to_layer: set Layer error on a "
-                            f"{annotation_type!r} in view {view_name!r}: {e}")
+                            f"{annotation_type!r} in view {walked_name!r}: {e}")
                         continue
                     moved[annotation_type] += 1
 
@@ -13591,14 +13583,81 @@ class DrawingOperations:
     # Line format / drafting standard (sw-jkb.2)
     # ========================================================================
 
-    def _get_line_format_doc(self, context: str) -> Tuple[Any, Optional[Dict]]:
-        """`get_drawing_doc` wrapped with this section's own log prefix -- the
-        shared entry point `set_line_format`/`get_line_format`/
-        `apply_drafting_standard` all resolve first."""
-        doc, err = self.get_drawing_doc()
+    def _resolve_class_line_format(self, target: Any, weight: Optional[str],
+                                    style: Optional[str]
+                                    ) -> Tuple[Optional[str], Optional[List[Tuple]], Optional[Dict]]:
+        """Resolve a named entity class plus `weight`/`style` *names* into the
+        `(class_key, writes, None)` `_apply_class_line_format` consumes, where
+        `writes` is the ordered `(field, preference_member, value, key)` list
+        to send -- weight before style, matching the document-preference
+        ordering `set_line_format` has always applied in.
+
+        Pure: it touches no COM. That is what lets `apply_drafting_standard`
+        resolve *every* entry in a standard file up front and so keep its
+        documented "fails before any COM call" contract for bad values too,
+        while `set_line_format` stays the single definition of what a valid
+        entity class / weight / style is.
+
+        Returns `(None, None, error_dict)` if `target`, `weight` or `style`
+        doesn't resolve, or if neither `weight` nor `style` was given.
+        """
+        class_key, prefs, err = self._enum_key(target, _LINE_FORMAT_ENTITY_CLASSES, "target")
         if err:
-            logger.error(f"{context}: {err.get('message')}")
-        return doc, err
+            return None, None, err
+        thickness_pref, style_pref = prefs
+
+        if weight is None and style is None:
+            return None, None, self._result(
+                False, "at least one of weight/style must be given",
+                SwErrors.swInvalidInput, {"target": class_key},
+            )
+
+        writes: List[Tuple] = []
+        for field, pref, raw, mapping in (("weight", thickness_pref, weight, _LAYER_LINE_WEIGHTS),
+                                          ("style", style_pref, style, _LINE_FORMAT_CLASS_STYLES)):
+            if raw is None:
+                continue
+            key, value, err = self._enum_key(raw, mapping, field)
+            if err:
+                return None, None, err
+            writes.append((field, pref, value, key))
+
+        return class_key, writes, None
+
+    def _apply_class_line_format(self, doc: Any, class_key: str, writes: List[Tuple]) -> Dict:
+        """Send one entity class's resolved `writes` (see
+        `_resolve_class_line_format`) through `IModelDocExtension::
+        SetUserPreferenceInteger`.
+
+        `applied` accumulates as each field lands, and is included in a
+        mid-way failure's `data` too (not just the final success) -- these are
+        persistent document properties (not session state this method
+        snapshots and restores), so a caller retrying after e.g. a style
+        failure needs to know weight already took effect rather than
+        re-applying it blind.
+        """
+        extension = doc.Extension
+        applied: Dict[str, str] = {}
+        for field, pref, value, key in writes:
+            try:
+                ok = extension.SetUserPreferenceInteger(pref, _LINE_FORMAT_NO_OPTION, value)
+            except Exception as e:
+                logger.error(f"set_line_format({class_key!r}) {field} error: {e}")
+                return self._result(
+                    False, f"Set line {field} error: {e}", SwErrors.swFeatureError,
+                    {"target": class_key, **applied},
+                )
+            if not ok:
+                return self._result(
+                    False, f"Could not set {field} for entity class {class_key!r}",
+                    SwErrors.swFeatureError, {"target": class_key, **applied},
+                )
+            applied[field] = key
+
+        return self._result(
+            True, f"Updated line format for entity class {class_key!r}", SwErrors.swSuccess,
+            {"target": class_key, **applied},
+        )
 
     def set_line_format(self, target: Any, weight: Optional[str] = None,
                          style: Optional[str] = None, color: Optional[Any] = None,
@@ -13665,70 +13724,15 @@ class DrawingOperations:
                     SwErrors.swInvalidInput, {"target": target},
                 )
 
-            class_key, prefs, err = self._enum_key(target, _LINE_FORMAT_ENTITY_CLASSES, "target")
-            if err:
-                return err
-            thickness_pref, style_pref = prefs
-
-            weight_key = weight_val = None
-            if weight is not None:
-                weight_key, weight_val, err = self._enum_key(weight, _LAYER_LINE_WEIGHTS, "weight")
-                if err:
-                    return err
-
-            style_key = style_val = None
-            if style is not None:
-                style_key, style_val, err = self._enum_key(style, _LINE_FORMAT_CLASS_STYLES, "style")
-                if err:
-                    return err
-
-            doc, err = self._get_line_format_doc("set_line_format")
+            class_key, writes, err = self._resolve_class_line_format(target, weight, style)
             if err:
                 return err
 
-            # `applied` accumulates as each field lands, and is included in a
-            # mid-way failure's `data` too (not just the final success) --
-            # these are persistent document properties (not session state
-            # `set_line_format` snapshots and restores), so a caller retrying
-            # after e.g. a style failure needs to know weight already took
-            # effect rather than re-applying it blind.
-            applied: Dict[str, str] = {}
-            if weight_val is not None:
-                try:
-                    ok = doc.Extension.SetUserPreferenceInteger(
-                        thickness_pref, _LINE_FORMAT_NO_OPTION, weight_val)
-                except Exception as e:
-                    logger.error(f"set_line_format({target!r}) weight error: {e}")
-                    return self._result(
-                        False, f"Set line weight error: {e}", SwErrors.swFeatureError,
-                        {"target": class_key, **applied},
-                    )
-                if not ok:
-                    return self._result(
-                        False, f"Could not set weight for entity class {class_key!r}",
-                        SwErrors.swFeatureError, {"target": class_key, **applied},
-                    )
-                applied["weight"] = weight_key
-            if style_val is not None:
-                try:
-                    ok = doc.Extension.SetUserPreferenceInteger(
-                        style_pref, _LINE_FORMAT_NO_OPTION, style_val)
-                except Exception as e:
-                    logger.error(f"set_line_format({target!r}) style error: {e}")
-                    return self._result(
-                        False, f"Set line style error: {e}", SwErrors.swFeatureError,
-                        {"target": class_key, **applied},
-                    )
-                if not ok:
-                    return self._result(
-                        False, f"Could not set style for entity class {class_key!r}",
-                        SwErrors.swFeatureError, {"target": class_key, **applied},
-                    )
-                applied["style"] = style_key
+            doc, err = self.get_drawing_doc()
+            if err:
+                return err
 
-            data = {"target": class_key, **applied}
-            return self._result(
-                True, f"Updated line format for entity class {class_key!r}", SwErrors.swSuccess, data)
+            return self._apply_class_line_format(doc, class_key, writes)
 
         if not isinstance(target, (list, tuple)) or not target:
             return self._result(
@@ -13764,7 +13768,7 @@ class DrawingOperations:
             if color_err:
                 return self._result(False, color_err, SwErrors.swInvalidInput, {"color": color})
 
-        doc, err = self._get_line_format_doc("set_line_format")
+        doc, err = self.get_drawing_doc()
         if err:
             return err
 
@@ -13848,14 +13852,15 @@ class DrawingOperations:
             return err
         thickness_pref, style_pref = prefs
 
-        doc, err = self._get_line_format_doc("get_line_format")
+        doc, err = self.get_drawing_doc()
         if err:
             return err
 
         try:
-            style_code = _com_int(doc.Extension.GetUserPreferenceInteger(style_pref, _LINE_FORMAT_NO_OPTION))
+            extension = doc.Extension
+            style_code = _com_int(extension.GetUserPreferenceInteger(style_pref, _LINE_FORMAT_NO_OPTION))
             weight_code = _com_int(
-                doc.Extension.GetUserPreferenceInteger(thickness_pref, _LINE_FORMAT_NO_OPTION))
+                extension.GetUserPreferenceInteger(thickness_pref, _LINE_FORMAT_NO_OPTION))
         except Exception as e:
             logger.error(f"get_line_format({target!r}) error: {e}")
             return self._result(False, f"Get line format error: {e}", SwErrors.swFeatureError, {"target": class_key})
@@ -13886,10 +13891,11 @@ class DrawingOperations:
         Returns:
             Result dict. Fails with `swInvalidInput` (before any COM call) if
             the file can't be read, isn't valid JSON, isn't a non-empty
-            object, contains an unrecognized entity-class key, or an entry
-            contains an unrecognized property key -- in every case the
-            message names the offending key and `data["bad_key"]` carries it
-            too. Otherwise `data["results"]` maps each entity class to its
+            object, contains an unrecognized entity-class key, an entry
+            contains an unrecognized property key, or any entry's `weight`/
+            `style` value doesn't resolve -- in every case the message names
+            the offending key and `data["bad_key"]` carries it too, and no
+            entry has been applied. Otherwise `data["results"]` maps each entity class to its
             own `set_line_format` result dict (so a caller can see exactly
             which entries succeeded), and overall `success` is True only if
             every entry succeeded.
@@ -13919,6 +13925,13 @@ class DrawingOperations:
                 SwErrors.swInvalidInput, {"standard_file": standard_file},
             )
 
+        # Both the keys *and* the values of every entry are resolved up
+        # front, through the same `_resolve_class_line_format` that
+        # `set_line_format` resolves its own named-class arguments with. That
+        # is what makes the "fails before any COM call" contract real: a typo
+        # in the last entry's weight can no longer land the earlier entries'
+        # (persistent) document preferences first.
+        resolved: List[Tuple[str, str, List[Tuple]]] = []
         for entity_class, entry in spec.items():
             if entity_class not in _LINE_FORMAT_ENTITY_CLASSES:
                 return self._result(
@@ -13945,11 +13958,28 @@ class DrawingOperations:
                     SwErrors.swInvalidInput,
                     {"standard_file": standard_file, "bad_key": unknown_props[0]},
                 )
+            class_key, writes, err = self._resolve_class_line_format(
+                entity_class, entry.get("weight"), entry.get("style"))
+            if err:
+                return self._result(
+                    False,
+                    f"{err['message']} (in {entity_class!r} entry of {standard_file!r})",
+                    SwErrors.swInvalidInput,
+                    {"standard_file": standard_file, "bad_key": entity_class},
+                )
+            resolved.append((entity_class, class_key, writes))
 
-        results: Dict[str, Dict] = {}
-        for entity_class, entry in spec.items():
-            results[entity_class] = self.set_line_format(
-                entity_class, weight=entry.get("weight"), style=entry.get("style"))
+        # One document resolution for the whole file -- `get_drawing_doc` is
+        # three COM round-trips, and the active document can't change between
+        # entries.
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        results: Dict[str, Dict] = {
+            entity_class: self._apply_class_line_format(doc, class_key, writes)
+            for entity_class, class_key, writes in resolved
+        }
 
         succeeded = sum(1 for r in results.values() if r["success"])
         all_success = succeeded == len(results)

@@ -13,36 +13,61 @@ from typing import Dict
 from ._automation import sw_automation
 from .registry import tool
 
-_COLOR_SCHEMA = {
-    "description": (
-        "Layer line color: a '#RRGGBB'/'RRGGBB' hex string, or an [r, g, b] "
-        "0-255 triple. Converted to the Win32 COLORREF integer SolidWorks "
-        "expects (0x00BBGGRR -- blue in the high byte, red in the low byte, "
-        "the reverse of the 0xRRGGBB order this argument itself uses). "
-        "Omitted: black."
-    ),
-    "oneOf": [
-        {"type": "string"},
-        {
-            "type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 255},
-            "minItems": 3, "maxItems": 3,
-        },
-    ],
-}
+def line_color_schema(description: str) -> Dict:
+    """The JSON Schema for a line/layer color argument -- the two input shapes
+    the automation layer's `_parse_layer_color` accepts.
 
-_STYLE_SCHEMA = {
-    "type": "string",
-    "enum": ["continuous", "hidden", "phantom", "chain", "center", "stitch",
-             "chain_thick", "default"],
-    "description": "Line style (swLineStyles_e).",
-}
+    Every color-taking tool resolves its argument through that same
+    `_parse_layer_color`, so the accepted shapes are stated once here and only
+    the description varies (what the color applies to, and what omitting it
+    means, is tool-specific). Same factory pattern as `entity_ref_schema`.
+    """
+    return {
+        "description": description,
+        "oneOf": [
+            {"type": "string"},
+            {
+                "type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 255},
+                "minItems": 3, "maxItems": 3,
+            },
+        ],
+    }
 
-_WIDTH_SCHEMA = {
-    "type": "string",
-    "enum": ["none", "thin", "normal", "thick", "thick2", "thick3", "thick4",
-             "thick5", "thick6", "number", "layer", "custom"],
-    "description": "Line width/weight (swLineWeights_e).",
-}
+
+def line_style_schema(description: str) -> Dict:
+    """The JSON Schema for a line-style argument -- the `swLineStyles_e` keys
+    the automation layer's `_LAYER_LINE_STYLES` defines. Stated once here so
+    the key list doesn't have to be restated per tool."""
+    return {
+        "type": "string",
+        "enum": ["continuous", "hidden", "phantom", "chain", "center", "stitch",
+                 "chain_thick", "default"],
+        "description": description,
+    }
+
+
+def line_weight_schema(description: str) -> Dict:
+    """The JSON Schema for a line-weight/width argument -- the `swLineWeights_e`
+    keys the automation layer's `_LAYER_LINE_WEIGHTS` defines."""
+    return {
+        "type": "string",
+        "enum": ["none", "thin", "normal", "thick", "thick2", "thick3", "thick4",
+                 "thick5", "thick6", "number", "layer", "custom"],
+        "description": description,
+    }
+
+
+_COLOR_SCHEMA = line_color_schema(
+    "Layer line color: a '#RRGGBB'/'RRGGBB' hex string, or an [r, g, b] "
+    "0-255 triple. Converted to the Win32 COLORREF integer SolidWorks "
+    "expects (0x00BBGGRR -- blue in the high byte, red in the low byte, "
+    "the reverse of the 0xRRGGBB order this argument itself uses). "
+    "Omitted: black."
+)
+
+_STYLE_SCHEMA = line_style_schema("Line style (swLineStyles_e).")
+
+_WIDTH_SCHEMA = line_weight_schema("Line width/weight (swLineWeights_e).")
 
 
 @tool(

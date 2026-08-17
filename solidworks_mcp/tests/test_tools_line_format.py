@@ -363,6 +363,57 @@ class TestApplyDraftingStandard:
         assert result["data"]["bad_key"] == "color"
         assert not fake_sw.call_log.calls_to("SetUserPreferenceInteger")
 
+    def test_bad_weight_value_rejected_before_any_entry_is_applied(self, tool_sw, tmp_path):
+        """The values are resolved up front through the same
+        `_resolve_class_line_format` `set_line_format` uses, so a typo in a
+        later entry can't land the earlier entries' (persistent) document
+        preferences first -- the "before any COM call" contract covers bad
+        values, not just bad keys."""
+        fake_sw = tool_sw("drawing")
+        standard = tmp_path / "bad.json"
+        standard.write_text(json.dumps({
+            "visible": {"weight": "normal"},
+            "hidden": {"weight": "not_a_real_weight"},
+        }))
+
+        result = dispatch("apply_drafting_standard", {"standard_file": str(standard)})
+
+        assert result["success"] is False
+        assert result["error_name"] == "swInvalidInput"
+        assert "not_a_real_weight" in result["message"]
+        assert result["data"]["bad_key"] == "hidden"
+        assert not fake_sw.call_log.calls_to("SetUserPreferenceInteger")
+
+    def test_entry_with_neither_weight_nor_style_rejected(self, tool_sw, tmp_path):
+        fake_sw = tool_sw("drawing")
+        standard = tmp_path / "empty_entry.json"
+        standard.write_text(json.dumps({"visible": {}}))
+
+        result = dispatch("apply_drafting_standard", {"standard_file": str(standard)})
+
+        assert result["success"] is False
+        assert result["error_name"] == "swInvalidInput"
+        assert result["data"]["bad_key"] == "visible"
+        assert not fake_sw.call_log.calls_to("SetUserPreferenceInteger")
+
+    def test_document_resolved_once_for_the_whole_file(self, tool_sw, tmp_path):
+        """`get_drawing_doc` is three COM round-trips and the active document
+        can't change between entries, so a six-class standard must not pay it
+        six times."""
+        fake_sw = tool_sw("drawing")
+        standard = tmp_path / "standard.json"
+        standard.write_text(json.dumps({
+            "visible": {"weight": "normal"},
+            "hidden": {"weight": "thin"},
+            "section": {"weight": "thick"},
+        }))
+
+        result = dispatch("apply_drafting_standard", {"standard_file": str(standard)})
+
+        assert result["success"] is True, result
+        assert len(fake_sw.call_log.calls_to("SetUserPreferenceInteger")) == 3
+        assert len(fake_sw.ActiveDoc.call_log.calls_to("GetType")) == 1
+
     def test_malformed_json_rejected(self, tool_sw, tmp_path):
         tool_sw("drawing")
         standard = tmp_path / "bad.json"

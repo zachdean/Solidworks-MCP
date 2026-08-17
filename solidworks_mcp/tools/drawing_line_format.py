@@ -12,46 +12,28 @@ from typing import Dict
 
 from ._automation import sw_automation
 from .drawing_annotations import entity_ref_schema
+from .drawing_layers import line_color_schema, line_style_schema, line_weight_schema
 from .registry import tool
 
 _ENTITY_CLASSES = ["visible", "hidden", "section", "detail_circle", "dimension", "construction"]
 
-_WEIGHT_SCHEMA = {
-    "type": "string",
-    "enum": ["none", "thin", "normal", "thick", "thick2", "thick3", "thick4",
-             "thick5", "thick6", "number", "layer", "custom"],
-    "description": "Line weight (swLineWeights_e). Omitted: unchanged.",
-}
+_WEIGHT_SCHEMA = line_weight_schema("Line weight (swLineWeights_e). Omitted: unchanged.")
 
-_STYLE_SCHEMA = {
-    "type": "string",
-    "enum": ["continuous", "hidden", "phantom", "chain", "center", "stitch",
-             "chain_thick", "default"],
-    "description": (
-        "Line style (swLineStyles_e). Omitted: unchanged. 'default' is only valid "
-        "when target is an explicit entity list, not a named entity class. For an "
-        "explicit entity list, style is sent to SolidWorks as a Title-Cased display "
-        "name (e.g. 'hidden' -> 'Hidden') -- confirmed correct for 'hidden' against "
-        "official docs, but unverified for the others (status: unverified in "
-        "docs/api/05-export-and-layers.md's IDrawingDoc::SetLineStyle record)."
-    ),
-}
+_STYLE_SCHEMA = line_style_schema(
+    "Line style (swLineStyles_e). Omitted: unchanged. 'default' is only valid "
+    "when target is an explicit entity list, not a named entity class. For an "
+    "explicit entity list, style is sent to SolidWorks as a Title-Cased display "
+    "name (e.g. 'hidden' -> 'Hidden') -- confirmed correct for 'hidden' against "
+    "official docs, but unverified for the others (status: unverified in "
+    "docs/api/05-export-and-layers.md's IDrawingDoc::SetLineStyle record)."
+)
 
-_COLOR_SCHEMA = {
-    "description": (
-        "Line color: a '#RRGGBB'/'RRGGBB' hex string, or an [r, g, b] 0-255 "
-        "triple. Only valid when target is an explicit entity list -- no "
-        "per-category document color property exists for a named entity "
-        "class. Omitted: unchanged."
-    ),
-    "oneOf": [
-        {"type": "string"},
-        {
-            "type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 255},
-            "minItems": 3, "maxItems": 3,
-        },
-    ],
-}
+_COLOR_SCHEMA = line_color_schema(
+    "Line color: a '#RRGGBB'/'RRGGBB' hex string, or an [r, g, b] 0-255 "
+    "triple. Only valid when target is an explicit entity list -- no "
+    "per-category document color property exists for a named entity "
+    "class. Omitted: unchanged."
+)
 
 _TARGET_ENTITY_SCHEMA = entity_ref_schema("Entity kind: 'edge' (as returned by list_view_entities).")
 
