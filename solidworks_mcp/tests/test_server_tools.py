@@ -129,6 +129,10 @@ EXPECTED_TOOL_NAMES = {
     "set_current_layer",
     "set_layer_properties",
     "move_annotations_to_layer",
+    # Line Format / Drafting Standard Tools
+    "set_line_format",
+    "get_line_format",
+    "apply_drafting_standard",
     # Sketch Tools
     "create_sketch",
     "create_sketch_on_face",

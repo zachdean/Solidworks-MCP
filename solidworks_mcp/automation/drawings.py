@@ -82,6 +82,7 @@ from ..constants_drawing import (
     SwSFSymType,
     SwTableAnnotationType,
     SwUserPreferenceIntegerValue,
+    SwUserPreferenceOption,
     SwUserPreferenceStringListValue,
     SwUserPreferenceToggle,
     SwViewAlignment,
@@ -1495,6 +1496,48 @@ _LAYER_LINE_WEIGHTS = {
     "custom": int(SwLineWeights.swLW_CUSTOM),
 }
 _LAYER_LINE_WEIGHT_NAMES = {value: key for key, value in _LAYER_LINE_WEIGHTS.items()}
+
+# `set_line_format`/`get_line_format`'s named-entity-class `target` -> the pair of
+# `swUserPreferenceIntegerValue_e` members (thickness, style) that entity class's
+# document default lives at, consumed via `IModelDocExtension::Get/
+# SetUserPreferenceInteger` -- per docs/api/05-export-and-layers.md's "Document
+# line-format defaults" section (sw-jkb.2), sourced from DP_LineFont.htm and matching
+# this issue's Requirements list verbatim.
+_LINE_FORMAT_ENTITY_CLASSES = {
+    "visible": (int(SwUserPreferenceIntegerValue.swLineFontVisibleEdgesThickness),
+                int(SwUserPreferenceIntegerValue.swLineFontVisibleEdgesStyle)),
+    "hidden": (int(SwUserPreferenceIntegerValue.swLineFontHiddenEdgesThickness),
+               int(SwUserPreferenceIntegerValue.swLineFontHiddenEdgesStyle)),
+    "section": (int(SwUserPreferenceIntegerValue.swLineFontSectionLineThickness),
+                int(SwUserPreferenceIntegerValue.swLineFontSectionLineStyle)),
+    "detail_circle": (int(SwUserPreferenceIntegerValue.swLineFontDetailCircleThickness),
+                       int(SwUserPreferenceIntegerValue.swLineFontDetailCircleStyle)),
+    "dimension": (int(SwUserPreferenceIntegerValue.swLineFontDimensionsThickness),
+                  int(SwUserPreferenceIntegerValue.swLineFontDimensionsStyle)),
+    "construction": (int(SwUserPreferenceIntegerValue.swLineFontConstructionCurvesThickness),
+                      int(SwUserPreferenceIntegerValue.swLineFontConstructionCurvesStyle)),
+}
+
+# `UserPrefOption` for every `IModelDocExtension::Get/SetUserPreferenceInteger` call
+# this module makes -- none of the Line Font members need a sub-type option.
+_LINE_FORMAT_NO_OPTION = int(SwUserPreferenceOption.swDetailingNoOptionSpecified)
+
+# `set_line_format`'s `style`, entity-class form only: `_LAYER_LINE_STYLES` minus
+# "default" -- DP_LineFont.htm's own Comments column documents "See swLineStyles_e for
+# valid options except swLineDEFAULT" for every per-category style member (see that
+# dossier section's Gotchas). The explicit-entity-list form still accepts the full
+# `_LAYER_LINE_STYLES` set (a per-entity override legitimately can defer to the
+# document/layer default).
+_LINE_FORMAT_CLASS_STYLES = {k: v for k, v in _LAYER_LINE_STYLES.items() if k != "default"}
+
+# `set_line_format`'s `style`, explicit-entity-list form only: `IDrawingDoc::
+# SetLineStyle`'s `StyleName` takes a display-name *string* despite documenting
+# `swLineStyles_e` (dossier's own type-mismatch Gotcha) -- `GetLineFontName2`'s
+# Remarks confirm "Hidden" as a real returned name, so this Title-Cases each style
+# key the same way ("hidden" -> "Hidden", "chain_thick" -> "Chain Thick") rather than
+# inventing an unrelated string. Unverified beyond that one confirmed example; see
+# `IDrawingDoc::SetLineStyle`'s dossier record.
+_LINE_STYLE_DISPLAY_NAMES = {key: key.replace("_", " ").title() for key in _LAYER_LINE_STYLES}
 
 # `move_annotations_to_layer`'s `annotation_types` -> the per-view walker that
 # yields each annotation-family wrapper object (`INote`, `IDatumTag`,
@@ -13542,4 +13585,380 @@ class DrawingOperations:
         return self._result(
             True, f"Moved {total} annotation(s) to layer {layer_name!r}", SwErrors.swSuccess,
             {"layer_name": layer_name, "view_name": view_name, "moved": moved, "total": total},
+        )
+
+    # ========================================================================
+    # Line format / drafting standard (sw-jkb.2)
+    # ========================================================================
+
+    def _get_line_format_doc(self, context: str) -> Tuple[Any, Optional[Dict]]:
+        """`get_drawing_doc` wrapped with this section's own log prefix -- the
+        shared entry point `set_line_format`/`get_line_format`/
+        `apply_drafting_standard` all resolve first."""
+        doc, err = self.get_drawing_doc()
+        if err:
+            logger.error(f"{context}: {err.get('message')}")
+        return doc, err
+
+    def set_line_format(self, target: Any, weight: Optional[str] = None,
+                         style: Optional[str] = None, color: Optional[Any] = None,
+                         view_name: Optional[str] = None) -> Dict:
+        """
+        Set line format -- weight, style, and/or color -- either as a
+        document-wide default for a named drafting-standard entity class, or
+        as a per-entity override on an explicit list of picked entities.
+
+        Args:
+            target: Either one of `_LINE_FORMAT_ENTITY_CLASSES`'s keys
+                (`"visible"`, `"hidden"`, `"section"`, `"detail_circle"`,
+                `"dimension"`, `"construction"`) -- sets that entity class's
+                document default via `IModelDocExtension::
+                SetUserPreferenceInteger` (`weight`/`style` only; `color` is
+                rejected with `swInvalidInput`, since no per-category document
+                color property exists -- see docs/api/05-export-and-layers.md's
+                "Document line-format defaults" section) -- or a non-empty
+                list of entity references in the shape `list_view_entities`
+                returns (`{"kind": "edge", "x", "y", "z"}`), which instead
+                applies a per-entity override to each one via `IDrawingDoc::
+                SetLineWidth`/`SetLineStyle`/`SetLineColor` (all three
+                supported, including `color`).
+            weight: One of `_LAYER_LINE_WEIGHTS`'s keys, or `None` to leave
+                weight unchanged.
+            style: One of `_LINE_FORMAT_CLASS_STYLES`'s keys (named-class
+                `target`) or `_LAYER_LINE_STYLES`'s keys (entity-list
+                `target`, which also accepts `"default"`), or `None` to leave
+                style unchanged.
+            color: `"#RRGGBB"`/`"RRGGBB"` hex string or an `(r, g, b)` 0-255
+                triple (see `create_layer`), or `None` to leave color
+                unchanged. Only valid for an entity-list `target`.
+            view_name: Entity-list `target` only -- activates this view
+                first (`select_view_by_name`) so the entity coordinates
+                resolve in its sheet-local space. Ignored for a named-class
+                `target` (a document default has no view scope).
+
+        Returns:
+            Result dict. Fails with `swInvalidInput` (before any COM call) if
+            none of `weight`/`style`/`color` are given, `target` is neither a
+            recognized class name nor a non-empty list, an entity reference
+            doesn't parse, or `weight`/`style`/`color` doesn't resolve. For a
+            named-class `target`, `data` echoes the resolved `weight`/`style`
+            that were actually sent. For an entity-list `target`,
+            `data["entities"]` reports per-entity success (a selection or
+            COM-call failure on one entity is skipped, logged, and counted --
+            it does not fail the whole call); overall `success` is True only
+            if at least one entity was actually updated.
+        """
+        if weight is None and style is None and color is None:
+            return self._result(
+                False, "at least one of weight/style/color must be given",
+                SwErrors.swInvalidInput,
+            )
+
+        if isinstance(target, str):
+            if color is not None:
+                return self._result(
+                    False,
+                    f"color is not supported for entity-class target {target!r} -- "
+                    "SolidWorks has no per-category document line-color property "
+                    "(see docs/api/05-export-and-layers.md); pass an explicit list "
+                    "of entity references as target instead",
+                    SwErrors.swInvalidInput, {"target": target},
+                )
+
+            class_key, prefs, err = self._enum_key(target, _LINE_FORMAT_ENTITY_CLASSES, "target")
+            if err:
+                return err
+            thickness_pref, style_pref = prefs
+
+            weight_key = weight_val = None
+            if weight is not None:
+                weight_key, weight_val, err = self._enum_key(weight, _LAYER_LINE_WEIGHTS, "weight")
+                if err:
+                    return err
+
+            style_key = style_val = None
+            if style is not None:
+                style_key, style_val, err = self._enum_key(style, _LINE_FORMAT_CLASS_STYLES, "style")
+                if err:
+                    return err
+
+            doc, err = self._get_line_format_doc("set_line_format")
+            if err:
+                return err
+
+            # `applied` accumulates as each field lands, and is included in a
+            # mid-way failure's `data` too (not just the final success) --
+            # these are persistent document properties (not session state
+            # `set_line_format` snapshots and restores), so a caller retrying
+            # after e.g. a style failure needs to know weight already took
+            # effect rather than re-applying it blind.
+            applied: Dict[str, str] = {}
+            if weight_val is not None:
+                try:
+                    ok = doc.Extension.SetUserPreferenceInteger(
+                        thickness_pref, _LINE_FORMAT_NO_OPTION, weight_val)
+                except Exception as e:
+                    logger.error(f"set_line_format({target!r}) weight error: {e}")
+                    return self._result(
+                        False, f"Set line weight error: {e}", SwErrors.swFeatureError,
+                        {"target": class_key, **applied},
+                    )
+                if not ok:
+                    return self._result(
+                        False, f"Could not set weight for entity class {class_key!r}",
+                        SwErrors.swFeatureError, {"target": class_key, **applied},
+                    )
+                applied["weight"] = weight_key
+            if style_val is not None:
+                try:
+                    ok = doc.Extension.SetUserPreferenceInteger(
+                        style_pref, _LINE_FORMAT_NO_OPTION, style_val)
+                except Exception as e:
+                    logger.error(f"set_line_format({target!r}) style error: {e}")
+                    return self._result(
+                        False, f"Set line style error: {e}", SwErrors.swFeatureError,
+                        {"target": class_key, **applied},
+                    )
+                if not ok:
+                    return self._result(
+                        False, f"Could not set style for entity class {class_key!r}",
+                        SwErrors.swFeatureError, {"target": class_key, **applied},
+                    )
+                applied["style"] = style_key
+
+            data = {"target": class_key, **applied}
+            return self._result(
+                True, f"Updated line format for entity class {class_key!r}", SwErrors.swSuccess, data)
+
+        if not isinstance(target, (list, tuple)) or not target:
+            return self._result(
+                False,
+                f"target must be a named entity class ({sorted(_LINE_FORMAT_ENTITY_CLASSES)!r}) "
+                f"or a non-empty list of entity references, got {target!r}",
+                SwErrors.swInvalidInput, {"target": target},
+            )
+
+        parsed_entities = []
+        for i, entity in enumerate(target):
+            parsed, entity_err = _parse_entity_ref(entity)
+            if entity_err:
+                return self._result(
+                    False, f"target[{i}]: {entity_err}", SwErrors.swInvalidInput, {"target": target})
+            parsed_entities.append(parsed)
+
+        weight_key = weight_val = None
+        if weight is not None:
+            weight_key, weight_val, err = self._enum_key(weight, _LAYER_LINE_WEIGHTS, "weight")
+            if err:
+                return err
+
+        style_key = style_name = None
+        if style is not None:
+            style_key, style_name, err = self._enum_key(style, _LINE_STYLE_DISPLAY_NAMES, "style")
+            if err:
+                return err
+
+        colorref = None
+        if color is not None:
+            colorref, color_err = _parse_layer_color(color)
+            if color_err:
+                return self._result(False, color_err, SwErrors.swInvalidInput, {"color": color})
+
+        doc, err = self._get_line_format_doc("set_line_format")
+        if err:
+            return err
+
+        if view_name:
+            activated = self.select_view_by_name(view_name, doc=doc)
+            if not activated["success"]:
+                return activated
+
+        entities_report = []
+        applied_count = 0
+        for i, (type_str, ex, ey, ez) in enumerate(parsed_entities):
+            with self.selected("", type_str, ex, ey, ez, doc=doc) as sel:
+                if not sel["success"]:
+                    logger.warning(f"set_line_format: could not select target[{i}]: {sel['message']}")
+                    entities_report.append({"index": i, "success": False, "message": sel["message"]})
+                    continue
+                try:
+                    if weight_val is not None:
+                        doc.SetLineWidth(weight_val)
+                    if style_name is not None:
+                        doc.SetLineStyle(style_name)
+                    if colorref is not None:
+                        doc.SetLineColor(colorref)
+                except Exception as e:
+                    logger.warning(f"set_line_format: apply error on target[{i}]: {e}")
+                    entities_report.append({"index": i, "success": False, "message": str(e)})
+                    continue
+            applied_count += 1
+            entities_report.append({"index": i, "success": True})
+
+        data = {
+            "target_count": len(parsed_entities), "applied": applied_count,
+            "entities": entities_report, "weight": weight_key, "style": style_key,
+            "color": _colorref_to_hex(colorref) if colorref is not None else None,
+        }
+        if applied_count == 0:
+            return self._result(
+                False, f"Could not apply line format to any of {len(parsed_entities)} entit(y/ies)",
+                SwErrors.swFeatureError, data,
+            )
+        message = f"Applied line format to {applied_count}/{len(parsed_entities)} entit(y/ies)"
+        return self._result(True, message, SwErrors.swSuccess, data)
+
+    def get_line_format(self, target: Any, view_name: Optional[str] = None) -> Dict:
+        """
+        Read back the current weight/style/color for a named drafting-
+        standard entity class.
+
+        Args:
+            target: One of `_LINE_FORMAT_ENTITY_CLASSES`'s keys. SolidWorks
+                has no documented per-entity line-format read-back API (only
+                the write side, `IDrawingDoc::SetLineWidth`/`SetLineStyle`/
+                `SetLineColor`, is documented -- see docs/api/
+                05-export-and-layers.md's "Line format (per-entity, on a
+                drawing)" section) -- so unlike `set_line_format`, a list of
+                entity references is not accepted here and fails with
+                `swInvalidInput`.
+            view_name: Accepted for signature symmetry with `set_line_format`
+                but currently unused -- a named entity class's line format is
+                a document default (`IModelDocExtension::
+                GetUserPreferenceInteger`), which has no per-view scope.
+
+        Returns:
+            Result dict. `data["weight"]`/`data["style"]` are the resolved
+            names (or the raw `swLineWeights_e`/`swLineStyles_e` int code if
+            it doesn't match a known name); `data["color"]` is always `None`
+            (no such document property exists for any entity class -- see
+            `set_line_format`'s docstring).
+        """
+        if not isinstance(target, str):
+            return self._result(
+                False,
+                "get_line_format only supports a named entity-class target "
+                f"({sorted(_LINE_FORMAT_ENTITY_CLASSES)!r}) -- SolidWorks has no "
+                "documented per-entity line-format read-back API",
+                SwErrors.swInvalidInput, {"target": target},
+            )
+
+        class_key, prefs, err = self._enum_key(target, _LINE_FORMAT_ENTITY_CLASSES, "target")
+        if err:
+            return err
+        thickness_pref, style_pref = prefs
+
+        doc, err = self._get_line_format_doc("get_line_format")
+        if err:
+            return err
+
+        try:
+            style_code = _com_int(doc.Extension.GetUserPreferenceInteger(style_pref, _LINE_FORMAT_NO_OPTION))
+            weight_code = _com_int(
+                doc.Extension.GetUserPreferenceInteger(thickness_pref, _LINE_FORMAT_NO_OPTION))
+        except Exception as e:
+            logger.error(f"get_line_format({target!r}) error: {e}")
+            return self._result(False, f"Get line format error: {e}", SwErrors.swFeatureError, {"target": class_key})
+
+        data = {
+            "target": class_key,
+            "weight": _LAYER_LINE_WEIGHT_NAMES.get(weight_code, weight_code),
+            "style": _LAYER_LINE_STYLE_NAMES.get(style_code, style_code),
+            "color": None,
+        }
+        return self._result(True, f"Line format for entity class {class_key!r}", SwErrors.swSuccess, data)
+
+    def apply_drafting_standard(self, standard_file: str) -> Dict:
+        """
+        Read `standard_file` -- a JSON file mapping entity classes to
+        `{"weight": ..., "style": ...}` -- and apply every entry via
+        `set_line_format`, in one call. See `docs/drafting_standard.example.json`
+        for the expected shape.
+
+        Args:
+            standard_file: Path to a JSON file whose top-level object maps
+                `_LINE_FORMAT_ENTITY_CLASSES` keys to an object with an
+                optional `"weight"` and/or `"style"` (see `set_line_format`
+                for valid values -- `"color"` is not accepted here, for the
+                same reason `set_line_format` rejects it for a named-class
+                target).
+
+        Returns:
+            Result dict. Fails with `swInvalidInput` (before any COM call) if
+            the file can't be read, isn't valid JSON, isn't a non-empty
+            object, contains an unrecognized entity-class key, or an entry
+            contains an unrecognized property key -- in every case the
+            message names the offending key and `data["bad_key"]` carries it
+            too. Otherwise `data["results"]` maps each entity class to its
+            own `set_line_format` result dict (so a caller can see exactly
+            which entries succeeded), and overall `success` is True only if
+            every entry succeeded.
+        """
+        try:
+            with open(standard_file, "r", encoding="utf-8") as f:
+                raw = f.read()
+        except OSError as e:
+            return self._result(
+                False, f"Could not read standard_file {standard_file!r}: {e}",
+                SwErrors.swInvalidInput, {"standard_file": standard_file},
+            )
+
+        try:
+            spec = json.loads(raw)
+        except json.JSONDecodeError as e:
+            return self._result(
+                False, f"standard_file {standard_file!r} is not valid JSON: {e}",
+                SwErrors.swInvalidInput, {"standard_file": standard_file},
+            )
+
+        if not isinstance(spec, dict) or not spec:
+            return self._result(
+                False,
+                f"standard_file {standard_file!r} must be a non-empty JSON object mapping "
+                "entity classes to {\"weight\": ..., \"style\": ...}",
+                SwErrors.swInvalidInput, {"standard_file": standard_file},
+            )
+
+        for entity_class, entry in spec.items():
+            if entity_class not in _LINE_FORMAT_ENTITY_CLASSES:
+                return self._result(
+                    False,
+                    f"Unknown entity class {entity_class!r} in {standard_file!r}; expected one of "
+                    f"{sorted(_LINE_FORMAT_ENTITY_CLASSES)!r}",
+                    SwErrors.swInvalidInput,
+                    {"standard_file": standard_file, "bad_key": entity_class},
+                )
+            if not isinstance(entry, dict):
+                return self._result(
+                    False,
+                    f"Entry for {entity_class!r} in {standard_file!r} must be an object with "
+                    f"\"weight\"/\"style\", got {entry!r}",
+                    SwErrors.swInvalidInput,
+                    {"standard_file": standard_file, "bad_key": entity_class},
+                )
+            unknown_props = [k for k in entry if k not in ("weight", "style")]
+            if unknown_props:
+                return self._result(
+                    False,
+                    f"Unknown property {unknown_props[0]!r} in {entity_class!r} entry of "
+                    f"{standard_file!r}; expected \"weight\"/\"style\"",
+                    SwErrors.swInvalidInput,
+                    {"standard_file": standard_file, "bad_key": unknown_props[0]},
+                )
+
+        results: Dict[str, Dict] = {}
+        for entity_class, entry in spec.items():
+            results[entity_class] = self.set_line_format(
+                entity_class, weight=entry.get("weight"), style=entry.get("style"))
+
+        succeeded = sum(1 for r in results.values() if r["success"])
+        all_success = succeeded == len(results)
+        message = (
+            f"Applied drafting standard from {standard_file!r}: "
+            f"{succeeded}/{len(results)} entity class(es) succeeded"
+        )
+        return self._result(
+            all_success, message,
+            SwErrors.swSuccess if all_success else SwErrors.swFeatureError,
+            {"standard_file": standard_file, "results": results},
         )

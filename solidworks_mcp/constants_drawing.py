@@ -1243,9 +1243,14 @@ class SwDxfMultisheet(IntEnum):
 
 
 class SwUserPreferenceIntegerValue(IntEnum):
-    """Curated subset of application-level integer-valued system options
-    (swUserPreferenceIntegerValue_e), consumed by
-    ISldWorks::GetUserPreferenceIntegerValue / SetUserPreferenceIntegerValue.
+    """Curated subset of integer-valued system/document options
+    (swUserPreferenceIntegerValue_e) -- one enum shared by two different
+    accessor families: ISldWorks::GetUserPreferenceIntegerValue /
+    SetUserPreferenceIntegerValue (application-wide, most members below), and
+    IModelDocExtension::GetUserPreferenceInteger / SetUserPreferenceInteger
+    (document-level -- the swLineFont* members, sw-jkb.2). Which accessor a
+    given member actually goes through is not derivable from its name; see
+    each member's own dossier record.
 
     Same "own enumeration page publishes no numeric values" situation as
     SwUserPreferenceToggle above (confirmed independently in
@@ -1266,6 +1271,36 @@ class SwUserPreferenceIntegerValue(IntEnum):
     swDxfOutputNoScale = 0x88
     swEdrawingsSaveAsSelectionOption = 0xED
     swDxfMultiSheetOption = 0xFD
+
+    # Document Properties > Line Font -- consumed via IModelDocExtension::
+    # Get/SetUserPreferenceInteger, not ISldWorks::Get/SetUserPreferenceIntegerValue.
+    # Source: docs/api/05-export-and-layers.md's "Document line-format defaults"
+    # section and its Enums entry (sw-jkb.2), fetched from DP_LineFont.htm.
+    swLineFontVisibleEdgesThickness = 0x35
+    swLineFontVisibleEdgesStyle = 0x36
+    swLineFontHiddenEdgesThickness = 0x37
+    swLineFontHiddenEdgesStyle = 0x38
+    swLineFontDetailCircleThickness = 0x3B
+    swLineFontDetailCircleStyle = 0x3C
+    swLineFontSectionLineThickness = 0x3D
+    swLineFontSectionLineStyle = 0x3E
+    swLineFontDimensionsThickness = 0x3F
+    swLineFontDimensionsStyle = 0x40
+    swLineFontConstructionCurvesThickness = 0x41
+    swLineFontConstructionCurvesStyle = 0x42
+
+
+class SwUserPreferenceOption(IntEnum):
+    """swUserPreferenceOption_e -- IModelDocExtension::Get/SetUserPreferenceInteger's
+    `UserPrefOption` parameter. This project only ever needs the "no sub-type"
+    sentinel.
+
+    Source: docs/api/05-export-and-layers.md (Enums section,
+    swUserPreferenceOption_e -- status: unverified, see that record's Gotchas
+    for the sourcing caveats).
+    """
+
+    swDetailingNoOptionSpecified = 0
 
 
 class SwUserPreferenceStringListValue(IntEnum):

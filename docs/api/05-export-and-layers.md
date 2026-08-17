@@ -1094,6 +1094,210 @@ sketch entity must be selected before calling.
 - Companion method `IDrawingDoc::SetLineColor` exists (seen in this method's own "See
   Also" list) but was not independently fetched/documented in this pass.
 
+**Resolution (sw-jkb.2 -- `set_line_format`/`get_line_format`):** `IDrawingDoc::
+SetLineColor` (see its own record below) is now used for the explicit-entity-list form
+of `set_line_format`'s `target`, alongside `SetLineWidth`/`SetLineStyle` above.
+
+### IDrawingDoc::SetLineColor
+
+- **Interface:** IDrawingDoc
+- **Method:** SetLineColor
+- **Minimum SW version:** Not stated on the fetched page.
+
+**Signature:**
+
+```vb
+Sub SetLineColor( _
+   ByVal Color As System.Integer _
+)
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| Color | Integer | n/a | Yes | Color definition as a COLORREF for the selected edge or sketch entity | |
+
+**Returns:** `Sub` -- no return value.
+
+**Prior selection required:** Yes -- "Sets the line color for a **selected** edge or
+sketch entity", the same requirement as `SetLineWidth`/`SetLineStyle` above.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IDrawingDoc~SetLineColor.html
+
+**status:** verified
+
+**Gotchas:**
+- `Color` is a raw Win32 `COLORREF` (`0x00BBGGRR`), the same convention as
+  `ILayer::Color` above -- reuse that record's byte-order Gotcha and this dossier's
+  existing `_parse_layer_color` helper rather than re-deriving it.
+- Same no-return-value caveat as `SetLineWidth`: a failed selection or a no-op call
+  cannot be distinguished from success by this method's own return, since it has none.
+
+## Document line-format defaults (drafting standard, per entity class)
+
+`IDrawingDoc::SetLineWidth`/`SetLineStyle`/`SetLineColor` above are **per-selected-
+entity overrides** -- they say nothing about what a *newly created* visible edge,
+hidden edge, dimension line, etc. looks like by default. That default-per-entity-class
+behavior -- exactly what an internal drafting standard fixes (per this file's own
+intro: "line weight and style per entity class: visible edges, hidden edges, section
+lines, dimensions, construction geometry") -- is a **Document Properties > Line Font**
+setting, not exposed anywhere in this dossier's Layers or per-entity Line format
+sections above. Confirmed via `https://help.solidworks.com/2025/English/api/swconst/
+DP_LineFont.htm` (fetched with the `curl -A "Mozilla/5.0 ..."` retry convention this
+dossier's README documents, since a plain WebFetch 403s the same as every other
+`help.solidworks.com` page): that page's own
+"Setting / Get/Set Methods / Return Value or Value / Comments" table gives the concrete
+API for every Line Font category, e.g. `IModelDocExtension::SetUserPreferenceInteger
+(swUserPreferenceIntegerValue_e.swLineFontVisibleEdgesStyle,
+swUserPreferenceOption_e.swDetailingNoOptionSpecified, swLineStyles_e.<Value>)`.
+
+This is a genuinely different mechanism from `ISldWorks::SetUserPreferenceToggle`/
+`SetUserPreferenceIntegerValue` (this file's "Export settings via user preferences"
+section above): those are **`ISldWorks`-level, application-wide** system options.
+`IModelDocExtension::SetUserPreferenceInteger`/`GetUserPreferenceInteger` are
+**document-level** Document Properties -- "equivalent to interactively setting document
+properties in the SOLIDWORKS software" per this method's own Remarks -- so a change here
+persists with the drawing document, not the SOLIDWORKS session. Despite the different
+scope and owning interface, both consume the *same* `swUserPreferenceIntegerValue_e`
+enum as their first parameter -- SOLIDWORKS reuses one giant enum across every
+`Get/SetUserPreference*` family (`ISldWorks`-level and `IModelDocExtension`-level
+alike), distinguished only by which accessor a given member's own documentation says to
+call it through.
+
+The six entity classes this project's drafting-standard tooling targets, and their
+`swUserPreferenceIntegerValue_e` members (full curated table in Enums below):
+
+| Entity class | Style member | Thickness member |
+| --- | --- | --- |
+| Visible edges | `swLineFontVisibleEdgesStyle` | `swLineFontVisibleEdgesThickness` |
+| Hidden edges | `swLineFontHiddenEdgesStyle` | `swLineFontHiddenEdgesThickness` |
+| Section line | `swLineFontSectionLineStyle` | `swLineFontSectionLineThickness` |
+| Detail circle | `swLineFontDetailCircleStyle` | `swLineFontDetailCircleThickness` |
+| Dimensions | `swLineFontDimensionsStyle` | `swLineFontDimensionsThickness` |
+| Construction curves | `swLineFontConstructionCurvesStyle` | `swLineFontConstructionCurvesThickness` |
+
+The DP_LineFont.htm page documents many more categories (sketch curves, tangent edges,
+break lines, bend lines, crosshatch, cosmetic thread, ...) that this project's tools
+don't currently expose -- only the six above are wired up, matching this issue's
+Requirements list verbatim (`visible`/`hidden`/`section`/`detail-circle`/`dimension`/
+`construction`).
+
+**No document-level "line color per entity class" property exists anywhere on the
+DP_LineFont.htm page** -- only Style, Thickness, Custom thickness, and (for some
+categories) End cap style are exposed per category. A search of the full
+`swUserPreferenceIntegerValue_e` member list for a `swSystemColorsSectionLine`/
+`swSystemColorsDetailCircle`-shaped member (by analogy with the confirmed
+`swSystemColorsDrawingsVisibleModelEdge`/`swSystemColorsDrawingsHiddenModelEdge`
+*System Options* colors, a different, application-wide family) found no such member for
+4 of the 6 classes here (section line, detail circle, dimensions, construction curves
+have no dedicated color preference at all) -- so `color` is deliberately **not**
+supported for the entity-class form of `set_line_format`/`get_line_format`, only for its
+explicit-entity-reference-list form (via `IDrawingDoc::SetLineColor` above, a true
+per-entity override, consistent in scope with that form's `SetLineWidth`/`SetLineStyle`
+calls).
+
+### IModelDocExtension::SetUserPreferenceInteger
+
+- **Interface:** IModelDocExtension
+- **Method:** SetUserPreferenceInteger
+- **Minimum SW version:** SOLIDWORKS 2009 FCS, Revision Number 17.0
+
+**Signature:**
+
+```vb
+Function SetUserPreferenceInteger( _
+   ByVal UserPref As System.Integer, _
+   ByVal UserPrefOption As System.Integer, _
+   ByVal Value As System.Integer _
+) As System.Boolean
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| UserPref | Integer | n/a | Yes | Which document-level integer preference to set | `swUserPreferenceIntegerValue_e` |
+| UserPrefOption | Integer | n/a | Yes | Option for customizing annotation/dimension drafting standards; pass `swDetailingNoOptionSpecified` (0) if not needed | `swUserPreferenceOption_e` |
+| Value | Integer | n/a | Yes | New value for the preference named by `UserPref` (itself often another enum's member, e.g. `swLineStyles_e`/`swLineWeights_e` for the Line Font members this record's Gotchas focus on) | Varies per `UserPref` |
+
+**Returns:** `Boolean`. True if the preference was set, false if not (no further
+per-cause breakdown documented on this page).
+
+**Prior selection required:** None.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IModelDocExtension~SetUserPreferenceInteger.html
+- https://help.solidworks.com/2025/English/api/swconst/DP_LineFont.htm (concrete
+  per-category Line Font worked calls, quoted in this section's intro above)
+
+**status:** verified
+
+**Gotchas:**
+- "This method is equivalent to interactively setting document properties in the
+  SOLIDWORKS software" per its own Remarks -- unlike `ISldWorks::
+  SetUserPreferenceToggle`/`SetUserPreferenceIntegerValue` (application-wide, session-
+  persistent, save/restore-around-the-call scope), a value set here is a genuine,
+  persistent property of *this document* -- exactly the semantics a drafting-standard
+  tool wants (set once, keep it), so `apply_drafting_standard`/`set_line_format` do
+  **not** snapshot-and-restore around these calls the way `export_pdf`/`export_dxf_dwg`
+  do around their `ISldWorks`-level preference changes.
+- `swLineFontVisibleEdgesStyle`/`HiddenEdgesStyle`/`SketchCurvesStyle`/`...Style`
+  members' own DP_LineFont.htm Comments column states "See swLineStyles_e for valid
+  options **except `swLineDEFAULT`**" -- i.e. the per-category style default cannot
+  itself be set to "use the document default," unlike a per-entity override
+  (`IDrawingDoc::SetLineStyle`) or a layer's own `ILayer::Style`, where `swLineDEFAULT`
+  is a legitimate choice. `set_line_format` enforces this by excluding `"default"` from
+  the accepted `style` values when `target` is a named entity class (full set is still
+  accepted for the explicit-entity-list form).
+- Same `UserPref` enum (`swUserPreferenceIntegerValue_e`) as `ISldWorks::
+  Get/SetUserPreferenceIntegerValue` above -- do not assume a member is exclusively
+  document-level or exclusively application-level from its name alone; the
+  DP_LineFont.htm/relevant System Options page for each specific member is the only way
+  to know which accessor family (`ISldWorks` vs. `IModelDocExtension`) actually reaches
+  it.
+
+### IModelDocExtension::GetUserPreferenceInteger
+
+- **Interface:** IModelDocExtension
+- **Method:** GetUserPreferenceInteger
+- **Minimum SW version:** SOLIDWORKS 2009 FCS, Revision Number 17.0 (same release as its
+  `Set` counterpart above).
+
+**Signature:**
+
+```vb
+Function GetUserPreferenceInteger( _
+   ByVal UserPref As System.Integer, _
+   ByVal UserPrefOption As System.Integer _
+) As System.Integer
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| UserPref | Integer | n/a | Yes | Which document-level integer preference to read | `swUserPreferenceIntegerValue_e` |
+| UserPrefOption | Integer | n/a | Yes | Option for customizing annotation/dimension drafting standards; pass `swDetailingNoOptionSpecified` (0) if not needed | `swUserPreferenceOption_e` |
+
+**Returns:** `Integer` -- the preference's current value (interpretation depends on
+`UserPref`, e.g. a `swLineStyles_e`/`swLineWeights_e` member for the Line Font members
+this section documents).
+
+**Prior selection required:** None.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IModelDocExtension~GetUserPreferenceInteger.html
+- https://help.solidworks.com/2025/English/api/swconst/DP_LineFont.htm
+
+**status:** verified
+
+**Gotchas:**
+- Symmetric with `SetUserPreferenceInteger` above -- same two enum references, same
+  `swDetailingNoOptionSpecified` convention for `UserPrefOption` when reading one of the
+  Line Font members this section covers.
+
 ## Enums
 
 #### swExportDataFileType_e
@@ -1419,6 +1623,84 @@ Sources:
 - https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swDxfFormat_e.html (full `swDxfVersion` value table)
 - https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swDxfMultisheet_e.html
 - https://github.com/pisfu/API/blob/master/LabRabKompas/Sample2/SwConst_TLB.pas (third-party numeric-value transcription; see corroboration note above)
+
+**`swUserPreferenceIntegerValue_e` Line Font members (sw-jkb.2, `set_line_format`/
+`get_line_format`/`apply_drafting_standard`):** consumed by `IModelDocExtension::
+Get/SetUserPreferenceInteger` (see "Document line-format defaults" section above), not
+`ISldWorks::Get/SetUserPreferenceIntegerValue` -- same enum, different owning accessor.
+Member names confirmed on the `swUserPreferenceIntegerValue_e` enumeration page itself
+(each just says "See System Options and Document Properties", like every member on that
+page); their *meaning* (which entity class each corresponds to) is confirmed instead on
+`DP_LineFont.htm`'s worked Get/Set calls, quoted in this section's intro above. Only the
+6 members this project's tools actually use are listed (the full Line Font category list
+is much longer -- see that section's intro).
+
+| Member | Meaning |
+| --- | --- |
+| `swLineFontVisibleEdgesStyle` / `swLineFontVisibleEdgesThickness` | Visible edges: style / thickness |
+| `swLineFontHiddenEdgesStyle` / `swLineFontHiddenEdgesThickness` | Hidden edges: style / thickness |
+| `swLineFontSectionLineStyle` / `swLineFontSectionLineThickness` | Section line: style / thickness |
+| `swLineFontDetailCircleStyle` / `swLineFontDetailCircleThickness` | Detail circle: style / thickness |
+| `swLineFontDimensionsStyle` / `swLineFontDimensionsThickness` | Dimension lines: style / thickness |
+| `swLineFontConstructionCurvesStyle` / `swLineFontConstructionCurvesThickness` | Construction curves: style / thickness |
+
+Numeric values, same `SwConst_TLB.pas` source and corroboration argument as this
+section's other numeric-value notes: these 12 members form one contiguous, sequentially
+-numbered block (`$35`-`$42`, i.e. decimal 53-66) immediately following
+`swUnitsAngularDecimalPlaces = $34`, itself immediately following the already-official
+ly-confirmed `swUnitsAngular`/`swUnitsLinear*` block -- consistent with a real ordered
+enum, not a transcription error. A `...ThicknessCustom` sibling exists for each category
+too (`$59`-`$5F`, i.e. 89-95) -- not currently consumed by any tool in this project
+(`set_line_format`'s `weight` parameter only ever sends a named `swLineWeights_e`
+member, never a custom numeric thickness), so not tabled here; present in the source file
+if a future issue needs it.
+
+| Member | Value | Hex |
+| --- | --- | --- |
+| `swLineFontVisibleEdgesThickness` | 53 | `0x35` |
+| `swLineFontVisibleEdgesStyle` | 54 | `0x36` |
+| `swLineFontHiddenEdgesThickness` | 55 | `0x37` |
+| `swLineFontHiddenEdgesStyle` | 56 | `0x38` |
+| `swLineFontDetailCircleThickness` | 59 | `0x3B` |
+| `swLineFontDetailCircleStyle` | 60 | `0x3C` |
+| `swLineFontSectionLineThickness` | 61 | `0x3D` |
+| `swLineFontSectionLineStyle` | 62 | `0x3E` |
+| `swLineFontDimensionsThickness` | 63 | `0x3F` |
+| `swLineFontDimensionsStyle` | 64 | `0x40` |
+| `swLineFontConstructionCurvesThickness` | 65 | `0x41` |
+| `swLineFontConstructionCurvesStyle` | 66 | `0x42` |
+
+Sources:
+- https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swUserPreferenceIntegerValue_e.html (member name list; confirms no numeric values published)
+- https://help.solidworks.com/2025/English/api/swconst/DP_LineFont.htm (per-category Get/Set method bindings)
+- https://github.com/pisfu/API/blob/master/LabRabKompas/Sample2/SwConst_TLB.pas (third-party numeric-value transcription; see corroboration note above)
+
+#### swUserPreferenceOption_e
+
+Consumed by `IModelDocExtension::Get/SetUserPreferenceInteger`'s `UserPrefOption`
+parameter (see "Document line-format defaults" section above) -- "option for
+customizing annotation and dimension drafting standards." This project's tools only ever
+need the "no option" sentinel; the enum's other members (per the same third-party
+transcription used throughout this dossier, a contiguous block starting at `$64`
+immediately after `swDetailingNoOptionSpecified = 0`) select a specific annotation/
+dimension/table sub-type for preferences that vary per sub-type, which no tool in this
+project currently needs.
+
+| Value | Number | Meaning |
+| --- | --- | --- |
+| swDetailingNoOptionSpecified | 0 | No sub-type option -- what every `IModelDocExtension::Get/SetUserPreferenceInteger` call in this project passes |
+
+Source: https://github.com/pisfu/API/blob/master/LabRabKompas/Sample2/SwConst_TLB.pas
+(not independently fetched from `help.solidworks.com` as its own enumeration page in
+this research pass; `swDetailingNoOptionSpecified = 0` is also stated directly, without
+a source citation of its own, on the `SetUserPreferenceInteger`/`GetUserPreferenceInteger`
+method pages' own Parameters text -- "if not needed, then specify
+`swDetailingNoOptionSpecified`" -- corroborating the value's existence and role, though
+not independently confirming the literal `0`).
+
+**status:** unverified (member name and role confirmed on two independent official
+pages; the literal numeric value `0` rests on the same third-party transcription as this
+dossier's other numeric-value notes, not an independently fetched enumeration page)
 
 #### swUserPreferenceStringListValue_e (export-relevant members)
 

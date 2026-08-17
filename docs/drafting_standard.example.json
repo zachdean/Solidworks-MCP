@@ -1,0 +1,26 @@
+{
+  "visible": {
+    "weight": "normal",
+    "style": "continuous"
+  },
+  "hidden": {
+    "weight": "thin",
+    "style": "hidden"
+  },
+  "section": {
+    "weight": "thick",
+    "style": "phantom"
+  },
+  "detail_circle": {
+    "weight": "thin",
+    "style": "continuous"
+  },
+  "dimension": {
+    "weight": "thin",
+    "style": "continuous"
+  },
+  "construction": {
+    "weight": "thin",
+    "style": "center"
+  }
+}
