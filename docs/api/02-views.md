@@ -759,6 +759,104 @@ on "the selected drawing view" — it does not take a view reference as a parame
   backward compatibility and are explicitly marked "Superseded by
   IDrawingDoc::CreateUnfoldedViewAt3" — new code should not use them.
 
+## Auxiliary views
+
+Unlike the "projected view" naming trap above, this one has an on-the-nose method
+name: `IDrawingDoc::CreateAuxiliaryViewAt2`. `help.solidworks.com` 403'd every direct
+fetch attempt for this method during this research pass (the same standing WAF block
+noted throughout this dossier), so the record below is sourced the way
+`SetUserPreferenceToggle`/`GetBaseView` are elsewhere in this file: a type-library
+mirror for arity/types, corroborated by an independent working macro example and
+multiple search-indexed secondary descriptions, with no page body directly fetched.
+
+### IDrawingDoc::CreateAuxiliaryViewAt2
+
+- **Interface:** IDrawingDoc
+- **Method:** CreateAuxiliaryViewAt2
+- **Minimum SW version:** unverified — help page fetch 403'd directly; a "2"-suffixed
+  overload existing alongside search-indexed pages for SW2019 through at least SW2025
+  implies it predates 2019, but no exact FCS could be pinned down from accessible
+  sources.
+
+**Signature:**
+
+```vb
+Function CreateAuxiliaryViewAt2( _
+   ByVal X As System.Double, _
+   ByVal Y As System.Double, _
+   ByVal Z As System.Double, _
+   ByVal NotAligned As System.Boolean, _
+   ByVal Label As System.String, _
+   ByVal Showarrow As System.Boolean, _
+   ByVal Flip As System.Boolean _
+) As System.Object
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| X | Double | meters (sheet space) | Yes | X location for the center of the new auxiliary view | — |
+| Y | Double | meters (sheet space) | Yes | Y location for the center of the new auxiliary view | — |
+| Z | Double | meters (sheet space) | Yes | Z location — inert for 2D sheet placement, same as every other `*At*` view-creation call in this dossier; pass `0` | — |
+| NotAligned | Boolean | n/a | Yes | `False` = keep the auxiliary view aligned/locked to the parent view along the projection direction (the drag-off-an-edge UI behavior); `True` = break alignment. Same name and same-shaped role as `CreateUnfoldedViewAt3`'s `NotAligned` | — |
+| Label | String | n/a | Yes | Text of the auxiliary view's letter label (e.g. `"A"`) | — |
+| Showarrow | Boolean | n/a | Yes | `True` shows the projection arrow on the parent view, `False` hides it | — |
+| Flip | Boolean | n/a | Yes | `True` flips which side of the reference edge the view projects toward, `False` does not | — |
+
+**Returns:** `System.Object` — a `View` on success (the working macro example assigns
+the result directly to a `SldWorks.View` variable and null-checks it); `Nothing` on
+failure (no dedicated error code documented).
+
+**Prior selection required:** Yes, mandatory, and not passed as a parameter — same
+ambient-selection pattern as `CreateSectionViewAt5`/`CreateBreakOutSection`/
+`CreateUnfoldedViewAt3` elsewhere in this dossier. The working macro example's own
+prose states the edge to project from must already be selected in an existing base
+view before the call: "We create Auxiliary view from an existing (Base) view. We
+already select an edge in this existing (Base) view." No `SelectByID2` call is shown
+in that example (the edge was selected interactively before running the macro), but
+the documented pattern for automation is the same as this dossier's other
+ambient-selection records: `IModelDocExtension::SelectByID2("", "EDGE", x, y, z,
+False, 0, Nothing, 0)` against a point on the target edge. The method itself takes no
+view-reference or edge-reference parameter.
+
+**Source URL(s):**
+- https://www.rimptec.com/rsolidworks/net/lehal/sw/IDrawingDoc.html (type-library mirror: confirms `CreateAuxiliaryViewAt2`'s 7-parameter arity — 3 doubles, then bool/string/bool/bool — and that a simpler 4-parameter `CreateAuxiliaryViewAt` (no alignment/label/arrow/flip control) also exists)
+- https://thecadcoder.com/solidworks-vba-macros/drawing-insert-auxilaryview/ (working VBA example: `swDrawing.CreateAuxiliaryViewAt2(0.2, 0.1, 0, False, "A", True, True)`, plus prose confirming the pre-selected-edge requirement and each parameter's meaning)
+- https://help.solidworks.com/2019/English/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IDrawingDoc~CreateAuxiliaryViewAt2.html (indexed by search under this exact title across SW2019–SW2025 API help; direct fetch 403'd, same WAF block as elsewhere in this dossier)
+
+**status:** verified (type-library arity/types + independent working-macro
+corroboration, cross-checked against multiple search-indexed page titles; no page
+body directly fetched — same sourcing tier as this dossier's `SetUserPreferenceToggle`
+and `GetBaseView` records)
+
+**Gotchas:**
+- **This is a real, first-class, directly-callable API method** — unlike "projected
+  view," "auxiliary view" is not a UI-only name; the API method is named
+  `CreateAuxiliaryViewAt2`, matching what the task expected. No naming trap here.
+  `swDrawingViewTypes_e` also has a dedicated `swDrawingAuxiliaryView` (5) member (see
+  the Enums section), confirming the API treats auxiliary views as their own
+  first-class view type, not a flavor of projected/section view.
+- **`NotAligned`'s prose description on the secondary source reads
+  self-contradictory** ("True aligns the view from its owner, False does not") —
+  backwards from what the parameter's own name and its `CreateUnfoldedViewAt3`
+  sibling both imply (`NotAligned=True` should *break* alignment, not create it).
+  Treat this as a likely paraphrase/documentation error on the secondary source
+  rather than a confirmed inverted convention, and follow the name-and-sibling-method
+  reading (`False` = aligned, `True` = not aligned) until verified against a live
+  SolidWorks session — flagged rather than silently "corrected," per this dossier's
+  standing rule against inventing behavior.
+- **A simpler, obsolete `CreateAuxiliaryViewAt` (4 params: X, Y, Z, OnEdge — no
+  label/arrow/flip control) also exists** per the type-library mirror; treat the "2"
+  form as current, same pattern as `CreateDetailViewAt4`/`CreateUnfoldedViewAt3`
+  elsewhere in this dossier. No `CreateAuxiliaryViewAt3` could be found by any source
+  consulted — "2" is the current highest overload.
+- Units never stated on any accessible source; meters for `X`/`Y`/`Z` inferred from
+  the API-wide units convention (same inference this dossier makes for every
+  sheet-space placement call whose page could not be fetched directly).
+- No `RunCommand`/`swCommands_e` workaround is needed — same as `CreateUnfoldedViewAt3`,
+  this UI action has a direct, documented API equivalent.
+
 ## Breaks and crop
 
 ### IView::InsertBreak3

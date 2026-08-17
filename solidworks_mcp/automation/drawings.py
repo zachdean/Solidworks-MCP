@@ -6,9 +6,10 @@ Access and operate on drawing (.slddrw) documents.
 
 import os
 import logging
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .. import com_backend
+from .com_params import ComSignature, Param, REQUIRED, to_bool, to_meters
 from ..constants import SwErrors, SwDocumentTypes, SwFileTypes
 from ..constants_drawing import (
     SwCustomInfoType,
@@ -72,6 +73,55 @@ _STANDARD_MODEL_VIEWS = {
     "trimetric": "*Trimetric",
     "current": "*Current",
 }
+
+# `IDrawingDoc::CreateUnfoldedViewAt3`'s `direction` -> (dx sign, dy sign,
+# NotAligned) used by `insert_projected_view`. The four cardinal directions
+# keep the projected view orthographically aligned to its parent (NotAligned
+# =False, the "drag off an edge" UI behavior docs/api/02-views.md's
+# CreateUnfoldedViewAt3 record documents) -- an aligned view can only move
+# along the alignment vector shared with its parent, so it makes sense for
+# these to stay aligned. The four diagonals have no aligned-projection
+# equivalent in the SolidWorks UI at all (an orthographic projection is
+# always straight up/down/left/right of its parent), so those break
+# alignment (NotAligned=True) to be freely positionable off-axis -- this is
+# this wrapper's own convention, not something the dossier's projected-view
+# record specifies, since the API has no native "diagonal projected view"
+# concept.
+_PROJECTED_VIEW_DIRECTIONS = {
+    "right": (1, 0, False),
+    "left": (-1, 0, False),
+    "up": (0, 1, False),
+    "down": (0, -1, False),
+    "upright": (1, 1, True),
+    "upleft": (-1, 1, True),
+    "downright": (1, -1, True),
+    "downleft": (-1, -1, True),
+}
+
+# Sheet-space nudge (meters) used only to bias `CreateUnfoldedViewAt3`'s
+# required X/Y toward the requested direction when the caller doesn't pass
+# an explicit `offset` -- for an aligned view SolidWorks snaps the
+# perpendicular axis to the parent's alignment vector regardless of the
+# exact value passed, per docs/api/02-views.md's `IView::Position` Gotchas
+# ("if this view is aligned to another view, it can only move along the
+# alignment vector"). Not sourced from the dossier; this wrapper's own
+# convention for "some reasonable default offset" pending a real
+# SolidWorks session to validate against.
+_DEFAULT_PROJECTED_VIEW_STEP_M = 0.05
+
+# `IDrawingDoc::CreateAuxiliaryViewAt2`'s positional signature, in the exact
+# order documented in docs/api/02-views.md: X, Y, Z, NotAligned, Label,
+# Showarrow, Flip. 7 positional parameters -- ComSignature per this issue's
+# working agreement (>6 params).
+CREATE_AUXILIARY_VIEW_AT2 = ComSignature("CreateAuxiliaryViewAt2", [
+    Param("x", REQUIRED, to_meters),
+    Param("y", REQUIRED, to_meters),
+    Param("z", 0.0, to_meters),
+    Param("not_aligned", False, to_bool),
+    Param("label", ""),
+    Param("show_arrow", True, to_bool),
+    Param("flip", False, to_bool),
+])
 
 
 class DrawingOperations:
@@ -884,4 +934,462 @@ class DrawingOperations:
         return self._result(
             True, f"{len(views)} view(s) on sheet {sheet_name!r}", SwErrors.swSuccess,
             {"sheet_name": sheet_name, "views": views},
+        )
+
+    def _resolve_sheet(self, doc, sheet_name: Optional[str]) -> Tuple[Any, Optional[Dict]]:
+        """Resolve `sheet_name` (or the active sheet if omitted) to an
+        `ISheet` reference -- the shared entry point `insert_projected_view`/
+        `insert_auxiliary_view`/`insert_predefined_views` use to find the
+        views already on a sheet, mirroring `list_views`' own resolution.
+        """
+        try:
+            if sheet_name:
+                sheet = doc.Sheet(sheet_name)
+                if not sheet:
+                    return None, self._result(
+                        False, f"Sheet {sheet_name!r} not found", SwErrors.swInvalidInput,
+                        {"sheet_name": sheet_name},
+                    )
+            else:
+                sheet = doc.GetCurrentSheet()
+                if not sheet:
+                    return None, self._result(False, "No active sheet", SwErrors.swFeatureError)
+        except Exception as e:
+            logger.error(f"_resolve_sheet error: {e}")
+            return None, self._result(False, f"Resolve sheet error: {e}", SwErrors.swUnknownError)
+
+        return sheet, None
+
+    def _sheet_view_fill_state(self, sheet: Any) -> Dict[str, bool]:
+        """`{view_name: has_referenced_model}` for every real
+        (non-sheet-pseudo-view) view on `sheet`, via `ISheet::GetViews` +
+        `IView::ReferencedDocument` -- what `insert_predefined_views` uses to
+        tell an *unfilled* predefined-view placeholder from a filled one.
+
+        A predefined-view placeholder is a real, named view object on the
+        sheet from the moment it's authored on the template (Insert >
+        Drawing View > Predefined) -- `InsertModelInPredefinedView` only
+        fills it, per docs/api/02-views.md's Gotchas, it doesn't create a new
+        tree entry. So a before/after diff of *view names* never changes
+        (the placeholder was already named), and would wrongly read as "no
+        predefined views" even on a real fill. Whether the placeholder
+        references a model (`IView::ReferencedDocument`, non-empty only
+        once a model has actually been inserted into it) is what actually
+        flips across the call, so that -- not name-appearance -- is the
+        fill signal."""
+        try:
+            views_raw = sheet.GetViews() or []
+        except Exception:
+            views_raw = []
+        if not isinstance(views_raw, (list, tuple)):
+            views_raw = []
+
+        sheet_type_code = int(SwDrawingViewTypes.swDrawingSheet)
+        state: Dict[str, bool] = {}
+        for view in views_raw:
+            type_code = self._read_prop(view, "Type")
+            if (isinstance(type_code, (int, float)) and not isinstance(type_code, bool)
+                    and int(type_code) == sheet_type_code):
+                continue
+            name = self._read_prop(view, "GetName2")
+            if not name:
+                continue
+            state[name] = bool(self._read_prop(view, "ReferencedDocument"))
+        return state
+
+    def _find_view_by_name(self, doc, view_name: str,
+                            sheet_name: Optional[str] = None) -> Tuple[Any, List[str], Optional[Dict]]:
+        """Resolve `view_name` to its raw `IView` object on `sheet_name` (or
+        the active sheet), via `ISheet::GetViews` -- what `insert_projected_view`
+        and `insert_auxiliary_view` use to validate a caller-supplied parent
+        view name against what's actually on the sheet, listing the real
+        names on a miss rather than passing an unrecognized string straight
+        through to a COM call whose only failure signal is a bare `Nothing`.
+
+        Returns:
+            `(view, names, None)` on a sheet-resolution success -- `view` is
+            `None` (with `names` populated) if no view on the sheet has that
+            name. `(None, [], error_dict)` if the sheet itself couldn't be
+            resolved.
+        """
+        sheet, err = self._resolve_sheet(doc, sheet_name)
+        if err:
+            return None, [], err
+
+        try:
+            views_raw = sheet.GetViews() or []
+        except Exception as e:
+            logger.error(f"_find_view_by_name error: {e}")
+            return None, [], self._result(False, f"List views error: {e}", SwErrors.swUnknownError)
+        if not isinstance(views_raw, (list, tuple)):
+            views_raw = []
+
+        sheet_type_code = int(SwDrawingViewTypes.swDrawingSheet)
+        names = []
+        match = None
+        for view in views_raw:
+            type_code = self._read_prop(view, "Type")
+            if (isinstance(type_code, (int, float)) and not isinstance(type_code, bool)
+                    and int(type_code) == sheet_type_code):
+                continue
+            name = self._read_prop(view, "GetName2")
+            if name:
+                names.append(name)
+            if name == view_name:
+                match = view
+
+        return match, names, None
+
+    def insert_projected_view(self, parent_view_name: str, direction: str,
+                               offset: Optional[float] = None,
+                               sheet_name: Optional[str] = None) -> Dict:
+        """
+        Project a new drawing view off an existing one via
+        `IDrawingDoc::CreateUnfoldedViewAt3` -- the API's real name for what
+        the UI calls "Insert Projected View" (docs/api/02-views.md's
+        Projected views section: no `*Project*`-named method exists on
+        `IDrawingDoc`/`IView`; `CreateUnfoldedViewAt3` is the same
+        operation).
+
+        Args:
+            parent_view_name: Name of the existing drawing view to project
+                from (`IView::GetName2`, e.g. from `list_views`). Selected
+                via `selected(..., "DRAWINGVIEW", ...)` before the call --
+                `CreateUnfoldedViewAt3` takes no parent-view parameter and
+                operates on whatever is currently selected. An unrecognized
+                name fails with `swInvalidInput` listing every view actually
+                on the sheet, rather than reaching the COM call and getting
+                back an unexplained `Nothing`.
+            direction: One of `up`/`down`/`left`/`right`/`upleft`/`upright`/
+                `downleft`/`downright` (case-insensitive). The four cardinal
+                directions keep the projection orthographically aligned to
+                its parent (`NotAligned=False`, matching drag-off-an-edge UI
+                behavior); the four diagonals have no aligned-projection
+                equivalent in SolidWorks, so those break alignment
+                (`NotAligned=True`) to be freely positioned off-axis.
+            offset: Distance from the parent view's center to the new
+                view's center, in the caller's default unit (`set_units`).
+                `CreateUnfoldedViewAt3` always requires *some* X/Y (there is
+                no "just use the default placement" call shape), so a small
+                fixed nudge in the requested direction is used for the
+                creation call itself regardless of `offset` -- when `offset`
+                is given, the view is then moved to the exact requested
+                distance afterward via the `IView::Position` setter (plus an
+                `EditRebuild3` to force the regenerate its Gotchas call for),
+                rather than pretending `CreateUnfoldedViewAt3`'s own X/Y
+                argument is an honored placement request for an aligned view
+                (docs/api/02-views.md's `IView::Position` Gotchas: an aligned
+                view "can only move along the alignment vector" regardless
+                of what's passed to the creation call).
+            sheet_name: Sheet the parent view lives on, resolved the same
+                way `list_views` does. Omitted: whichever sheet
+                `IDrawingDoc::GetCurrentSheet` reports as active.
+
+        Returns:
+            Result dict. On success, `data["view_name"]` is the created
+            view's name. Scale is never touched here -- a projected view
+            inherits its parent's scale by default, and nothing in this
+            method changes that.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        direction_key = (direction or "").strip().lower()
+        mapping = _PROJECTED_VIEW_DIRECTIONS.get(direction_key)
+        if mapping is None:
+            return self._result(
+                False,
+                f"Unknown direction {direction!r}; expected one of "
+                f"{sorted(_PROJECTED_VIEW_DIRECTIONS)!r}",
+                SwErrors.swInvalidInput, {"direction": direction},
+            )
+        dx_sign, dy_sign, not_aligned = mapping
+
+        parent_view, available_views, find_err = self._find_view_by_name(
+            doc, parent_view_name, sheet_name)
+        if find_err:
+            return find_err
+        if parent_view is None:
+            return self._result(
+                False,
+                f"Unknown parent view {parent_view_name!r}; available views: "
+                f"{available_views!r}",
+                SwErrors.swInvalidInput,
+                {"parent_view_name": parent_view_name, "available_views": available_views},
+            )
+
+        parent_position = self._read_prop(parent_view, "Position")
+        if isinstance(parent_position, (list, tuple)) and len(parent_position) >= 2:
+            parent_x_m, parent_y_m = float(parent_position[0]), float(parent_position[1])
+        else:
+            parent_x_m, parent_y_m = 0.0, 0.0
+
+        create_x_m = parent_x_m + dx_sign * _DEFAULT_PROJECTED_VIEW_STEP_M
+        create_y_m = parent_y_m + dy_sign * _DEFAULT_PROJECTED_VIEW_STEP_M
+
+        data = {
+            "parent_view_name": parent_view_name, "direction": direction_key,
+            "offset": offset, "sheet_name": sheet_name,
+        }
+
+        with self.selected(parent_view_name, "DRAWINGVIEW", 0, 0, 0) as sel:
+            if not sel["success"]:
+                return sel
+            try:
+                view = doc.CreateUnfoldedViewAt3(create_x_m, create_y_m, 0.0, not_aligned)
+            except Exception as e:
+                logger.error(f"insert_projected_view error: {e}")
+                return self._result(False, f"Insert projected view error: {e}",
+                                    SwErrors.swFeatureError, data)
+
+        if view is None:
+            return self._result(
+                False,
+                f"Failed to create projected view ({direction_key}) off "
+                f"{parent_view_name!r}",
+                SwErrors.swFeatureError, data,
+            )
+
+        created_name = self._read_prop(view, "GetName2")
+        data["view_name"] = created_name
+
+        if offset is not None:
+            offset_m = self._units.to_meters(offset)
+            final_x_m = parent_x_m + dx_sign * offset_m
+            final_y_m = parent_y_m + dy_sign * offset_m
+            try:
+                view.Position = [final_x_m, final_y_m]
+                doc.EditRebuild3()
+            except Exception as e:
+                # The view itself was created successfully -- only the
+                # requested exact offset failed to apply -- but reporting
+                # plain success here would silently hand back a view at the
+                # wrong position while `data["offset"]` claims the requested
+                # one was honored. Same "a partial/warned operation can't
+                # silently read as a clean one" rule `save_drawing` follows
+                # for its own Errors/Warnings bitmask.
+                logger.error(f"insert_projected_view: offset reposition failed: {e}")
+                return self._result(
+                    False,
+                    f"Created projected view {created_name or ''!r} but failed to "
+                    f"move it to the requested offset: {e}",
+                    SwErrors.swFeatureError, data,
+                )
+
+        return self._result(
+            True,
+            f"Inserted projected view {created_name or ''!r} "
+            f"({direction_key} of {parent_view_name!r})",
+            SwErrors.swSuccess, data,
+        )
+
+    def insert_predefined_views(self, model_path: str, sheet_name: Optional[str] = None) -> Dict:
+        """
+        Fill every predefined-view placeholder on a sheet via
+        `IDrawingDoc::InsertModelInPredefinedView` -- placeholders
+        pre-positioned/pre-configured on a template beforehand (Insert >
+        Drawing View > Predefined in the UI), left empty until a model is
+        inserted into them.
+
+        No selection is made before the call, per the dossier's Gotchas:
+        selecting specific placeholders first would narrow the fill to just
+        those, but this tool's contract is "fill every placeholder on the
+        sheet."
+
+        Args:
+            model_path: Full pathname of the model document to insert into
+                every predefined-view placeholder on the sheet.
+            sheet_name: Sheet to target, activated via `IDrawingDoc::
+                ActivateSheet` first -- required per the dossier's
+                multi-sheet Gotcha (only the *last active* sheet's
+                placeholders get filled). Omitted: whichever sheet is
+                already active.
+
+        Returns:
+            Result dict. `InsertModelInPredefinedView` returns only a bare
+            `Boolean` with no view handle, and a predefined-view placeholder
+            is already a real, named view object on the sheet before it's
+            filled (the dossier: this method only fills existing
+            placeholders, it does not create them) -- so which placeholders
+            got filled can't be read off which view *names* are new. Instead,
+            `_sheet_view_fill_state` snapshots which named views already
+            reference a model (`IView::ReferencedDocument`) before the call;
+            `data["filled_views"]` is whichever of the previously-unfilled
+            names reference one afterward. If the sheet has zero unfilled
+            placeholders to begin with, this fails with `swFeatureError`
+            before even calling `InsertModelInPredefinedView` -- naming the
+            sheet, rather than reporting a silent success that filled
+            nothing.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        if sheet_name:
+            try:
+                activated = doc.ActivateSheet(sheet_name)
+            except Exception as e:
+                logger.error(f"insert_predefined_views activate sheet error: {e}")
+                return self._result(False, f"Activate sheet error: {e}", SwErrors.swInvalidInput)
+            if not activated:
+                return self._result(
+                    False, f"Sheet {sheet_name!r} not found", SwErrors.swInvalidInput,
+                    {"sheet_name": sheet_name},
+                )
+
+        sheet, sheet_err = self._resolve_sheet(doc, None)
+        if sheet_err:
+            return sheet_err
+        before_state = self._sheet_view_fill_state(sheet)
+        unfilled_before = [name for name, has_model in before_state.items() if not has_model]
+
+        data = {"model_path": model_path, "sheet_name": sheet_name}
+
+        if not unfilled_before:
+            return self._result(
+                False,
+                f"No predefined-view placeholders found on sheet "
+                f"{sheet_name or '(active)'!r} -- every named view already references "
+                "a model, or none exist. Predefined views must be authored on the "
+                "drawing template beforehand (Insert > Drawing View > Predefined).",
+                SwErrors.swFeatureError, data,
+            )
+
+        try:
+            inserted = doc.InsertModelInPredefinedView(model_path)
+        except Exception as e:
+            logger.error(f"insert_predefined_views error: {e}")
+            return self._result(False, f"Insert predefined views error: {e}",
+                                SwErrors.swFeatureError, data)
+
+        if not inserted:
+            return self._result(
+                False, f"Failed to insert model {model_path!r} into predefined view(s)",
+                SwErrors.swFeatureError, data,
+            )
+
+        sheet, sheet_err = self._resolve_sheet(doc, None)
+        if sheet_err:
+            return sheet_err
+        after_state = self._sheet_view_fill_state(sheet)
+        filled = [name for name in unfilled_before if after_state.get(name)]
+
+        if not filled:
+            return self._result(
+                False,
+                f"InsertModelInPredefinedView reported success but none of the "
+                f"{len(unfilled_before)} unfilled placeholder(s) on sheet "
+                f"{sheet_name or '(active)'!r} now reference {model_path!r}.",
+                SwErrors.swFeatureError, data,
+            )
+
+        data["filled_views"] = filled
+        count = len(filled)
+        return self._result(
+            True, f"Filled {count} predefined view{'s' if count != 1 else ''} with "
+            f"{model_path!r}", SwErrors.swSuccess, data,
+        )
+
+    def insert_auxiliary_view(self, parent_view_name: str, edge_selection: Dict[str, float],
+                               x: float, y: float, label: str = "", flip: bool = False,
+                               not_aligned: bool = False, show_arrow: bool = True,
+                               sheet_name: Optional[str] = None) -> Dict:
+        """
+        Insert an auxiliary view off an edge of an existing view via
+        `IDrawingDoc::CreateAuxiliaryViewAt2` -- unlike "projected view,"
+        the API's name for this UI action matches the task's expectation
+        (docs/api/02-views.md's Auxiliary views section).
+
+        Args:
+            parent_view_name: Name of the existing drawing view the
+                reference edge belongs to (`IView::GetName2`). Not itself a
+                `CreateAuxiliaryViewAt2` parameter -- the call operates
+                entirely off whatever edge is selected -- but validated
+                against the sheet's actual views first, so an unrecognized
+                name fails with `swInvalidInput` listing every view really
+                on the sheet, the same as `insert_projected_view`.
+            edge_selection: `{"x": ..., "y": ..., "z": 0}` -- a sheet-space
+                point (caller's default unit) on the reference edge to
+                project from, selected via `selected(..., "EDGE", ...)`
+                before the call (the dossier's documented ambient-selection
+                pattern -- `CreateAuxiliaryViewAt2` takes no edge parameter
+                of its own). `"z"` defaults to `0` if omitted.
+            x, y: Center of the new auxiliary view, in the caller's default
+                unit -- converted to sheet-space meters here. `Z` is always
+                `0` (sheet space is 2D).
+            label: Auxiliary view letter label (e.g. `"A"`).
+            flip: `True` flips which side of the reference edge the view
+                projects toward.
+            not_aligned: `False` (default) keeps the view aligned/locked to
+                its parent along the projection direction; `True` breaks
+                alignment.
+            show_arrow: `True` (default) shows the projection arrow on the
+                parent view.
+            sheet_name: Sheet the parent view lives on, resolved the same
+                way `list_views` does. Omitted: whichever sheet is active.
+
+        Returns:
+            Result dict. `CreateAuxiliaryViewAt2` returning `Nothing` (no
+            edge selected, or the wrong thing selected) fails with
+            `swFeatureError` naming the parent view.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        parent_view, available_views, find_err = self._find_view_by_name(
+            doc, parent_view_name, sheet_name)
+        if find_err:
+            return find_err
+        if parent_view is None:
+            return self._result(
+                False,
+                f"Unknown parent view {parent_view_name!r}; available views: "
+                f"{available_views!r}",
+                SwErrors.swInvalidInput,
+                {"parent_view_name": parent_view_name, "available_views": available_views},
+            )
+
+        if not isinstance(edge_selection, dict) or "x" not in edge_selection or "y" not in edge_selection:
+            return self._result(
+                False,
+                "edge_selection must be a dict with 'x' and 'y' (and optional 'z') "
+                "sheet-space coordinates of a point on the reference edge",
+                SwErrors.swInvalidInput,
+            )
+        edge_x = edge_selection["x"]
+        edge_y = edge_selection["y"]
+        edge_z = edge_selection.get("z", 0)
+
+        data = {
+            "parent_view_name": parent_view_name, "label": label, "x": x, "y": y,
+            "flip": flip, "not_aligned": not_aligned, "show_arrow": show_arrow,
+        }
+
+        with self.selected("", "EDGE", edge_x, edge_y, edge_z) as sel:
+            if not sel["success"]:
+                return sel
+            try:
+                args = CREATE_AUXILIARY_VIEW_AT2.bind(
+                    units=self._units, x=x, y=y, z=0, not_aligned=not_aligned,
+                    label=label, show_arrow=show_arrow, flip=flip,
+                )
+                view = doc.CreateAuxiliaryViewAt2(*args)
+            except Exception as e:
+                logger.error(f"insert_auxiliary_view error: {e}")
+                return self._result(False, f"Insert auxiliary view error: {e}",
+                                    SwErrors.swFeatureError, data)
+
+        if view is None:
+            return self._result(
+                False, f"Failed to create auxiliary view off {parent_view_name!r}",
+                SwErrors.swFeatureError, data,
+            )
+
+        created_name = self._read_prop(view, "GetName2")
+        data["view_name"] = created_name
+        return self._result(
+            True, f"Inserted auxiliary view {created_name or ''!r} off {parent_view_name!r}",
+            SwErrors.swSuccess, data,
         )

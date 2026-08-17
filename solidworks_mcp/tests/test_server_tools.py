@@ -52,6 +52,9 @@ EXPECTED_TOOL_NAMES = {
     # Drawing View Creation & Discovery Tools
     "insert_model_view",
     "insert_standard_3_view",
+    "insert_projected_view",
+    "insert_predefined_views",
+    "insert_auxiliary_view",
     "list_views",
     # Sketch Tools
     "create_sketch",
