@@ -6,12 +6,16 @@ Access and operate on drawing (.slddrw) documents.
 
 import os
 import logging
+from contextlib import ExitStack
 from typing import Any, Dict, List, Optional, Tuple
 
 from .. import com_backend
-from .com_params import ComSignature, Param, REQUIRED, to_bool, to_meters
+from .com_params import (
+    ComSignature, Param, REQUIRED, enum_to_int, to_bool, to_meters, to_optional_object,
+)
 from ..constants import SwErrors, SwDocumentTypes, SwFileTypes
 from ..constants_drawing import (
+    SwCreateSectionViewAtOptions,
     SwCustomInfoType,
     SwCustomPropertyAddOption,
     SwDrawingViewTypes,
@@ -122,6 +126,43 @@ CREATE_AUXILIARY_VIEW_AT2 = ComSignature("CreateAuxiliaryViewAt2", [
     Param("show_arrow", True, to_bool),
     Param("flip", False, to_bool),
 ])
+
+# `IDrawingDoc::CreateSectionViewAt5`'s positional signature, in the exact
+# order documented in docs/api/02-views.md: X, Y, Z, SectionLabel, Options,
+# ExcludedComponents, SectionDepth. 7 positional parameters -- ComSignature
+# per this issue's working agreement (>6 params). `insert_section_view`
+# doesn't support component exclusion or a non-default cut depth, so those
+# two always bind to their converter's "no-op" default (null dispatch / 0).
+CREATE_SECTION_VIEW_AT5 = ComSignature("CreateSectionViewAt5", [
+    Param("x", REQUIRED, to_meters),
+    Param("y", REQUIRED, to_meters),
+    Param("z", 0.0, to_meters),
+    Param("label", ""),
+    Param("options", 0, enum_to_int),
+    Param("excluded_components", None, to_optional_object),
+    Param("section_depth", 0.0, to_meters),
+])
+
+# `insert_section_view`'s `section_type` -> `swCreateSectionViewAtOptions_e`
+# bit, per docs/api/02-views.md's `CreateSectionViewAt5` and `IDrSection`
+# records. "full" is the enum's own unmarked default (no bit set -- a normal,
+# complete section snapped into alignment with its parent). "aligned" is
+# `OffsetSection`, whose own help-page text literally reads "an aligned
+# section view is created" despite the record's noted self-contradiction
+# with `NotAligned`. "half" has NO true half-section member anywhere in this
+# API under any name (the dossier's `CreateSectionViewAt5` Gotchas is
+# explicit that `Partial` is "a distinct concept; don't conflate") -- binding
+# it to `Partial` is this wrapper's own convention, not a dossier-endorsed
+# mapping, chosen because it's the closest documented behavior (a section
+# that doesn't cut the model's full extent) and because `half_section`'s own
+# validation below restricts it to a straight 2-point cut line, ruling out
+# the multi-segment/offset case `Partial`'s own text doesn't address either
+# way.
+_SECTION_TYPE_OPTIONS = {
+    "full": 0,
+    "aligned": int(SwCreateSectionViewAtOptions.swCreateSectionView_OffsetSection),
+    "half": int(SwCreateSectionViewAtOptions.swCreateSectionView_Partial),
+}
 
 
 class DrawingOperations:
@@ -1391,5 +1432,305 @@ class DrawingOperations:
         data["view_name"] = created_name
         return self._result(
             True, f"Inserted auxiliary view {created_name or ''!r} off {parent_view_name!r}",
+            SwErrors.swSuccess, data,
+        )
+
+    @staticmethod
+    def _normalize_cut_points(cut_points: Any) -> Tuple[Optional[List[Tuple[float, float]]], Optional[str]]:
+        """Validate and normalize `insert_section_view`'s `cut_points` into a
+        list of `(x, y)` float tuples, in the caller's default unit (not yet
+        converted to meters -- that happens per-segment once a parent view
+        is confirmed to exist).
+
+        Each point may be `[x, y]`/`(x, y)` or `{"x": ..., "y": ...}`.
+        Returns `(points, None)` on success, or `(None, error_message)` for
+        anything that isn't a valid 2+-point, 2+-distinct-point list --
+        checked entirely in Python, before any COM call, per this issue's
+        Acceptance Criteria ("no COM call" for an invalid `cut_points`).
+        """
+        if not isinstance(cut_points, (list, tuple)) or len(cut_points) < 2:
+            got = len(cut_points) if isinstance(cut_points, (list, tuple)) else cut_points
+            return None, f"cut_points must have at least 2 (x, y) pairs; got {got!r}"
+
+        points: List[Tuple[float, float]] = []
+        for i, raw in enumerate(cut_points):
+            if isinstance(raw, dict):
+                if "x" not in raw or "y" not in raw:
+                    return None, f"cut_points[{i}] must have 'x' and 'y'; got {raw!r}"
+                px, py = raw["x"], raw["y"]
+            elif isinstance(raw, (list, tuple)) and len(raw) >= 2:
+                px, py = raw[0], raw[1]
+            else:
+                return None, (
+                    f"cut_points[{i}] must be [x, y] or {{'x': ..., 'y': ...}}; got {raw!r}"
+                )
+            try:
+                points.append((float(px), float(py)))
+            except (TypeError, ValueError):
+                return None, f"cut_points[{i}] has non-numeric coordinates: {raw!r}"
+
+        if len(set(points)) < 2:
+            return None, "cut_points must contain at least 2 distinct points"
+
+        return points, None
+
+    def insert_section_view(
+        self, parent_view_name: str, cut_points: List[Any], x: float, y: float,
+        label: Optional[str] = None, flip_direction: bool = False,
+        section_type: str = "full", auto_hatch: bool = True,
+        display_only: bool = False, use_sheet_scale: bool = True,
+    ) -> Dict:
+        """
+        Insert a section view off an existing drawing view via
+        `IDrawingDoc::CreateSectionViewAt5` -- the fiddliest view-creation
+        call in the API (docs/api/02-views.md's `CreateSectionViewAt5` and
+        `IDrSection` records): the cut line must exist as sketch geometry in
+        the parent view's space and be selected *before* the call, and most
+        of what this tool's parameters ask for lives on the resulting
+        `IDrSection` object, not `CreateSectionViewAt5`'s own `Options`
+        bitmask. This method owns the whole sequence -- activate the parent
+        view, sketch the cut line, select it, create the view, configure it
+        -- so the caller never manages sketch or selection state.
+
+        Args:
+            parent_view_name: Name of the existing drawing view to cut
+                (`IView::GetName2`, e.g. from `list_views`). Validated
+                against the sheet's actual views first (`swInvalidInput`
+                listing the real names on a miss), then activated via
+                `IDrawingDoc::ActivateView` before any sketch geometry is
+                created, so the cut-line points below land in that view's
+                own coordinate space.
+            cut_points: 2+ `[x, y]` (or `{"x":.., "y":..}`) pairs, in the
+                parent view's coordinate space, in the caller's default unit
+                (`set_units`). Two points is a straight cut line; 3+ points
+                is an offset/stepped cut (one `IView::GetSection`-configured
+                `IDrSection`, but N-1 separate `ISketchManager::CreateLine`
+                segments). Rejected with `swInvalidInput` -- before any COM
+                call -- if fewer than 2 points are given, or fewer than 2 of
+                the given points are distinct.
+            x, y: Placement of the resulting section view on the drawing
+                sheet, in the caller's default unit -- `CreateSectionViewAt5`'s
+                own `X`/`Y`, confirmed sheet-space in the dossier and
+                unrelated to `cut_points`' view-space coordinates. `Z` is
+                always `0` (sheet space is 2D).
+            label: Section label letter (e.g. `"A"`). `None`/omitted lets
+                SolidWorks auto-assign one -- `data["label"]` always reports
+                back whatever `IDrSection::GetLabel()` reads after creation,
+                not the requested value, since the dossier found no source
+                describing `SectionLabel`'s behavior on a duplicate/omitted
+                letter.
+            flip_direction: `True` sets `swCreateSectionView_ChangeDirection`
+                -- switches which side of the cut line the section looks
+                toward.
+            section_type: `"full"` (default, no special bit -- a normal,
+                complete section), `"aligned"` (`swCreateSectionView_OffsetSection`
+                -- per that member's own help text, "an aligned section view
+                ... two lines at an angle"), or `"half"`
+                (`swCreateSectionView_Partial` -- **this project's own
+                convention, not a dossier-endorsed mapping**: SolidWorks has
+                no true half-section member under any name, and the
+                dossier's own `CreateSectionViewAt5` Gotchas explicitly warns
+                against conflating `Partial` with "half"; `Partial` is used
+                here as the closest documented behavior, restricted to a
+                straight 2-point cut). An unrecognized value fails with
+                `swInvalidInput`; `"half"` with more than 2 `cut_points`
+                fails with `swInvalidInput` (SolidWorks has no half-section
+                support for an offset/stepped cut).
+            auto_hatch: Passed to the created view's `IDrSection::SetAutoHatch`
+                after creation. Per a vendor post on this SW2018+ feature,
+                applies only to assembly section views -- a no-op on a part.
+            display_only: Passed to `IDrSection::SetDisplayOnlySurfaceCut`
+                after creation. **Not** a true "view-only, no material cut"
+                toggle -- no such toggle exists anywhere in this API (the
+                dossier's `CreateSectionViewAt5` Gotchas is explicit on this);
+                this is the closest real, named setting, and only affects
+                surface-body cut display.
+            use_sheet_scale: Sets `IView::UseSheetScale` (`1`/`0`, not a
+                `Boolean` -- the dossier's own Gotcha on that property) after
+                creation, followed by `IModelDoc2::EditRebuild3` to force the
+                regenerate that property's record documents needing.
+
+        Returns:
+            Result dict. On success, `data["view_name"]` is the created
+            view's name and `data["label"]` is the actual assigned label
+            letter. Section scope (which components/ribs stay uncut on an
+            assembly) is intentionally out of this tool's scope --
+            `CreateSectionViewAt5`'s `ExcludedComponents` always binds to
+            `Nothing` here -- per this file's `CreateSectionViewAt5` Gotchas,
+            every piece of that state (`IDrSection::SetExcludedComponents`/
+            `ExcludeFasteners`/`SetDontCutAllInstances`) is reachable
+            programmatically with no SolidWorks-popped dialog and no
+            `SetUserPreferenceToggle` mitigation found to need snapshotting.
+            A view that *was* created but a post-creation setting
+            (auto_hatch/display_only/label/use_sheet_scale) failed to apply
+            fails with `swFeatureError` rather than reporting plain success
+            with `data` claiming a setting that didn't actually take --
+            `data["view_name"]` still names the view so the caller isn't
+            left without a handle to it.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        data = {
+            "parent_view_name": parent_view_name, "x": x, "y": y, "label": label,
+            "flip_direction": flip_direction, "section_type": section_type,
+            "auto_hatch": auto_hatch, "display_only": display_only,
+            "use_sheet_scale": use_sheet_scale,
+        }
+
+        points, point_err = self._normalize_cut_points(cut_points)
+        if point_err:
+            return self._result(False, point_err, SwErrors.swInvalidInput, data)
+
+        section_type_key = (section_type or "").strip().lower()
+        options = _SECTION_TYPE_OPTIONS.get(section_type_key)
+        if options is None:
+            return self._result(
+                False,
+                f"Unknown section_type {section_type!r}; expected one of "
+                f"{sorted(_SECTION_TYPE_OPTIONS)!r}",
+                SwErrors.swInvalidInput, data,
+            )
+        if section_type_key == "half" and len(points) > 2:
+            return self._result(
+                False,
+                f"section_type='half' only supports a straight 2-point cut line "
+                f"({len(points)} points given) -- SolidWorks has no half-section "
+                "support for an offset/stepped cut; use section_type='aligned' or "
+                "'full' instead",
+                SwErrors.swInvalidInput, data,
+            )
+        if flip_direction:
+            options |= int(SwCreateSectionViewAtOptions.swCreateSectionView_ChangeDirection)
+
+        parent_view, available_views, find_err = self._find_view_by_name(doc, parent_view_name, None)
+        if find_err:
+            return find_err
+        if parent_view is None:
+            return self._result(
+                False,
+                f"Unknown parent view {parent_view_name!r}; available views: "
+                f"{available_views!r}",
+                SwErrors.swInvalidInput,
+                {**data, "available_views": available_views},
+            )
+
+        try:
+            activated = doc.ActivateView(parent_view_name)
+        except Exception as e:
+            logger.error(f"insert_section_view activate view error: {e}")
+            return self._result(False, f"Activate view error: {e}", SwErrors.swFeatureError, data)
+        if not activated:
+            return self._result(
+                False, f"Failed to activate parent view {parent_view_name!r}",
+                SwErrors.swFeatureError, data,
+            )
+
+        segment_midpoints: List[Tuple[float, float]] = []
+        try:
+            for (x1, y1), (x2, y2) in zip(points, points[1:]):
+                x1_m, y1_m = self._units.to_meters(x1), self._units.to_meters(y1)
+                x2_m, y2_m = self._units.to_meters(x2), self._units.to_meters(y2)
+                segment = doc.SketchManager.CreateLine(x1_m, y1_m, 0.0, x2_m, y2_m, 0.0)
+                if segment is None:
+                    return self._result(
+                        False,
+                        "Failed to sketch cut-line segment -- ensure the parent view "
+                        f"{parent_view_name!r} supports a section line",
+                        SwErrors.swSketchError, data,
+                    )
+                # Selected below by a representative point in the same
+                # view-local space CreateLine just used -- this wrapper's
+                # own convention (not sourced in the dossier, which doesn't
+                # cover SelectByID2's coordinate space for a freshly-created
+                # drawing-view sketch entity), same caveat
+                # `list_view_entities` flags for its own coordinate space.
+                segment_midpoints.append(((x1 + x2) / 2.0, (y1 + y2) / 2.0))
+        except Exception as e:
+            logger.error(f"insert_section_view sketch error: {e}")
+            return self._result(False, f"Sketch cut line error: {e}", SwErrors.swSketchError, data)
+
+        # Select every cut-line segment atomically before the call, per the
+        # dossier's "select the section line or lines" requirement -- the
+        # first `selected()` clears any stale selection (and clears again on
+        # its own exit); every subsequent one appends and skips clearing on
+        # both ends (see SelectionOperations.selected's docstring), so the
+        # ExitStack's LIFO unwind leaves the outermost/first block to do the
+        # one real clear, after everything inside it (including the create
+        # call) has run.
+        with ExitStack() as stack:
+            for i, (mx, my) in enumerate(segment_midpoints):
+                sel = stack.enter_context(
+                    self.selected("", "SKETCHSEGMENT", mx, my, 0, append=(i > 0), mark=i)
+                )
+                if not sel["success"]:
+                    return sel
+
+            try:
+                args = CREATE_SECTION_VIEW_AT5.bind(
+                    units=self._units, x=x, y=y, z=0,
+                    label=label or "", options=options,
+                    excluded_components=None, section_depth=0,
+                )
+                view = doc.CreateSectionViewAt5(*args)
+            except Exception as e:
+                logger.error(f"insert_section_view error: {e}")
+                return self._result(False, f"Insert section view error: {e}",
+                                    SwErrors.swFeatureError, data)
+
+        if view is None:
+            return self._result(
+                False, f"Failed to create section view off {parent_view_name!r}",
+                SwErrors.swFeatureError, data,
+            )
+
+        created_name = self._read_prop(view, "GetName2")
+        data["view_name"] = created_name
+
+        try:
+            section = view.GetSection()
+        except Exception as e:
+            return self._result(
+                False,
+                f"Created section view {created_name or ''!r} but IView::GetSection "
+                f"raised: {e}",
+                SwErrors.swFeatureError, data,
+            )
+        if section is None:
+            return self._result(
+                False,
+                f"Created section view {created_name or ''!r} but IView::GetSection "
+                "returned nothing -- could not apply auto_hatch/display_only/label",
+                SwErrors.swFeatureError, data,
+            )
+
+        try:
+            section.SetAutoHatch(bool(auto_hatch))
+            section.SetDisplayOnlySurfaceCut(bool(display_only))
+            data["label"] = section.GetLabel() or label
+        except Exception as e:
+            logger.error(f"insert_section_view: section configuration failed: {e}")
+            return self._result(
+                False,
+                f"Created section view {created_name or ''!r} but failed to apply "
+                f"auto_hatch/display_only/label settings: {e}",
+                SwErrors.swFeatureError, data,
+            )
+
+        try:
+            view.UseSheetScale = 1 if use_sheet_scale else 0
+            doc.EditRebuild3()
+        except Exception as e:
+            logger.error(f"insert_section_view: use_sheet_scale apply failed: {e}")
+            return self._result(
+                False,
+                f"Created section view {created_name or ''!r} but failed to apply "
+                f"use_sheet_scale: {e}",
+                SwErrors.swFeatureError, data,
+            )
+
+        return self._result(
+            True, f"Inserted section view {created_name or ''!r} off {parent_view_name!r}",
             SwErrors.swSuccess, data,
         )

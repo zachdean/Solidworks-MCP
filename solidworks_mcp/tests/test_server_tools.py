@@ -55,6 +55,7 @@ EXPECTED_TOOL_NAMES = {
     "insert_projected_view",
     "insert_predefined_views",
     "insert_auxiliary_view",
+    "insert_section_view",
     "list_views",
     # Sketch Tools
     "create_sketch",

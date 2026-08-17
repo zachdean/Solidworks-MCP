@@ -476,9 +476,39 @@ resulting view on the sheet, a separate concept from the cut line.
   in 3D.
 - **`swCreateSectionViewAtOptions_e` has no "half section" member** — only
   `swCreateSectionView_Partial` (partial section), a distinct concept; don't conflate.
-- **No "display-only / no geometry cut" flag exists either** — the closest-named
-  members, `swCreateSectionView_DisplaySurfaceCut` and `swCreateSectionView_CutSurfaceBodies`,
-  both concern surface-body cut display only.
+- **No "display-only / no geometry cut" flag exists either, at *creation time* or
+  post-creation** — the closest-named `Options` members,
+  `swCreateSectionView_DisplaySurfaceCut` and `swCreateSectionView_CutSurfaceBodies`,
+  both concern surface-body cut display only. This is corroborated, not just
+  suspected: the post-creation `IDrSection` interface (see its own record below,
+  added for sw-8ww.3) exposes the *same* setting as `SetDisplayOnlySurfaceCut(bool)`
+  — a real, named method, but still scoped to surface bodies, not "make this a
+  wireframe-only section with no material cut." SOLIDWORKS has no API surface for
+  that concept under either name.
+- **Section scope (which components/ribs stay uncut) is fully programmatic, with no
+  hidden dialog to suppress** — added for sw-8ww.3, since that issue's working
+  agreement calls for noting any assembly "section scope" dialog mitigation here.
+  The UI's Section Scope dialog (`help.solidworks.com/.../HIDD_SECTION_VIEW_EXCL_COMPS.htm`)
+  is a PropertyManager page, not something `CreateSectionViewAt5` itself pops open —
+  every piece of state that dialog edits has a direct, callable equivalent:
+  `CreateSectionViewAt5`'s own `ExcludedComponents` parameter (this record, above),
+  plus post-creation `IDrSection::SetExcludedComponents`/`GetExcludedComponents`/
+  `EnumExcludedComponents`/`EnumExcludedComponents2`, `IDrSection::ExcludeFasteners`
+  (mirroring the `Options` bit of the same name), and
+  `IDrSection::SetDontCutAllInstances` (per-instance exclusion for a repeated
+  component). Searched specifically for a `swUserPreferenceToggle_e` member that
+  would gate a section-scope prompt (queries tried: `"swUserPreferenceToggle"
+  section scope`, `"CreateSectionViewAt5" assembly hangs dialog "Section Scope"
+  macro workaround`, `solidworks api macro "section scope" dialog pops up disable
+  ribs automatically`) and found no member, forum report, or macro workaround
+  describing one — unlike `swAutomaticScaling3ViewDrawings` (this dossier's
+  `SetUserPreferenceToggle` record), which *does* have a documented, if
+  third-party-sourced, numeric value. Conclusion: `insert_section_view` does not
+  snapshot/restore any `SetUserPreferenceToggle` value around this call, because no
+  such toggle could be located and the scope state is already fully expressible
+  through the calls listed above. If a live SOLIDWORKS session is ever observed
+  popping a modal dialog during an API-driven `CreateSectionViewAt5` call on an
+  assembly, this is the paragraph to revisit first.
 - **The enum's own text is self-contradictory on aligned vs. offset/jogged
   sections**, quoted verbatim: `swCreateSectionView_NotAligned` ("if set, the section
   does not snap into alignment with the parent view") vs.
@@ -494,6 +524,222 @@ resulting view on the sheet, a separate concept from the cut line.
   collection interface.
 - Units never stated on the page; meters for X/Y/Z/SectionDepth inferred from
   SolidWorks' standard API convention.
+
+### IView::GetSection
+
+- **Interface:** IView
+- **Method:** GetSection
+- **Minimum SW version:** unverified — help page fetch 403'd directly (same WAF
+  block noted throughout this dossier). Added for sw-8ww.3, to configure a
+  section view (auto-hatch, display-only, label, scope) right after
+  `CreateSectionViewAt5` creates it.
+
+**Signature:**
+
+```vb
+Function GetSection() As System.Object
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| *(none)* | — | — | — | This method takes no parameters | |
+
+**Returns:** `System.Object` — an `IDrSection` pointer (see that record below) on a
+section view; presumably `Nothing`/null on a view that isn't a section view, though
+no source states the failure behavior explicitly.
+
+**Prior selection required:** None — called directly on the `IView` reference
+`CreateSectionViewAt5` returns.
+
+**Source URL(s):**
+- https://www.rimptec.com/rsolidworks/net/lehal/sw/IView.html (type-library mirror:
+  confirms zero-argument arity and the typed `iGetSection() As IDrSection` sibling
+  alongside the untyped `getSection() As Dispatch`)
+- https://help.solidworks.com/2023/English/api/sldworksapi/SOLIDWORKS.Interop.sldworks~SOLIDWORKS.Interop.sldworks.IView~GetSection.html
+  (indexed by search under this exact title across SW2013–SW2024 API help; direct
+  fetch 403'd, same WAF block as elsewhere in this dossier)
+
+**status:** verified (type-library arity/return type + search-indexed page titles
+across many SW versions; no page body directly fetched — same sourcing tier as this
+dossier's `SetUserPreferenceToggle`/`CreateAuxiliaryViewAt2` records)
+
+**Gotchas:**
+- This is the only documented way to reach `IDrSection` from a freshly-created
+  section `IView` — `CreateSectionViewAt5` itself returns the plain `View`, not the
+  section-specific interface.
+
+## IDrSection (reached via `IView::GetSection`, above)
+
+Added for sw-8ww.3 — `CreateSectionViewAt5`'s 7-parameter `Options` bitmask has no
+member for auto-hatch, display-only, or reading back the resulting label letter, and
+this is the interface (reached via `IView::GetSection`, above) where those actually
+live post-creation. Every direct `help.solidworks.com` fetch for this interface's
+member/property pages 403'd (same WAF block noted throughout this dossier); the three
+records below are sourced the same way `CreateAuxiliaryViewAt2`/
+`SetUserPreferenceToggle` are elsewhere in this file: a type-library mirror
+(rimptec.com) for arity/types, corroborated by search-indexed help-page titles, with
+no page body directly fetched.
+
+Only the three members `insert_section_view` actually calls get full records below.
+The type-library mirror (https://www.rimptec.com/rsolidworks/net/lehal/sw/IDrSection.html)
+also lists these `IDrSection` members, not called by this issue's tool and not given
+full records: `SetPartialSection(Boolean)` (post-creation twin of `Options`'
+`swCreateSectionView_Partial` bit — named "partial," not "half"; see
+`CreateSectionViewAt5`'s Gotchas), `SetReversedCutDirection(Boolean)` (post-creation
+twin of the `ChangeDirection` bit), `ExcludeFasteners` (get/set `Boolean` property,
+post-creation twin of the `ExcludeFasteners` bit), `SetExcludedComponents(Object) As
+Boolean` (post-creation twin of `CreateSectionViewAt5`'s own `ExcludedComponents`
+parameter), `GetExcludedComponents`/`EnumExcludedComponents`/`EnumExcludedComponents2`
+(read back current exclusions), `SetDontCutAllInstances(IComponent2, Boolean) As
+Boolean` (exclude/re-include every instance of one component pattern at once), and
+`GetView`/`GetSectionView` (both `Function ... As System.Object`, the reverse of
+`IView::GetSection` — hands back the owning `IView`; two differently-named accessors
+for what the mirror shows as the same return shape, not reconciled further since
+`insert_section_view` only ever walks `IView -> IDrSection`, never back). Together
+with `CreateSectionViewAt5`'s own `ExcludedComponents` parameter, this member set is
+what this file's "Section scope is fully programmatic" gotcha (on the
+`CreateSectionViewAt5` record, above) is based on.
+
+### IDrSection::SetAutoHatch
+
+- **Interface:** IDrSection
+- **Method:** SetAutoHatch
+- **Minimum SW version:** unverified — introduced with SOLIDWORKS 2018's Auto
+  Hatching in Section Views feature per a vendor What's New post; help page fetch
+  403'd directly.
+
+**Signature:**
+
+```vb
+Sub SetAutoHatch(ByVal Value As System.Boolean)
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| Value | Boolean | n/a | Yes | `True` to auto-hatch this section view's cut faces, `False` to turn auto-hatching off | — |
+
+**Returns:** None (`Sub`) — no success/failure indicator.
+
+**Prior selection required:** None — called directly on the `IDrSection` reference
+from `IView::GetSection()`.
+
+**Source URL(s):**
+- https://www.rimptec.com/rsolidworks/net/lehal/sw/IDrSection.html (type-library
+  mirror: confirms single-`Boolean`-argument, void-return shape)
+- http://help.solidworks.com/2015/English/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IDrSection~SetAutoHatch.html
+  (indexed by search, confirms this exact member name back to at least SW2015; direct
+  fetch 403'd)
+- https://www.javelin-tech.com/blog/2017/12/solidworks-auto-hatching-randomize-scale/
+  and https://www.cati.com/blog/solidworks-2018-whats-new-auto-hatching-in-section-views-sw2018/
+  (independent secondary corroboration of the auto-hatching feature this backs, and
+  its SW2018 introduction)
+
+**status:** unverified against a primary help.solidworks.com page body (403'd, same
+standing WAF block noted throughout this dossier) — corroborated by a type-library
+mirror plus multiple independent search-indexed page titles and vendor blog posts.
+Same sourcing tier as `SetUserPreferenceToggle`/`CreateAuxiliaryViewAt2`.
+
+**Gotchas:**
+- A vendor blog post on this same feature states auto-hatching "applies only to
+  assembly section views... for section views of parts, this method has no effect" —
+  not independently confirmed against a primary page, but consistent with the UI
+  feature it backs. `insert_section_view` calls this unconditionally regardless of
+  whether the drawing's model is a part or assembly; per this claim, the call is a
+  harmless no-op on a part.
+
+### IDrSection::SetDisplayOnlySurfaceCut
+
+- **Interface:** IDrSection
+- **Method:** SetDisplayOnlySurfaceCut
+- **Minimum SW version:** unverified — help page fetch 403'd directly.
+
+**Signature:**
+
+```vb
+Sub SetDisplayOnlySurfaceCut(ByVal Value As System.Boolean)
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| Value | Boolean | n/a | Yes | Post-creation twin of `Options`' `swCreateSectionView_DisplaySurfaceCut` bit (this file's `CreateSectionViewAt5` record): `True` shows only surfaces cut by the section line; `False` shows all model surfaces | `swCreateSectionViewAtOptions_e` (bit meaning only, not this method's own parameter) |
+
+**Returns:** None (`Sub`) — no success/failure indicator.
+
+**Prior selection required:** None — called directly on the `IDrSection` reference
+from `IView::GetSection()`.
+
+**Source URL(s):**
+- https://www.rimptec.com/rsolidworks/net/lehal/sw/IDrSection.html (type-library
+  mirror: confirms single-`Boolean`-argument, void-return shape)
+- https://help.solidworks.com/2022/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IDrSection_properties.html
+  (indexed by search, confirms this member name on this interface; direct fetch
+  403'd)
+
+**status:** unverified against a primary help.solidworks.com page body (403'd, same
+standing WAF block noted throughout this dossier) — corroborated by a type-library
+mirror plus a search-indexed member-index page title. Same sourcing tier as
+`SetUserPreferenceToggle`/`CreateAuxiliaryViewAt2`.
+
+**Gotchas:**
+- **Not a general "display-only, no geometry cut" toggle** — despite the name, this
+  is scoped to surface bodies only, the exact same scope as the `Options` bit it
+  twins. `insert_section_view`'s `display_only` parameter is bound to this method
+  because it is the closest real, named setting in the entire API to that concept —
+  its tool description says so explicitly, per this file's `CreateSectionViewAt5`
+  Gotchas ("No 'display-only / no geometry cut' flag exists").
+
+### IDrSection::GetLabel
+
+- **Interface:** IDrSection
+- **Method:** GetLabel
+- **Minimum SW version:** unverified — help page fetch 403'd directly.
+
+**Signature:**
+
+```vb
+Function GetLabel() As System.String
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| *(none)* | — | — | — | This method takes no parameters | |
+
+**Returns:** `String` — the section view's current label letter (e.g. `"A"`),
+whether it was assigned by `CreateSectionViewAt5`'s own `SectionLabel` parameter or
+auto-assigned by SolidWorks.
+
+**Prior selection required:** None — called directly on the `IDrSection` reference
+from `IView::GetSection()`.
+
+**Source URL(s):**
+- https://www.rimptec.com/rsolidworks/net/lehal/sw/IDrSection.html (type-library
+  mirror: confirms zero-argument, `String`-return shape)
+- https://help.solidworks.com/2021/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IDrSection~GetLabel.html
+  (indexed by search under this exact title; direct fetch 403'd)
+
+**status:** unverified against a primary help.solidworks.com page body (403'd, same
+standing WAF block noted throughout this dossier) — corroborated by a type-library
+mirror plus a search-indexed page title. Same sourcing tier as
+`SetUserPreferenceToggle`/`CreateAuxiliaryViewAt2`.
+
+**Gotchas:**
+- `insert_section_view` reads this back after creation rather than trusting its own
+  requested `label` argument, since `CreateSectionViewAt5`'s `SectionLabel` parameter
+  behavior on a conflicting/duplicate letter is not documented anywhere accessible —
+  reading the actual assigned letter back is the only way to report a label that's
+  guaranteed correct.
+- A paired `SetLabel2(String) As Integer` setter also exists (per the type-library
+  mirror) for changing the label after creation; `insert_section_view` doesn't call
+  it — a duplicate/rejected `SectionLabel` at creation time is treated as SolidWorks'
+  own auto-assignment taking over, not something to retry here.
 
 ### IDrawingDoc::CreateDetailViewAt4
 

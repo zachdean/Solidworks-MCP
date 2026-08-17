@@ -2,7 +2,8 @@
 Drawing View Creation & Discovery Tools
 -----------------------------------------
 insert_model_view, insert_standard_3_view, insert_projected_view,
-insert_predefined_views, insert_auxiliary_view, list_views.
+insert_predefined_views, insert_auxiliary_view, insert_section_view,
+list_views.
 
 Backed by `DrawingOperations` (solidworks_mcp/automation/drawings.py), per
 docs/api/02-views.md.
@@ -247,6 +248,93 @@ def insert_auxiliary_view(arguments: dict) -> Dict:
         arguments.get("not_aligned", False),
         arguments.get("show_arrow", True),
         arguments.get("sheet_name"),
+    )
+
+
+@tool(
+    name="insert_section_view",
+    description=(
+        "Insert a section view off an existing drawing view via "
+        "IDrawingDoc::CreateSectionViewAt5. Owns the whole sequence: "
+        "activates parent_view_name, sketches cut_points as line segments "
+        "(N-1 segments for N points -- 2 points is a straight cut, 3+ is "
+        "offset/stepped) via the sketch manager in the parent view's own "
+        "coordinate space, selects them, creates the view, then configures "
+        "it. section_type is full (default), aligned "
+        "(swCreateSectionView_OffsetSection), or half "
+        "(swCreateSectionView_Partial -- SolidWorks has no true half-section "
+        "flag under any name; this is the closest documented behavior, and "
+        "is only valid with a straight 2-point cut). auto_hatch and "
+        "display_only are applied post-creation via IDrSection::SetAutoHatch "
+        "/SetDisplayOnlySurfaceCut -- display_only is NOT a true 'no "
+        "material cut' toggle (none exists in this API), only the closest "
+        "named setting (surface-body cut display). use_sheet_scale sets "
+        "IView::UseSheetScale afterward. Section scope (excluding "
+        "components/ribs from an assembly's cut) is out of scope for this "
+        "tool -- SolidWorks does not pop a dialog for it during API-driven "
+        "creation, since IDrSection exposes that state programmatically, so "
+        "no user-preference toggle is touched. Fewer than 2 cut_points, or "
+        "fewer than 2 distinct points, fails before any COM call."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "parent_view_name": {
+                "type": "string",
+                "description": "Name of the existing drawing view to cut (see list_views)",
+            },
+            "cut_points": {
+                "type": "array",
+                "description": (
+                    "2+ points [x, y] (or {'x':.., 'y':..}) in the parent view's "
+                    "coordinate space, in set_units' unit. 2 points = straight cut; "
+                    "3+ = offset/stepped cut."
+                ),
+                "items": {"type": "object"},
+                "minItems": 2,
+            },
+            "x": {"type": "number", "description": "Section view placement X on the sheet, in set_units' unit"},
+            "y": {"type": "number", "description": "Section view placement Y on the sheet, in set_units' unit"},
+            "label": {
+                "type": "string",
+                "description": "Section label letter, e.g. 'A'. Omit to let SolidWorks auto-assign one.",
+            },
+            "flip_direction": {
+                "type": "boolean", "default": False,
+                "description": "True switches which side of the cut line the section looks toward",
+            },
+            "section_type": {
+                "type": "string", "default": "full",
+                "description": "full, aligned, or half (case-insensitive) -- see tool description",
+            },
+            "auto_hatch": {
+                "type": "boolean", "default": True,
+                "description": "IDrSection::SetAutoHatch after creation (assembly section views only)",
+            },
+            "display_only": {
+                "type": "boolean", "default": False,
+                "description": "IDrSection::SetDisplayOnlySurfaceCut after creation (surface bodies only)",
+            },
+            "use_sheet_scale": {
+                "type": "boolean", "default": True,
+                "description": "IView::UseSheetScale after creation",
+            },
+        },
+        "required": ["parent_view_name", "cut_points", "x", "y"],
+    },
+)
+def insert_section_view(arguments: dict) -> Dict:
+    return sw_automation.insert_section_view(
+        arguments.get("parent_view_name", ""),
+        arguments.get("cut_points", []),
+        arguments.get("x", 0),
+        arguments.get("y", 0),
+        arguments.get("label"),
+        arguments.get("flip_direction", False),
+        arguments.get("section_type", "full"),
+        arguments.get("auto_hatch", True),
+        arguments.get("display_only", False),
+        arguments.get("use_sheet_scale", True),
     )
 
 
