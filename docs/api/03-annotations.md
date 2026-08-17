@@ -2451,6 +2451,16 @@ Bitmask enum — annotation types to insert, consumed by
 
 Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swInsertAnnotation_e.html
 
+**Addendum (sw-1xx.1, re-fetched independently via the same curl+UA
+technique):** the 25 members above are the complete set — there is **no**
+center-mark or centerline member on this enum, in any generation. Center
+marks/centerlines are a wholly separate mechanism,
+`IDrawingDoc::InsertCenterMark3` (`swCenterMarkStyle_e`, already documented
+elsewhere in this file), not reachable through `InsertModelAnnotations3`/`4`'s
+`Types` bitmask at all. A tool layer wanting a `types` option named
+`"center_marks"`/`"centerlines"` cannot bind it to this bitmask — do not
+invent a bit value for it.
+
 #### swImportModelItemsSource_e
 
 Consumed by `IDrawingDoc::InsertModelAnnotations3`/`4`'s `Option` parameter (source
@@ -2469,6 +2479,17 @@ Remarks — SolidWorks API Help published before 2008 SP3 documented members `1`
 describing this enum's values differently as wrong.
 
 Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swImportModelItemsSource_e.html
+
+**Addendum (sw-1xx.1, re-fetched independently via the same curl+UA
+technique):** the 4 members above are the complete set — there is no
+DimXpert member of any kind on this enum. DimXpert annotation import is a
+real SOLIDWORKS capability, but the only mechanism this dossier found for it
+is `IView::ImportAnnotations`'s `IncludeDimXpertAnnotations` boolean flag
+(SOLIDWORKS 2025+, documented above) — a coarse per-category toggle on a
+different method entirely, not a `swImportModelItemsSource_e` member. A tool
+layer wanting a `sources="dimxpert"` option cannot bind it to this enum —
+either route it to `IView::ImportAnnotations` as a genuinely separate code
+path, or reject it outright rather than aliasing it to another source.
 
 #### swAutodimScheme_e
 

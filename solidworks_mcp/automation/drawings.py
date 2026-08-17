@@ -25,6 +25,8 @@ from ..constants_drawing import (
     SwDisplayMode,
     SwDrawingViewTypes,
     SwDwgPaperSizes,
+    SwImportModelItemsSource,
+    SwInsertAnnotation,
     SwSaveAsOptions,
     SwSaveAsVersion,
     SwUserPreferenceToggle,
@@ -208,6 +210,84 @@ _DETAIL_VIEW_SHOWTYPE = {
     "profile": int(SwDetCircleShowType.swDetCirclePROFILE),
     "none": int(SwDetCircleShowType.swDetCircleDONTSHOW),
 }
+
+# `insert_model_items`'s `types` -> `swInsertAnnotation_e` bit(s), per
+# docs/api/03-annotations.md's `InsertModelAnnotations3`/`4` and
+# `swInsertAnnotation_e` records. Only the members the source research issue
+# actually asked for are exposed here (plus a couple of closely-related ones
+# that cost nothing to expose) -- the full 25-member bitmask also covers
+# axes/curves/planes/sketches/etc., out of scope for "model annotations" as
+# this tool understands the phrase.
+#
+# `center_marks`/`centerlines` are deliberately NOT here: `swInsertAnnotation_e`
+# (independently re-fetched from help.solidworks.com for this issue) has no
+# center-mark or centerline member at all -- center marks are a wholly
+# separate mechanism, `IDrawingDoc::InsertCenterMark3`, explicitly scoped to
+# sibling issue sw-1xx.6 ("batch center mark and centerline tools"). The
+# task's own acceptance criteria named center marks as part of the default
+# `types`, but that can't be satisfied through this bitmask -- confirmed
+# against the live enum, not guessed; see sw-1xx.1's issue notes.
+_MODEL_ITEM_TYPES = {
+    "dimensions": int(SwInsertAnnotation.swInsertDimensions),
+    "datums": int(SwInsertAnnotation.swInsertDatums),
+    "datum_targets": int(SwInsertAnnotation.swInsertDatumTargets),
+    "gtols": int(SwInsertAnnotation.swInsertGTols),
+    "surface_finishes": int(SwInsertAnnotation.swInsertSFSymbols),
+    "welds": int(SwInsertAnnotation.swInsertWelds),
+    "notes": int(SwInsertAnnotation.swInsertNotes),
+    "hole_callouts": int(SwInsertAnnotation.swInsertholeCallout),
+    "cosmetic_threads": int(SwInsertAnnotation.swInsertCThreads),
+    "instance_counts": int(SwInsertAnnotation.swInsertInstanceCounts),
+}
+
+# Per the issue's Requirements: "default to dimensions + hole callouts +
+# center marks" -- center marks dropped per the Gotcha above.
+_DEFAULT_MODEL_ITEM_TYPES = ("dimensions", "hole_callouts")
+
+# `insert_model_items`'s `sources` -> `swImportModelItemsSource_e`, per
+# docs/api/03-annotations.md's `InsertModelAnnotations3`/`4` and
+# `swImportModelItemsSource_e` records (the *corrected*, post-2008-SP3
+# member/value mapping). The task's Requirements additionally asked for a
+# "DimXpert" source option, mapped "to the documented source enum" -- but
+# `swImportModelItemsSource_e` (independently re-fetched for this issue) has
+# exactly these 4 members and no DimXpert member of any kind. DimXpert
+# annotation import is a real, but entirely separate, SOLIDWORKS-2025+-only
+# mechanism (`IView::ImportAnnotations`'s `IncludeDimXpertAnnotations` flag --
+# a boolean toggle, not a source enum, with no per-type `Types` control) --
+# out of scope for this `Option`-parameter-driven tool. An unrecognized
+# `sources` string (including `"dimxpert"`) fails with `swInvalidInput` rather
+# than silently aliasing to a different source.
+_MODEL_ITEM_SOURCES = {
+    "model": int(SwImportModelItemsSource.swImportModelItemsFromEntireModel),
+    "selected_feature": int(SwImportModelItemsSource.swImportModelItemsFromSelectedFeature),
+    "selected_component": int(SwImportModelItemsSource.swImportModelItemsFromSelectedComponent),
+    "assembly_only": int(SwImportModelItemsSource.swImportModelItemsFromAssemblyOnly),
+}
+_DEFAULT_MODEL_ITEM_SOURCE = "model"
+
+# `IDrawingDoc::InsertModelAnnotations4`'s positional signature, in the exact
+# order documented in docs/api/03-annotations.md: Option, Types, AllViews,
+# DuplicateDims, HiddenFeatureDims, UsePlacementInSketch,
+# InsertAllAnnotations, InsertAllReferenceGeometry. 8 positional parameters
+# -- ComSignature per this issue's working agreement (>6 params). Preferred
+# over the 6-param `InsertModelAnnotations3` per the dossier's own Gotchas
+# ("prefer it over InsertModelAnnotations3 for new tool-layer code").
+# `insert_model_items` always drives type selection through `Types`, so
+# `InsertAllAnnotations`/`InsertAllReferenceGeometry` are never exposed as
+# tool parameters -- both always bind False. `AllViews` is likewise always
+# bound False: `insert_model_items` handles its own `all_views` iteration
+# (one call per view, selected atomically) so it can report per-view counts,
+# which the single whole-drawing `AllViews=True` call cannot do.
+INSERT_MODEL_ANNOTATIONS4 = ComSignature("InsertModelAnnotations4", [
+    Param("option", REQUIRED, enum_to_int),
+    Param("types", REQUIRED, enum_to_int),
+    Param("all_views", False, to_bool),
+    Param("duplicate_dims", True, to_bool),
+    Param("hidden_feature_dims", False, to_bool),
+    Param("use_placement_in_sketch", False, to_bool),
+    Param("insert_all_annotations", False, to_bool),
+    Param("insert_all_reference_geometry", False, to_bool),
+])
 
 
 class DrawingOperations:
@@ -3054,4 +3134,246 @@ class DrawingOperations:
             f"Arranged {len(group_boxes)} view group(s) ({len(by_name)} view(s)) "
             f"on sheet {sheet_name!r}",
             SwErrors.swSuccess, {**data, "arranged": arranged},
+        )
+
+    # ========================================================================
+    # Model annotation import tools
+    # ========================================================================
+
+    def _sheet_view_names(self, sheet: Any) -> List[str]:
+        """Every real (non-sheet-pseudo-view) view name on `sheet`, via
+        `ISheet::GetViews` -- what `insert_model_items` iterates for
+        `all_views=True`, mirroring `list_views`'s own sheet-pseudo-view
+        filter."""
+        try:
+            views_raw = sheet.GetViews() or []
+        except Exception:
+            views_raw = []
+        if not isinstance(views_raw, (list, tuple)):
+            views_raw = []
+
+        sheet_type_code = int(SwDrawingViewTypes.swDrawingSheet)
+        names = []
+        for view in views_raw:
+            type_code = self._read_prop(view, "Type")
+            if (isinstance(type_code, (int, float)) and not isinstance(type_code, bool)
+                    and int(type_code) == sheet_type_code):
+                continue
+            name = self._read_prop(view, "GetName2")
+            if name:
+                names.append(name)
+        return names
+
+    def _insert_model_items_for_view(self, doc, view_name: str, option: int, types_bitmask: int,
+                                      eliminate_duplicates: bool, hidden_features: bool) -> Dict:
+        """One view's worth of `insert_model_items`: select `view_name`, call
+        `InsertModelAnnotations4`, and report how many annotations it
+        actually inserted.
+
+        The inserted count comes straight off `InsertModelAnnotations4`'s own
+        return value (an array of the created `IAnnotation` objects, per the
+        dossier) rather than a before/after total-annotation-count diff --
+        there is no documented `IView`/`IModelDocExtension`
+        annotation-count member in docs/api/03-annotations.md to diff
+        against (confirmed by re-reading that dossier's `IAnnotation`
+        section), and the return array already answers "how many were
+        imported" directly. Likewise, no `ForceRebuild3` call is made before
+        reading this count: the dossier never claims
+        `InsertModelAnnotations4`'s return value is stale until a rebuild.
+        """
+        with self.selected(view_name, "DRAWINGVIEW", 0, 0, 0) as sel:
+            if not sel["success"]:
+                return {
+                    "view_name": view_name, "success": False, "count": 0,
+                    "message": sel["message"],
+                }
+            try:
+                args = INSERT_MODEL_ANNOTATIONS4.bind(
+                    units=self._units,
+                    option=option, types=types_bitmask, all_views=False,
+                    duplicate_dims=eliminate_duplicates,
+                    hidden_feature_dims=hidden_features,
+                    use_placement_in_sketch=False,
+                    insert_all_annotations=False,
+                    insert_all_reference_geometry=False,
+                )
+                inserted = doc.InsertModelAnnotations4(*args)
+            except Exception as e:
+                logger.error(f"insert_model_items({view_name!r}) error: {e}")
+                return {
+                    "view_name": view_name, "success": False, "count": 0,
+                    "message": f"Insert model items error: {e}",
+                }
+
+        count = len(inserted) if isinstance(inserted, (list, tuple)) else 0
+        return {"view_name": view_name, "success": True, "count": count}
+
+    def insert_model_items(self, view_name: Optional[str] = None, sources: Optional[str] = None,
+                            types: Optional[List[str]] = None, all_views: bool = False,
+                            eliminate_duplicates: bool = True, hidden_features: bool = False) -> Dict:
+        """
+        Import model annotations onto a drawing view via
+        `IDrawingDoc::InsertModelAnnotations4` -- the fastest route to a
+        fully dimensioned view for a part modeled with design intent
+        (driving dimensions / DimXpert). Supersedes the requested
+        `IView::InsertModelAnnotations3`/`IModelDocExtension::
+        InsertModelAnnotations3`, neither of which exists (see the dossier's
+        section intro); the real member lives on `IDrawingDoc`, and this
+        wrapper calls the current `...4` overload rather than `...3` per the
+        dossier's own recommendation.
+
+        Args:
+            view_name: Name of the drawing view to import into (`IView::
+                GetName2`, e.g. from `list_views`). Selected via
+                `selected(..., "DRAWINGVIEW", ...)` before the call.
+                Mutually exclusive with `all_views` -- passing both fails
+                with `swInvalidInput`. Exactly one of `view_name`/`all_views`
+                must be given.
+            sources: Where the annotations come from -- one of `"model"`
+                (default, all dimensions in the view), `"selected_feature"`,
+                `"selected_component"` (assembly drawings), or
+                `"assembly_only"`, mapped to `swImportModelItemsSource_e`.
+                An unrecognized value (including `"dimxpert"` -- see this
+                module's `_MODEL_ITEM_SOURCES` Gotcha) fails with
+                `swInvalidInput`.
+            types: Which annotation types to import -- any of `"dimensions"`,
+                `"datums"`, `"datum_targets"`, `"gtols"`, `"surface_finishes"`,
+                `"welds"`, `"notes"`, `"hole_callouts"`, `"cosmetic_threads"`,
+                `"instance_counts"`, combined into `swInsertAnnotation_e`'s
+                bitmask via bitwise OR. Omitted: defaults to `("dimensions",
+                "hole_callouts")` (see this module's `_MODEL_ITEM_TYPES`
+                Gotcha for why center marks/centerlines aren't offered).
+            all_views: `True` to import into every view on the active
+                sheet, one `InsertModelAnnotations4` call per view (each
+                view selected atomically first) so a per-view count can be
+                reported -- the COM `AllViews` argument itself is always
+                bound `False`, since a single whole-drawing call gives no
+                per-view breakdown. `False` (default): only `view_name`.
+            eliminate_duplicates: `DuplicateDims` -- `True` (default) to
+                eliminate duplicate dimensions, `False` to allow them.
+            hidden_features: `HiddenFeatureDims` -- `True` to insert
+                dimensions from hidden features, `False` (default) to skip
+                them.
+
+        Returns:
+            Result dict. `data["views"]` is a list of `{"view_name",
+            "success", "count"}` (one entry per targeted view, in `all_views`
+            order when set); `data["total_imported"]` is the sum across all
+            of them. A per-view COM failure fails the whole result
+            (`swFeatureError`), naming every failed view. A zero-imported
+            result is still reported as a *warned* success -- the message
+            explicitly says `0 annotations imported` rather than reading
+            like an unqualified success (this is the common silent-failure
+            mode the issue calls out: the model may have no annotations of
+            the requested `types`, or the wrong `sources` was picked).
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        if view_name and all_views:
+            return self._result(
+                False,
+                "view_name and all_views are mutually exclusive -- pass exactly one",
+                SwErrors.swInvalidInput, {"view_name": view_name, "all_views": all_views},
+            )
+        if not view_name and not all_views:
+            return self._result(
+                False,
+                "Specify either view_name (a specific view) or all_views=True "
+                "(every view on the active sheet)",
+                SwErrors.swInvalidInput,
+            )
+
+        source_key = (sources or _DEFAULT_MODEL_ITEM_SOURCE).strip().lower()
+        source_value = _MODEL_ITEM_SOURCES.get(source_key)
+        if source_value is None:
+            return self._result(
+                False,
+                f"Unknown sources {sources!r}; expected one of "
+                f"{sorted(_MODEL_ITEM_SOURCES)!r}",
+                SwErrors.swInvalidInput, {"sources": sources},
+            )
+
+        if types is not None and not isinstance(types, (list, tuple)):
+            return self._result(
+                False,
+                f"types must be a list of strings, got {type(types).__name__}",
+                SwErrors.swInvalidInput, {"types": types},
+            )
+        type_keys = list(types) if types else list(_DEFAULT_MODEL_ITEM_TYPES)
+        types_bitmask = 0
+        unknown_types = []
+        for type_key in type_keys:
+            normalized = (type_key or "").strip().lower()
+            bit = _MODEL_ITEM_TYPES.get(normalized)
+            if bit is None:
+                unknown_types.append(type_key)
+            else:
+                types_bitmask |= bit
+        if unknown_types:
+            return self._result(
+                False,
+                f"Unknown types {unknown_types!r}; expected any of "
+                f"{sorted(_MODEL_ITEM_TYPES)!r}",
+                SwErrors.swInvalidInput, {"types": types},
+            )
+
+        if all_views:
+            sheet, sheet_err = self._resolve_sheet(doc, None)
+            if sheet_err:
+                return sheet_err
+            target_names = self._sheet_view_names(sheet)
+            if not target_names:
+                return self._result(
+                    False, "No views on the active sheet to import model items into",
+                    SwErrors.swFeatureError,
+                )
+        else:
+            target_view, available_views, find_err = self._find_view_by_name(doc, view_name, None)
+            if find_err:
+                return find_err
+            if target_view is None:
+                return self._result(
+                    False,
+                    f"Unknown view {view_name!r}; available views: {available_views!r}",
+                    SwErrors.swInvalidInput,
+                    {"view_name": view_name, "available_views": available_views},
+                )
+            target_names = [view_name]
+
+        per_view = [
+            self._insert_model_items_for_view(
+                doc, name, source_value, types_bitmask, eliminate_duplicates, hidden_features,
+            )
+            for name in target_names
+        ]
+
+        total_imported = sum(v["count"] for v in per_view)
+        failed_views = [v["view_name"] for v in per_view if not v["success"]]
+
+        data = {
+            "sources": source_key, "types": type_keys, "all_views": all_views,
+            "eliminate_duplicates": eliminate_duplicates, "hidden_features": hidden_features,
+            "views": per_view, "total_imported": total_imported,
+        }
+
+        if failed_views:
+            return self._result(
+                False, f"Failed to insert model items in view(s): {failed_views!r}",
+                SwErrors.swFeatureError, data,
+            )
+
+        if total_imported == 0:
+            return self._result(
+                True,
+                f"0 annotations imported across {len(per_view)} view(s) -- check that "
+                f"the model actually has {type_keys!r} annotations from {source_key!r}",
+                SwErrors.swSuccess, data,
+            )
+
+        return self._result(
+            True,
+            f"Imported {total_imported} annotation(s) across {len(per_view)} view(s)",
+            SwErrors.swSuccess, data,
         )

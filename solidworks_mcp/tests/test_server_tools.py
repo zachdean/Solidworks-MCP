@@ -66,6 +66,8 @@ EXPECTED_TOOL_NAMES = {
     "set_view_display_mode",
     "delete_view",
     "auto_arrange_views",
+    # Drawing Annotation Tools
+    "insert_model_items",
     # Sketch Tools
     "create_sketch",
     "create_sketch_on_face",
