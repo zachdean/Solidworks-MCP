@@ -31,6 +31,8 @@ from ..constants_drawing import (
     SwAutodimVerticalPlacement,
     SwBreakLineOrientation,
     SwBreakLineStyle,
+    SwCenterMarkConnectionLine,
+    SwCenterMarkStyle,
     SwCommands,
     SwCreateOrdDimError,
     SwCreateSectionViewAtOptions,
@@ -1021,6 +1023,26 @@ _WELD_CONTOURS = {
     "flat": int(SwWeldSymbolContourTypes.swWeldContourFlat),
     "convex": int(SwWeldSymbolContourTypes.swWeldContourConvex),
     "concave": int(SwWeldSymbolContourTypes.swWeldContourConcave),
+}
+
+# `add_center_marks`' `style` -> `IDrawingDoc::InsertCenterMark3`'s `Style`
+# parameter (`swCenterMarkStyle_e`), per docs/api/03-annotations.md's
+# `InsertCenterMark3` record.
+_CENTER_MARK_STYLES = {
+    "non_annotation": int(SwCenterMarkStyle.swCenterMark_NonAnnotation),
+    "single": int(SwCenterMarkStyle.swCenterMark_Single),
+    "linear_group": int(SwCenterMarkStyle.swCenterMark_LinearGroup),
+    "circular_group": int(SwCenterMarkStyle.swCenterMark_CircularGroup),
+}
+
+# `add_center_marks`' `connection_lines` boolean -> `ICenterMark::
+# ConnectionLines` (`swCenterMarkConnectionLine_e`) -- this project's own
+# convention, since the enum exposes four independent line-type bits and no
+# SolidWorks source documents a bool->bitmask mapping. See the sw-1xx.6
+# dossier addendum's `ICenterMark::ConnectionLines` record Gotchas.
+_CENTER_MARK_CONNECTION_LINES = {
+    False: int(SwCenterMarkConnectionLine.swCenterMark_ShowNoConnectLines),
+    True: int(SwCenterMarkConnectionLine.swCenterMark_ShowCircularConnectLines),
 }
 
 
@@ -9649,5 +9671,429 @@ class DrawingOperations:
 
         return self._result(
             True, f"Added {symbol_code} weld symbol" + (f" {data['name']!r}" if data["name"] else ""),
+            SwErrors.swSuccess, data,
+        )
+
+    # ========================================================================
+    # Center mark / centerline tools (sw-1xx.6)
+    # ========================================================================
+
+    def _iter_view_center_marks(self, view: Any):
+        """Walk every center mark in `view` via `IView::GetFirstCenterMark2` /
+        `ICenterMark::GetNext` -- the center-mark analog of `_iter_view_notes`'s
+        `GetFirstNote`/`GetNext` walk (sw-1xx.3) and `_iter_view_datum_tags`'s
+        `GetFirstDatumTag`/`GetNext` walk (sw-1xx.4), per the sw-1xx.6 dossier
+        addendum. `GetFirstCenterMark2` is SOLIDWORKS 2025 SP01+ -- see that
+        addendum record's Gotchas for the obsolete pre-2025-SP01 predecessor."""
+        try:
+            mark = view.GetFirstCenterMark2()
+        except Exception as e:
+            logger.warning(f"_iter_view_center_marks: GetFirstCenterMark2 failed: {e}")
+            mark = None
+        while mark is not None:
+            yield mark
+            try:
+                nxt = mark.GetNext()
+            except Exception as e:
+                logger.warning(f"_iter_view_center_marks: GetNext failed: {e}")
+                nxt = None
+            mark = nxt if nxt else None
+
+    def _find_circular_edges(self, view: Any) -> List[Tuple[str, float, float, float]]:
+        """`add_center_marks`' `target="all_holes"` discovery: every visible
+        edge in `view` (`IView::GetVisibleEntities2`, entity type `1` -- edges,
+        the same convention `list_view_entities`'s `_VIEW_ENTITY_TYPES` uses)
+        whose underlying curve is a circle (`IEdge::GetCurve().IsCircle()`,
+        sw-1xx.6 dossier addendum).
+
+        Returns `("EDGE", x, y, z)` tuples in the caller's default unit --
+        exactly the shape `_parse_entity_ref` produces for an explicit entity
+        reference, so both `target` modes feed the same creation loop. An
+        edge whose curve or point can't be read is skipped (logged), not
+        fatal to the whole enumeration -- same best-effort convention
+        `list_view_entities`'s `_entity_point` already uses.
+        """
+        try:
+            component = view.RootDrawingComponent
+            edges = view.GetVisibleEntities2(component, 1) or []
+        except Exception as e:
+            logger.warning(f"_find_circular_edges: GetVisibleEntities2 failed: {e}")
+            return []
+
+        found: List[Tuple[str, float, float, float]] = []
+        for edge in edges:
+            try:
+                curve = edge.GetCurve()
+                is_circle = bool(curve.IsCircle()) if curve is not None else False
+            except Exception as e:
+                logger.warning(f"_find_circular_edges: IsCircle check failed: {e}")
+                continue
+            if not is_circle:
+                continue
+            try:
+                point = self._entity_point(edge, "edge")
+            except Exception as e:
+                logger.warning(f"_find_circular_edges: no point for circular edge: {e}")
+                continue
+            found.append((
+                "EDGE",
+                self._units.from_meters(point[0]),
+                self._units.from_meters(point[1]),
+                self._units.from_meters(point[2]),
+            ))
+        return found
+
+    def add_center_marks(self, view_name: str, target: Any = "all_holes",
+                          style: str = "single", size: Optional[float] = None,
+                          extended_lines: bool = True, slot_center_marks: bool = True,
+                          connection_lines: bool = False) -> Dict:
+        """
+        Batch-apply center marks to circular holes in a drawing view via
+        `IDrawingDoc::InsertCenterMark3` -- one COM call per hole (there is
+        no array/batch creation call for this per-edge API; `IView::
+        AutoInsertCenterMarks2` is a separate, preference-driven UI-automation
+        path, not this project's own reproducible batch tool -- see the
+        dossier's own `InsertCenterMark3` Gotchas). Selection is atomic per
+        hole via `self.selected(...)`.
+
+        Args:
+            view_name: Drawing view to mark. Activated via
+                `select_view_by_name`.
+            target: `"all_holes"` (default) -- every circular edge in the
+                view, found via `IView::GetVisibleEntities2` + `IEdge::
+                GetCurve().IsCircle()` (`_find_circular_edges`, sw-1xx.6
+                dossier addendum). Or an explicit list of entity references
+                in the shape `list_view_entities` returns (`{"kind": "edge",
+                "x", "y", "z"}`).
+            style: `"non_annotation"`, `"single"` (default), `"linear_group"`,
+                or `"circular_group"` -- `_CENTER_MARK_STYLES`
+                (`swCenterMarkStyle_e`).
+            size: Optional line length for every created mark, caller's
+                default unit -- converted to meters and assigned to
+                `ICenterMark::Size` after creation (dossier: unit unstated on
+                that property's own page, treated as meters per this
+                project's API-wide convention). Omitted: SolidWorks' own
+                default size is left alone.
+            extended_lines: `True` (default) to show each mark's extension
+                lines (`ICenterMark::ShowLines`).
+            slot_center_marks: `InsertCenterMark3`'s own `Slot` parameter,
+                applied uniformly to every mark in this batch -- `True`
+                (default) per the issue's own default.
+            connection_lines: `True` to show a circular connection line
+                grouping the marks (`ICenterMark::ConnectionLines`) --
+                `False` (default). See `_CENTER_MARK_CONNECTION_LINES`'s own
+                comment for this project's bool -> bitmask convention.
+
+        Returns:
+            Result dict. `data["count"]` is how many marks were created. A
+            view with no circular geometry (or an empty explicit `target`
+            list) is a warned success with `count: 0`, not an error -- per
+            the issue's own Requirements. `InsertCenterMark3`'s `Propagate`
+            argument is always bound `False`: this batch walk already marks
+            each hole individually, so pattern propagation would double-mark
+            siblings.
+        """
+        style_key = (style or "").strip().lower() if isinstance(style, str) else ""
+        style_enum = _CENTER_MARK_STYLES.get(style_key)
+        if style_enum is None:
+            return self._result(
+                False, f"Unknown style {style!r}; expected one of {sorted(_CENTER_MARK_STYLES)!r}",
+                SwErrors.swInvalidInput, {"style": style},
+            )
+
+        if size is not None and (
+            isinstance(size, bool) or not isinstance(size, (int, float)) or size < 0
+        ):
+            return self._result(
+                False, f"size must be a non-negative number, got {size!r}", SwErrors.swInvalidInput,
+                {"size": size},
+            )
+
+        connection_key = bool(connection_lines)
+        connection_enum = _CENTER_MARK_CONNECTION_LINES[connection_key]
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        activated = self.select_view_by_name(view_name)
+        if not activated["success"]:
+            return activated
+
+        data = {
+            "view_name": view_name,
+            "target": target if isinstance(target, str) else "explicit",
+            "style": style_key, "size": size, "extended_lines": bool(extended_lines),
+            "slot_center_marks": bool(slot_center_marks), "connection_lines": connection_key,
+        }
+
+        if isinstance(target, str):
+            if target.strip().lower() != "all_holes":
+                return self._result(
+                    False,
+                    f"Unknown target {target!r}; expected 'all_holes' or a list of entity references",
+                    SwErrors.swInvalidInput, data,
+                )
+            try:
+                view = doc.ActiveDrawingView
+            except Exception as e:
+                logger.error(f"add_center_marks({view_name!r}) error: {e}")
+                return self._result(
+                    False, f"Add center marks error: {e}", SwErrors.swSelectionError, data,
+                )
+            candidates = self._find_circular_edges(view)
+        elif isinstance(target, (list, tuple)):
+            candidates = []
+            for i, entity in enumerate(target):
+                parsed, entity_err = _parse_entity_ref(entity)
+                if entity_err:
+                    return self._result(
+                        False, f"target[{i}]: {entity_err}", SwErrors.swInvalidInput, data,
+                    )
+                candidates.append(parsed)
+        else:
+            return self._result(
+                False,
+                f"target must be 'all_holes' or a list of entity references, got {target!r}",
+                SwErrors.swInvalidInput, data,
+            )
+
+        if not candidates:
+            data["count"] = 0
+            return self._result(
+                True,
+                f"No circular geometry found in view {view_name!r} -- 0 center marks created",
+                SwErrors.swSuccess, data,
+            )
+
+        created_count = 0
+        for type_str, ex, ey, ez in candidates:
+            with self.selected("", type_str, ex, ey, ez) as sel:
+                if not sel["success"]:
+                    continue
+                try:
+                    mark = doc.InsertCenterMark3(style_enum, False, bool(slot_center_marks))
+                except Exception as e:
+                    logger.warning(f"add_center_marks({view_name!r}) InsertCenterMark3 error: {e}")
+                    mark = None
+                if mark is None:
+                    continue
+                try:
+                    if size is not None:
+                        mark.Size = self._units.to_meters(size)
+                    mark.ShowLines = bool(extended_lines)
+                    mark.ConnectionLines = connection_enum
+                except Exception as e:
+                    logger.warning(
+                        f"add_center_marks({view_name!r}) center mark display-setting error: {e}"
+                    )
+                created_count += 1
+
+        data["count"] = created_count
+
+        if created_count == 0:
+            return self._result(
+                False,
+                f"Found {len(candidates)} candidate(s) in view {view_name!r} but could not "
+                "create any center marks",
+                SwErrors.swFeatureError, data,
+            )
+
+        skipped = len(candidates) - created_count
+        message = f"Created {created_count} center mark(s) in view {view_name!r}"
+        if skipped:
+            message += f" ({skipped} candidate(s) skipped)"
+        return self._result(True, message, SwErrors.swSuccess, data)
+
+    def add_centerlines(self, view_name: str, target: Any = "all", select_view: bool = True) -> Dict:
+        """
+        Insert a centerline via `IDrawingDoc::InsertCenterLine2` -- a single
+        select-then-act call whose two entities come entirely from the
+        current selection (the method itself takes no parameters).
+
+        Args:
+            view_name: Drawing view to act in. Activated via
+                `select_view_by_name`.
+            target: `"all"` (default, requires `select_view=True`) -- select
+                nothing but the view itself, letting SolidWorks auto-detect
+                and insert centerlines wherever it can in that view. Or an
+                explicit list of exactly 2 entity references (the shape
+                `list_view_entities` returns) identifying the two parallel
+                edges, or two circular/arc edges, to draw one centerline
+                between -- requires `select_view=False`.
+            select_view: `True` (default) to select the view object itself
+                (`self.selected(view_name, "DRAWINGVIEW", ...)`) before
+                calling -- requires `target="all"`. `False` to select
+                `target`'s two entities instead -- requires an explicit
+                2-entity `target`. A mismatched combination fails with
+                `swInvalidInput` before any COM call.
+
+        Returns:
+            Result dict. `InsertCenterLine2` returns a single `ICenterLine`
+            pointer (not an array or count) per its own dossier record, so
+            `data["count"]` is `1` if a centerline was created, `0`
+            otherwise -- this is not a true batch total, even though
+            `select_view=True` may cause SolidWorks to insert more than one
+            centerline internally in practice; that multi-insert behavior is
+            not confirmed on `InsertCenterLine2`'s own help page (see the
+            dossier's own Gotchas), so this wrapper only reports what the API
+            itself documents returning. A `0` result is a warned success, not
+            an error -- legitimately no eligible geometry in the view is a
+            normal outcome for `select_view=True`'s auto-detect path.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        activated = self.select_view_by_name(view_name)
+        if not activated["success"]:
+            return activated
+
+        data = {"view_name": view_name, "target": target, "select_view": bool(select_view)}
+
+        if select_view:
+            if not (isinstance(target, str) and target.strip().lower() == "all"):
+                return self._result(
+                    False,
+                    "select_view=True requires target='all' (whole-view auto-detect) -- "
+                    "pass select_view=False with an explicit 2-entity target instead",
+                    SwErrors.swInvalidInput, data,
+                )
+            with self.selected(view_name, "DRAWINGVIEW", 0, 0, 0) as sel:
+                if not sel["success"]:
+                    return sel
+                try:
+                    created = doc.InsertCenterLine2()
+                except Exception as e:
+                    logger.error(f"add_centerlines({view_name!r}) error: {e}")
+                    return self._result(
+                        False, f"Add centerline error: {e}", SwErrors.swFeatureError, data,
+                    )
+        else:
+            if not isinstance(target, (list, tuple)) or len(target) != 2:
+                return self._result(
+                    False,
+                    "select_view=False requires target to be a list of exactly 2 entity "
+                    f"references, got {target!r}",
+                    SwErrors.swInvalidInput, data,
+                )
+            parsed_entities = []
+            for i, entity in enumerate(target):
+                parsed, entity_err = _parse_entity_ref(entity)
+                if entity_err:
+                    return self._result(
+                        False, f"target[{i}]: {entity_err}", SwErrors.swInvalidInput, data,
+                    )
+                parsed_entities.append(parsed)
+
+            with ExitStack() as stack:
+                for i, (type_str, ex, ey, ez) in enumerate(parsed_entities):
+                    sel = stack.enter_context(
+                        self.selected("", type_str, ex, ey, ez, append=(i > 0), mark=i)
+                    )
+                    if not sel["success"]:
+                        return sel
+                try:
+                    created = doc.InsertCenterLine2()
+                except Exception as e:
+                    logger.error(f"add_centerlines({view_name!r}) error: {e}")
+                    return self._result(
+                        False, f"Add centerline error: {e}", SwErrors.swFeatureError, data,
+                    )
+
+        if created is None:
+            data["count"] = 0
+            return self._result(
+                True,
+                f"No centerline created in view {view_name!r} -- check that eligible "
+                "geometry was selected",
+                SwErrors.swSuccess, data,
+            )
+
+        data["count"] = 1
+        return self._result(True, f"Created centerline in view {view_name!r}", SwErrors.swSuccess, data)
+
+    def remove_center_marks(self, view_name: str) -> Dict:
+        """
+        Remove every center mark in a drawing view via select
+        (`ICenterMark::Select` + `ISelectionMgr::CreateSelectData`) +
+        `IModelDocExtension::DeleteSelection2` -- the same select-then-delete
+        idiom `delete_sheet`/`delete_view` already use, applied one center
+        mark at a time while walking `IView::GetFirstCenterMark2`/
+        `ICenterMark::GetNext` (`_iter_view_center_marks`). Lets a bad batch
+        from `add_center_marks` be redone without restarting the drawing.
+
+        Args:
+            view_name: Drawing view to clear. Activated via
+                `select_view_by_name`.
+
+        Returns:
+            Result dict. `data["count"]` (and `data["removed"]`, an alias)
+            is how many center marks were actually deleted -- counted from
+            this walk's own successful `DeleteSelection2` calls, NOT from
+            `IView::GetCenterMarkCount2` (that method only counts old
+            feature-style center marks and can under-report the current
+            annotation-style kind this project creates -- see the sw-1xx.6
+            dossier addendum's Gotchas). A view with no center marks is a
+            warned success with `count: 0`.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        activated = self.select_view_by_name(view_name)
+        if not activated["success"]:
+            return activated
+
+        try:
+            view = doc.ActiveDrawingView
+        except Exception as e:
+            logger.error(f"remove_center_marks({view_name!r}) error: {e}")
+            return self._result(
+                False, f"Remove center marks error: {e}", SwErrors.swSelectionError,
+                {"view_name": view_name},
+            )
+
+        data = {"view_name": view_name}
+        sel_mgr = doc.SelectionManager
+
+        removed = 0
+        candidates = 0
+        for mark in self._iter_view_center_marks(view):
+            candidates += 1
+            try:
+                sel_data = sel_mgr.CreateSelectData()
+                selected_ok = mark.Select(False, sel_data)
+            except Exception as e:
+                logger.warning(f"remove_center_marks({view_name!r}) Select error: {e}")
+                selected_ok = False
+            if not selected_ok:
+                continue
+            try:
+                deleted = doc.Extension.DeleteSelection2(0)
+            except Exception as e:
+                logger.warning(f"remove_center_marks({view_name!r}) DeleteSelection2 error: {e}")
+                deleted = False
+            if deleted:
+                removed += 1
+
+        data["count"] = removed
+        data["removed"] = removed
+
+        if candidates == 0:
+            return self._result(
+                True, f"No center marks found in view {view_name!r} -- 0 removed",
+                SwErrors.swSuccess, data,
+            )
+
+        if removed == 0:
+            return self._result(
+                False,
+                f"Found {candidates} center mark(s) in view {view_name!r} but could not remove any",
+                SwErrors.swFeatureError, data,
+            )
+
+        return self._result(
+            True, f"Removed {removed} center mark(s) from view {view_name!r}",
             SwErrors.swSuccess, data,
         )

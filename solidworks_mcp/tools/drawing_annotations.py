@@ -4,7 +4,8 @@ Drawing Annotation Tools
 insert_model_items, add_dimension, add_ordinate_dimensions,
 set_dimension_value, set_dimension_text, autodimension_view, add_note,
 add_property_note, list_notes, edit_note, list_datums, add_datum_feature,
-add_gtol, add_datum_target, add_surface_finish, add_weld_symbol.
+add_gtol, add_datum_target, add_surface_finish, add_weld_symbol,
+add_center_marks, add_centerlines, remove_center_marks.
 
 Backed by `DrawingOperations` (solidworks_mcp/automation/drawings.py), per
 docs/api/03-annotations.md.
@@ -794,3 +795,129 @@ def add_weld_symbol(arguments: dict) -> Dict:
         arguments.get("other_side_symbol"),
         arguments.get("tail_text"),
     )
+
+
+@tool(
+    name="add_center_marks",
+    description=(
+        "Batch-apply center marks to circular holes in a drawing view via "
+        "IDrawingDoc::InsertCenterMark3 -- one COM call per hole. "
+        "target='all_holes' (default) finds every circular edge in the view "
+        "automatically; pass a list of entity references (as returned by "
+        "list_view_entities) to mark specific holes instead. A view with no "
+        "circular geometry returns success with count=0, not an error. "
+        "style: 'non_annotation', 'single' (default), 'linear_group', or "
+        "'circular_group'. size is the optional line length (caller's "
+        "default unit); extended_lines shows extension lines (default "
+        "True); slot_center_marks applies InsertCenterMark3's Slot flag to "
+        "every mark (default True); connection_lines shows a circular "
+        "connection line grouping the marks (default False)."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "view_name": {"type": "string", "description": "Drawing view to mark."},
+            "target": {
+                "oneOf": [
+                    {"type": "string", "description": "'all_holes' to auto-find every circular edge."},
+                    {"type": "array", "items": _ENTITY_REF_SCHEMA, "description": "Explicit entities to mark."},
+                ],
+                "default": "all_holes",
+                "description": "'all_holes' (default), or a list of entity references.",
+            },
+            "style": {
+                "type": "string", "default": "single",
+                "description": "'non_annotation', 'single', 'linear_group', or 'circular_group'.",
+            },
+            "size": {"type": "number", "description": "Optional line length, caller's default unit."},
+            "extended_lines": {
+                "type": "boolean", "default": True, "description": "Show extension lines.",
+            },
+            "slot_center_marks": {
+                "type": "boolean", "default": True, "description": "Use slot-style center marks.",
+            },
+            "connection_lines": {
+                "type": "boolean", "default": False,
+                "description": "Show a circular connection line grouping the marks.",
+            },
+        },
+        "required": ["view_name"],
+    },
+)
+def add_center_marks(arguments: dict) -> Dict:
+    return sw_automation.add_center_marks(
+        arguments.get("view_name"),
+        arguments.get("target", "all_holes"),
+        arguments.get("style", "single"),
+        arguments.get("size"),
+        arguments.get("extended_lines", True),
+        arguments.get("slot_center_marks", True),
+        arguments.get("connection_lines", False),
+    )
+
+
+@tool(
+    name="add_centerlines",
+    description=(
+        "Insert a centerline via IDrawingDoc::InsertCenterLine2. "
+        "select_view=True (default, requires target='all') selects the "
+        "view object itself, letting SolidWorks auto-detect and insert "
+        "centerlines wherever it can in that view. select_view=False "
+        "requires target to be a list of exactly 2 entity references (as "
+        "returned by list_view_entities) -- two parallel edges, or two "
+        "circular/arc edges -- to draw one centerline between. "
+        "InsertCenterLine2 returns a single pointer, so count is 1 if a "
+        "centerline was created, 0 otherwise (not a batch total); a 0 "
+        "result is a warned success, not an error."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "view_name": {"type": "string", "description": "Drawing view to act in."},
+            "target": {
+                "oneOf": [
+                    {"type": "string", "description": "'all' for whole-view auto-detect."},
+                    {
+                        "type": "array", "items": _ENTITY_REF_SCHEMA, "minItems": 2, "maxItems": 2,
+                        "description": "Exactly 2 entities to draw a centerline between.",
+                    },
+                ],
+                "default": "all",
+                "description": "'all' (default), or a list of exactly 2 entity references.",
+            },
+            "select_view": {
+                "type": "boolean", "default": True,
+                "description": "True selects the whole view (requires target='all'); "
+                                "False selects target's 2 entities instead.",
+            },
+        },
+        "required": ["view_name"],
+    },
+)
+def add_centerlines(arguments: dict) -> Dict:
+    return sw_automation.add_centerlines(
+        arguments.get("view_name"),
+        arguments.get("target", "all"),
+        arguments.get("select_view", True),
+    )
+
+
+@tool(
+    name="remove_center_marks",
+    description=(
+        "Remove every center mark in a drawing view (select + "
+        "IModelDocExtension::DeleteSelection2), so a bad add_center_marks "
+        "batch can be redone without restarting the drawing. Returns how "
+        "many were actually removed; a view with none returns success with "
+        "count=0."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "view_name": {"type": "string", "description": "Drawing view to clear."},
+        },
+        "required": ["view_name"],
+    },
+)
+def remove_center_marks(arguments: dict) -> Dict:
+    return sw_automation.remove_center_marks(arguments.get("view_name"))

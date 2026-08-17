@@ -949,6 +949,20 @@ class SwCenterMarkStyle(IntEnum):
     swCenterMark_CircularGroup = 4
 
 
+class SwCenterMarkConnectionLine(IntEnum):
+    """Center mark connection-line visibility bitmask, for
+    `ICenterMark::ConnectionLines` (swCenterMarkConnectionLine_e).
+
+    Source: docs/api/03-annotations.md (sw-1xx.6 addendum, Enums section).
+    """
+
+    swCenterMark_ShowNoConnectLines = 0
+    swCenterMark_ShowLinearConnectLines = 1
+    swCenterMark_ShowCircularConnectLines = 2
+    swCenterMark_ShowRadialConnectLines = 4
+    swCenterMark_ShowBaseCenterMarkLines = 8
+
+
 class SwAnnotationType(IntEnum):
     """Concrete annotation subtype (swAnnotationType_e).
 

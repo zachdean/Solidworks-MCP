@@ -102,6 +102,9 @@ EXPECTED_TOOL_NAMES = {
     "add_datum_target",
     "add_surface_finish",
     "add_weld_symbol",
+    "add_center_marks",
+    "add_centerlines",
+    "remove_center_marks",
     # Sketch Tools
     "create_sketch",
     "create_sketch_on_face",

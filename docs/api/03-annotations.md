@@ -3220,6 +3220,367 @@ confirm empirically if a caller needs to validate selection shape before calling
 - No `InsertCenterLine3` exists — `InsertCenterLine2` is the current, un-superseded
   method despite the "2" suffix suggesting an older generation.
 
+---
+
+**Addendum (sw-1xx.6, re-fetched independently via the same curl+UA
+technique):** the batch center-mark/centerline tools this section backs need three
+things the original research pass didn't cover: how to detect a *circular* edge
+(for `target="all_holes"`), the per-mark display-setting members on `ICenterMark`
+(for `size`/`extended_lines`/`connection_lines`), and how to enumerate and delete
+existing center marks (for `remove_center_marks`). All fetched fresh for this issue.
+
+### ICurve::IsCircle
+
+- **Interface:** ICurve
+- **Method:** IsCircle
+- **Minimum SW version:** not stated on the page (pre-.NET-syntax-era method)
+
+**Signature:**
+
+```vb
+Function IsCircle() As System.Boolean
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning |
+| --- | --- | --- | --- | --- |
+| (none) | | n/a | | Takes no parameters |
+
+**Returns:** `Boolean` — `True` if the curve is a circle, `False` for any other
+curve type.
+
+**Prior selection required:** None — called directly on an `ICurve` reference
+(obtained from `IEdge::GetCurve`, documented next), not selection-driven.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.ICurve~IsCircle.html
+
+**status:** verified
+
+**Gotchas:**
+- Per the page's own Remarks: use `IEdge::GetCurveParams2` to further tell a
+  *complete* circle apart from an arc, if that distinction matters — `IsCircle`
+  alone doesn't distinguish them.
+- This is the mechanism `add_center_marks`' `target="all_holes"` uses to filter
+  `IView::GetVisibleEntities2`'s edge results down to circular ones: for each edge,
+  `edge.GetCurve().IsCircle()`. An edge whose curve can't be read, or that throws,
+  is treated as non-circular (skipped) rather than failing the whole enumeration —
+  same best-effort convention `list_view_entities`' `_entity_point` already uses.
+
+---
+
+### IEdge::GetCurve
+
+- **Interface:** IEdge
+- **Method:** GetCurve
+- **Minimum SW version:** not stated on the page
+
+**Signature:**
+
+```vb
+Function GetCurve() As System.Object
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning |
+| --- | --- | --- | --- | --- |
+| (none) | | n/a | | Takes no parameters |
+
+**Returns:** `System.Object` — pointer to the underlying curve for this edge (late-
+bound; cast/use as `ICurve`).
+
+**Prior selection required:** None — a read-only accessor on an already-held
+`IEdge` reference (e.g. one element of `IView::GetVisibleEntities2`'s result array).
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IEdge~GetCurve.html
+
+**status:** verified
+
+---
+
+### ICenterMark::Size
+
+- **Interface:** ICenterMark
+- **Member:** Size (read/write property)
+- **Minimum SW version:** SOLIDWORKS 2001Plus SP1, Revision Number 10.1
+
+**Signature:**
+
+```vb
+Property Size As System.Double
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning |
+| --- | --- | --- | --- | --- |
+| value | Double | unstated | Yes (on set) | Length of the lines in this center mark |
+
+**Returns:** `Double` — length of the lines in this center mark (get); no return
+value (set).
+
+**Prior selection required:** None to call — a property set directly on the
+`ICenterMark` reference `IDrawingDoc::InsertCenterMark3` returns, immediately
+after creation.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.ICenterMark~Size.html
+
+**status:** verified
+
+**Gotchas:**
+- The page does not document a unit. Per this dossier's API-wide convention (see
+  `README.md#units-convention`, and `SelectByID2`'s own X/Y/Z record above, which
+  faced the same gap), this project treats it as **meters** at the COM boundary --
+  `add_center_marks`' `size` parameter is in the caller's default unit and is
+  converted via `self._units.to_meters()` before being assigned.
+
+---
+
+### ICenterMark::ShowLines
+
+- **Interface:** ICenterMark
+- **Member:** ShowLines (read/write property)
+- **Minimum SW version:** SOLIDWORKS 2001Plus SP1, Revision Number 10.1
+
+**Signature:**
+
+```vb
+Property ShowLines As System.Boolean
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning |
+| --- | --- | --- | --- | --- |
+| value | Boolean | n/a | Yes (on set) | `True` shows the extension lines, `False` does not |
+
+**Returns:** `Boolean` — whether the extension lines are shown (get); no return
+value (set).
+
+**Prior selection required:** None to call — a property set directly on the
+`ICenterMark` reference `IDrawingDoc::InsertCenterMark3` returns, immediately
+after creation.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.ICenterMark~ShowLines.html
+
+**status:** verified
+
+---
+
+### ICenterMark::ConnectionLines
+
+- **Interface:** ICenterMark
+- **Member:** ConnectionLines (read/write property)
+- **Minimum SW version:** SOLIDWORKS 2003 FCS, Revision Number 11.0
+
+**Signature:**
+
+```vb
+Property ConnectionLines As System.Integer
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| value | Integer | n/a | Yes (on set) | Visibility of this center mark's connection line | `swCenterMarkConnectionLine_e` |
+
+**Returns:** `Integer` — the current connection-line visibility bitmask (get); no
+return value (set).
+
+**Prior selection required:** None to call — a property set directly on the
+`ICenterMark` reference `IDrawingDoc::InsertCenterMark3` returns, immediately
+after creation.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.ICenterMark~ConnectionLines.html
+- https://help.solidworks.com/2025/english/api/sldworksapi/solidworks.interop.sldworks~solidworks.interop.sldworks.icentermark_members.html
+
+**status:** verified
+
+**Gotchas:**
+- The bool -> bitmask mapping a tool-layer `connection_lines` boolean parameter
+  needs is not documented anywhere — SolidWorks exposes four independent
+  line-type bits (linear/circular/radial/base), not a single on/off switch. This
+  project's own convention (not sourced from SolidWorks): `False` ->
+  `swCenterMark_ShowNoConnectLines` (0), `True` ->
+  `swCenterMark_ShowCircularConnectLines` (2), since batch center marks are
+  placed on circular hole edges and a circular connection line is what visually
+  groups them. A caller wanting a different combination should use
+  `select_view_by_name` + direct `ICenterMark` access outside this tool.
+
+---
+
+### ICenterMark::Select
+
+- **Interface:** ICenterMark
+- **Method:** Select
+- **Minimum SW version:** SOLIDWORKS 2016 FCS, Revision Number 24.0
+
+**Signature:**
+
+```vb
+Function Select( _
+   ByVal Append As System.Boolean, _
+   ByVal Data As System.Object _
+) As System.Boolean
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning |
+| --- | --- | --- | --- | --- |
+| Append | Boolean | n/a | Yes | `True` appends this center mark to the selection list, `False` replaces the selection list with just this center mark |
+| Data | Object (`ISelectData`) | n/a | Yes | A `SelectData` object from `ISelectionMgr::CreateSelectData` |
+
+**Returns:** `Boolean` — `True` if the center mark was selected, `False` if not.
+
+**Prior selection required:** None as a precondition — this method *establishes*
+selection on the center mark it's called on, the dedicated alternative to
+`SelectByID2`/`AddSelectionListObject` for this annotation type (recall
+`SelectByID2`'s own Type-string table above: `"CENTERMARKS"`/`"CENTERMARKSYMS"`
+are not usable Type strings for this purpose — `swSelCENTERMARKS` has no
+supported interface per that table, and `swSelCENTERMARKSYMS`'s mapping is
+blank). `remove_center_marks` uses this + `IModelDocExtension::DeleteSelection2`
+(the same select-then-delete idiom `delete_sheet`/`delete_view` already use) to
+remove one center mark at a time while walking `IView::GetFirstCenterMark2`/
+`ICenterMark::GetNext`.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.ICenterMark~Select.html
+
+**status:** verified
+
+---
+
+### IView::GetFirstCenterMark2
+
+- **Interface:** IView
+- **Method:** GetFirstCenterMark2
+- **Minimum SW version:** SOLIDWORKS 2025 SP01, Revision Number 33.1
+
+**Signature:**
+
+```vb
+Function GetFirstCenterMark2() As System.Object
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning |
+| --- | --- | --- | --- | --- |
+| (none) | | n/a | | Takes no parameters |
+
+**Returns:** `System.Object` — the first `ICenterMark` in the view, or
+`Nothing`/`null` if the view has none.
+
+**Prior selection required:** None — a walk-start primitive, same shape as
+`IView::GetFirstNote` (already used by `_iter_view_notes`) and
+`IView::GetFirstDatumTag` (already used by `_iter_view_datum_tags`).
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IView~GetFirstCenterMark2.html
+
+**status:** verified
+
+**Gotchas:**
+- Availability is **SOLIDWORKS 2025 SP01, Revision 33.1** — very recent. It
+  obsoletes `IView::GetFirstCenterMark` (no "2"), which the page's own Remarks
+  describe as not supporting inactive sheets; `...2` is used here as the current
+  member, consistent with this dossier's own prefer-the-current-overload
+  convention elsewhere, but a caller targeting an older SOLIDWORKS build than
+  2025 SP01 needs the obsolete predecessor instead.
+
+---
+
+### ICenterMark::GetNext
+
+- **Interface:** ICenterMark
+- **Method:** GetNext
+- **Minimum SW version:** SOLIDWORKS 2003 FCS, Revision Number 11.0
+
+**Signature:**
+
+```vb
+Function GetNext() As CenterMark
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning |
+| --- | --- | --- | --- | --- |
+| (none) | | n/a | | Takes no parameters |
+
+**Returns:** `CenterMark` (via `ICenterMark`) — the next center mark, or
+`Nothing`/`null` at the end of the list.
+
+**Prior selection required:** None — the walk-continuation primitive paired with
+`IView::GetFirstCenterMark2` above, same shape as `INote::GetNext`/
+`IDatumTag::GetNext`. `remove_center_marks`' own walk (`_iter_view_center_marks`)
+follows the identical `nxt if nxt else None` idiom `_iter_view_notes`/
+`_iter_view_datum_tags` already use, capturing `GetNext()` on the current mark
+*before* deleting it (a deleted COM object's own `GetNext` is not guaranteed to
+still answer).
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.ICenterMark~GetNext.html
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IView~GetCenterMarkCount2.html (fetched to evaluate as a removal-count cross-check; see Gotchas below for why it's not used that way)
+
+**status:** verified
+
+**Gotchas:**
+- **`IView::GetCenterMarkCount2` is NOT a reliable removed/remaining count and is
+  deliberately not used by `remove_center_marks`.** Its own Remarks state:
+  "Center marks are now annotations. Previously, center marks were features. This
+  method is only valid for center marks that are features." Center marks created
+  by this project's own `add_center_marks` (via `InsertCenterMark3`) are the
+  current annotation-style kind, not the old feature-style kind — so this method
+  can legitimately report `0` while marks exist. `remove_center_marks` instead
+  counts its own successful `DeleteSelection2` calls made during the
+  `GetFirstCenterMark2`/`GetNext` walk.
+- Similarly, `ICenterMark::GetAnnotation` (documented on the `ICenterMark`
+  members page) returns `Nothing`/`null` for the old feature-style marks — per
+  its own Remarks, it only resolves for the `swSelCENTERMARKSYMS`-selected
+  (annotation-style) kind. `remove_center_marks` therefore selects and deletes
+  via `ICenterMark::Select` + `DeleteSelection2` directly, never via
+  `GetAnnotation`, so it works uniformly across both kinds.
+
+---
+
+### ISelectionMgr::CreateSelectData
+
+- **Interface:** ISelectionMgr
+- **Method:** CreateSelectData
+- **Minimum SW version:** SOLIDWORKS 2004 FCS, Revision Number 12.0
+
+**Signature:**
+
+```vb
+Function CreateSelectData() As SelectData
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning |
+| --- | --- | --- | --- | --- |
+| (none) | | n/a | | Takes no parameters |
+
+**Returns:** `SelectData` (via `ISelectData`) — an opaque selection-metadata
+object, required by `ICenterMark::Select`'s `Data` parameter (and other
+interfaces' own `Select`-family methods across the API).
+
+**Prior selection required:** None.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.ISelectionMgr~CreateSelectData.html
+
+**status:** verified
+
 ## Annotation object manipulation
 
 An initial fetch attempt for this section returned a client-rendered SPA shell with
@@ -4009,6 +4370,25 @@ exact requested name.
 | swCenterMark_CircularGroup | 4 | Circular group center mark |
 
 Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swCenterMarkStyle_e.html
+
+#### swCenterMarkConnectionLine_e (sw-1xx.6)
+
+Consumed by `ICenterMark::ConnectionLines`'s property value (bitmask; fetched
+independently for sw-1xx.6 via the same curl+UA technique, since neither this enum
+nor `ICenterMark`'s own display-setting properties were in scope for the original
+research pass).
+
+| Value | Number | Meaning |
+| --- | --- | --- |
+| swCenterMark_ShowNoConnectLines | 0 | No connection lines shown |
+| swCenterMark_ShowLinearConnectLines | 1 | Show linear connection lines |
+| swCenterMark_ShowCircularConnectLines | 2 | Show circular connection lines |
+| swCenterMark_ShowRadialConnectLines | 4 | Show radial connection lines |
+| swCenterMark_ShowBaseCenterMarkLines | 8 | Show base center mark lines |
+
+Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swCenterMarkConnectionLine_e.html
+
+**status:** verified
 
 #### swAnnotationType_e
 
