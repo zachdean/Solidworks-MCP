@@ -3,7 +3,7 @@ Drawing View Creation & Discovery Tools
 -----------------------------------------
 insert_model_view, insert_standard_3_view, insert_projected_view,
 insert_predefined_views, insert_auxiliary_view, insert_section_view,
-list_views.
+insert_detail_view, insert_broken_out_section, list_views.
 
 Backed by `DrawingOperations` (solidworks_mcp/automation/drawings.py), per
 docs/api/02-views.md.
@@ -335,6 +335,148 @@ def insert_section_view(arguments: dict) -> Dict:
         arguments.get("auto_hatch", True),
         arguments.get("display_only", False),
         arguments.get("use_sheet_scale", True),
+    )
+
+
+@tool(
+    name="insert_detail_view",
+    description=(
+        "Insert a detail view off a circular region of an existing drawing "
+        "view via IDrawingDoc::CreateDetailViewAt4 (requested as "
+        "CreateDetailViewAt5, which does not exist -- At4 is the current "
+        "highest overload). Owns the whole sequence: activates "
+        "parent_view_name, sketches the detail circle at "
+        "center_x/center_y/radius via ISketchManager::CreateCircleByRadius, "
+        "selects it, creates the view. style is circle (default), profile, "
+        "or none -- despite the name this binds to CreateDetailViewAt4's "
+        "Showtype parameter (swDetCircleShowType_e), not its separate "
+        "border/leader-look Style parameter (always swDetViewSTANDARD, not "
+        "exposed). scale_num/scale_denom must be given together or both "
+        "omitted; omitted defaults to the parent view's own scale. A "
+        "non-positive radius fails before any COM call. On any failure "
+        "after the circle is sketched, it is deleted so no stray "
+        "construction sketch is left on the sheet."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "parent_view_name": {
+                "type": "string",
+                "description": "Name of the existing drawing view to detail (see list_views)",
+            },
+            "center_x": {"type": "number", "description": "Detail circle center X, in the parent view's space, in set_units' unit"},
+            "center_y": {"type": "number", "description": "Detail circle center Y, in the parent view's space, in set_units' unit"},
+            "radius": {"type": "number", "description": "Detail circle radius, in set_units' unit (must be positive)"},
+            "x": {"type": "number", "description": "Detail view placement X on the sheet, in set_units' unit"},
+            "y": {"type": "number", "description": "Detail view placement Y on the sheet, in set_units' unit"},
+            "label": {
+                "type": "string",
+                "description": "Detail view label letter, e.g. 'A'. Omit for an empty label.",
+            },
+            "scale_num": {
+                "type": "number",
+                "description": "Detail view scale numerator -- must be given with scale_denom, or both omitted",
+            },
+            "scale_denom": {
+                "type": "number",
+                "description": "Detail view scale denominator -- must be given with scale_num, or both omitted",
+            },
+            "style": {
+                "type": "string", "default": "circle",
+                "description": "circle, profile, or none (case-insensitive) -- see tool description",
+            },
+            "full_outline": {
+                "type": "boolean", "default": False,
+                "description": "CreateDetailViewAt4's FullOutline flag",
+            },
+        },
+        "required": ["parent_view_name", "center_x", "center_y", "radius", "x", "y"],
+    },
+)
+def insert_detail_view(arguments: dict) -> Dict:
+    return sw_automation.insert_detail_view(
+        arguments.get("parent_view_name", ""),
+        arguments.get("center_x", 0),
+        arguments.get("center_y", 0),
+        arguments.get("radius", 0),
+        arguments.get("x", 0),
+        arguments.get("y", 0),
+        arguments.get("label"),
+        arguments.get("scale_num"),
+        arguments.get("scale_denom"),
+        arguments.get("style", "circle"),
+        arguments.get("full_outline", False),
+    )
+
+
+@tool(
+    name="insert_broken_out_section",
+    description=(
+        "Insert a broken-out section on an existing drawing view via "
+        "IDrawingDoc::CreateBreakOutSection (requested as IView::"
+        "InsertBrokenOutSection, which does not exist). Owns the whole "
+        "sequence: activates parent_view_name, sketches profile_points as a "
+        "closed loop of line segments (auto-closed -- the last point "
+        "connects back to the first), selects them, creates the section. "
+        "Exactly one of depth or depth_reference is required: depth is a "
+        "plain numeric depth; depth_reference selects a geometry reference "
+        "(default type 'FACE') and applies it afterward via "
+        "IBrokenOutSectionFeatureData::DepthReference (CreateBreakOutSection "
+        "itself has no reference-depth parameter). preview=True sketches "
+        "and validates the profile then deletes it without ever calling "
+        "CreateBreakOutSection -- a dry run, not backed by a real COM "
+        "'preview' concept. Fewer than 3 profile_points, or fewer than 3 "
+        "distinct points, fails before any COM call. On any failure after "
+        "the profile is sketched, it is deleted so no stray construction "
+        "sketch is left on the sheet."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "parent_view_name": {
+                "type": "string",
+                "description": "Name of the existing drawing view to break open (see list_views)",
+            },
+            "profile_points": {
+                "type": "array",
+                "description": (
+                    "3+ points [x, y] (or {'x':.., 'y':..}) in the parent view's "
+                    "coordinate space, in set_units' unit -- the closed profile "
+                    "boundary (auto-closed; a pre-closed chain is also accepted)."
+                ),
+                "items": {"type": "object"},
+                "minItems": 3,
+            },
+            "depth": {
+                "type": "number",
+                "description": "Material-removal depth, in set_units' unit. Exactly one of depth/depth_reference is required.",
+            },
+            "depth_reference": {
+                "type": "object",
+                "description": "Sheet-space point selecting the depth-reference geometry. Exactly one of depth/depth_reference is required.",
+                "properties": {
+                    "x": {"type": "number"},
+                    "y": {"type": "number"},
+                    "z": {"type": "number", "default": 0},
+                    "type": {"type": "string", "default": "FACE"},
+                },
+                "required": ["x", "y"],
+            },
+            "preview": {
+                "type": "boolean", "default": False,
+                "description": "True validates and sketches the profile but never calls CreateBreakOutSection (dry run)",
+            },
+        },
+        "required": ["parent_view_name", "profile_points"],
+    },
+)
+def insert_broken_out_section(arguments: dict) -> Dict:
+    return sw_automation.insert_broken_out_section(
+        arguments.get("parent_view_name", ""),
+        arguments.get("profile_points", []),
+        arguments.get("depth"),
+        arguments.get("depth_reference"),
+        arguments.get("preview", False),
     )
 
 

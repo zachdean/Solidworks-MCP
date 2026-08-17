@@ -833,6 +833,70 @@ page has no Remarks section:
 - Units never stated on the page; meters for X/Y/Z inferred from SolidWorks API
   convention. `Scale1`/`Scale2`/`Style`/`Showtype`/`ShapeIntensity` are unitless.
 
+### ISketchManager::CreateCircleByRadius (added for sw-8ww.4)
+
+- **Interface:** ISketchManager
+- **Method:** CreateCircleByRadius
+- **Minimum SW version:** unverified — help page fetch 403'd directly (same
+  standing WAF block noted throughout this dossier).
+
+**Signature:**
+
+```vb
+Function CreateCircleByRadius( _
+   ByVal XC As System.Double, _
+   ByVal YC As System.Double, _
+   ByVal ZC As System.Double, _
+   ByVal Radius As System.Double _
+) As System.Object
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| XC | Double | meters | Yes | X of the circle's center | — |
+| YC | Double | meters | Yes | Y of the circle's center | — |
+| ZC | Double | meters | Yes | Z of the circle's center | — |
+| Radius | Double | meters | Yes | Circle radius | — |
+
+**Returns:** `System.Object` — an `ISketchSegment` on success (per the
+type-library mirror's typed return); `Nothing` on failure is presumed by COM
+convention, not independently confirmed.
+
+**Prior selection required:** None — this is the creation call itself, used the
+same way `CreateLine` is used for `insert_section_view`'s cut line: called
+directly against `ISketchManager` while the target drawing view is active
+(`IDrawingDoc::ActivateView` first), no `InsertSketch` call needed for a
+view-space detail circle (mirrors `CreateDetailViewAt4`'s own official example,
+which draws the circle with a bare `CreateCircle` call right after
+`ActivateView`, no `InsertSketch` in between).
+
+**Source URL(s):**
+- https://www.rimptec.com/rsolidworks/net/lehal/sw/ISketchManager.html
+  (type-library mirror: confirms 4-double-argument arity, `ISketchSegment`
+  return)
+- https://thecadcoder.com/solidworks-macros/create-circle-by-radius/ (VBA macro
+  example: `swSketchManager.CreateCircleByRadius(0, 0, 0, 1)`, confirms
+  argument order XC/YC/ZC/Radius and meters units)
+
+**status:** unverified against a primary help.solidworks.com page body (403'd)
+— corroborated by a type-library mirror plus an independent macro example that
+agree on arity, order, and units. Same sourcing tier as
+`SetUserPreferenceToggle`/`CreateAuxiliaryViewAt2` elsewhere in this dossier.
+
+**Gotchas:**
+- Chosen over the plain `CreateCircle(XC, YC, ZC, Xp, Yp, Zp)` overload (used by
+  `CreateDetailViewAt4`'s own official example, which specifies a point *on* the
+  circle rather than a radius) because `insert_detail_view`'s public signature
+  takes a `radius` directly — `CreateCircleByRadius` avoids reconstructing a
+  boundary point from center+radius just to satisfy the other overload's shape.
+  Both overloads produce the same kind of sketch entity.
+- Selecting the resulting circle by `SelectByID2` afterward must target a point
+  *on* the circle's boundary (e.g. `(XC + Radius, YC)`), not the center — the
+  center point is not part of the circle geometry SolidWorks would hit-test
+  there.
+
 ### IDrawingDoc::CreateBreakOutSection
 
 - **Interface:** IDrawingDoc
@@ -906,6 +970,66 @@ own help page has no Remarks section:
   signature.
 - Units never stated on the page; meters for `Depth` inferred from SolidWorks API
   convention.
+- **No `CreatePolyLine`/`ISketchManager::CreatePolyLine` exists** (added for
+  sw-8ww.4, checked while building `insert_broken_out_section`'s closed profile).
+  `ISketchManager::CreatePolygon` is a different, unrelated concept (regular
+  N-gon by center/vertex/sides, per its own type-library signature — not a
+  general polyline through arbitrary points). `insert_broken_out_section` builds
+  its closed profile from `N` `ISketchManager::CreateLine` segments instead — the
+  same primitive, and the same select-every-segment-then-act pattern,
+  `insert_section_view`'s cut line already uses (see that method's own Gotchas
+  above) — rather than the single-argument `CreateSpline`/`CreateSpline2`
+  overloads (confirmed to exist via the same type-library mirror, taking a
+  `System.Object` flattened point-array VARIANT), which would need SAFEARRAY
+  marshaling this project's `com_backend` module has no existing helper for.
+  Per the Design Help workflow quoted above, either a spline *or* a polyline
+  profile is valid — this wrapper's own convention picks the lower-risk,
+  already-sourced/tested primitive.
+
+#### Setting DepthReference post-creation (added for sw-8ww.4)
+
+`CreateBreakOutSection` itself has no reference-depth parameter (this record's
+Gotchas, above) — `insert_broken_out_section`'s `depth_reference` option is applied
+afterward via `IBrokenOutSectionFeatureData`, reached through the generic
+SolidWorks "get feature -> get its definition -> edit -> commit" idiom, not a
+broken-out-section-specific accessor (no `IView::GetBrokenOutSection` or similar
+exists — checked the same way `IView::InsertBrokenOutSection` was checked above:
+absent from the `IView` member index).
+
+1. `IModelDoc2::FeatureByPositionReverse(0)` — the most-recently-added feature
+   (`Index=0` is documented as counting from the end of the tree). Confirmed as a
+   real, primary-sourced `IModelDoc2` member:
+   https://help.solidworks.com/2011/English/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IModelDoc2~FeatureByPositionReverse.html
+2. `IFeature::GetDefinition()` — hands back the feature's data object (here, an
+   `IBrokenOutSectionFeatureData`). Primary-sourced, generic to every feature type:
+   https://help.solidworks.com/2025/English/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IFeature~GetDefinition.html
+3. `IBrokenOutSectionFeatureData::DepthReference` — get/set property, type
+   `IEntity` (confirmed via a type-library mirror of the interface:
+   https://www.rimptec.com/rsolidworks/net/lehal/sw/IBrokenOutSectionFeatureData.html,
+   which also confirms this interface has no `Preview`-named member of any kind —
+   `insert_broken_out_section`'s own `preview` parameter is this wrapper's own
+   dry-run convention, not backed by any real COM toggle; see that tool's
+   docstring). Search-indexed secondary source independently states "the `Depth`
+   property is valid only if `DepthReference` is null and the selection list is
+   empty" — corroborates this tool's both-or-neither validation between `depth`
+   and `depth_reference`.
+4. `IFeature::ModifyDefinition(FeatureData As Object, Model As Object, Component
+   As Object) As Boolean` — commits the edited feature data. `Component` is
+   `Nothing`/null for a non-assembly-context feature (this project's
+   `com_backend.null_dispatch()`). Primary-sourced, generic to every feature type:
+   https://help.solidworks.com/2025/English/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IFeature~ModifyDefinition.html
+
+**status:** the four individual members above are each independently, primarily
+sourced — but **no working example chains all four together for a broken-out
+section specifically** (only the generic `GetDefinition`/`ModifyDefinition`
+feature-editing idiom, applied here by extension). Same "reconstructed from a
+generic pattern, not a working example for this exact case" caveat as
+`CreateDetailViewAt4`'s own official-example-derived Prior-selection-required
+note, above — flag this chain first if a live SOLIDWORKS session shows different
+behavior. The fake-COM test harness cannot validate this chain either way (every
+link auto-vivifies successfully regardless of what's actually scripted) — see
+`solidworks_mcp/tests/test_tools_detail_view.py`'s tests for this path, which
+assert the *call sequence*, not real success semantics.
 
 ## Projected views
 
@@ -2131,6 +2255,16 @@ selection type `swSelDRAWINGVIEWS`) before calling `DeleteSelection2`.
   command).
 - `DeleteSelection2`'s own "See Also" list also points to `IModelDoc2::EditDelete` as
   a legacy alternative — also selection-based, also not view-specific.
+- **Also reused for construction-sketch cleanup** (added for sw-8ww.4):
+  `insert_detail_view`/`insert_broken_out_section` sketch their detail
+  circle/profile geometry directly into the parent view before the actual
+  `CreateDetailViewAt4`/`CreateBreakOutSection` call; if that later call fails,
+  the already-sketched geometry would otherwise strand a construction sketch on
+  the sheet. Both tools select the leftover geometry (same
+  `SelectByID2`/`"SKETCHSEGMENT"` convention as their own creation-time
+  selection) and call `DeleteSelection2(0)` on the failure path — the generic
+  "select then delete" pattern this record documents, not a
+  detail/broken-out-section-specific behavior.
 
 ### IDrawingDoc::ActivateView
 
@@ -2282,6 +2416,35 @@ style via the `Style` parameter, not the circle/profile sketch type. Don't confl
 the two when implementing detail-view creation.
 
 Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swDetCircleShowType_e.html
+
+#### swDetViewStyle_e (added for sw-8ww.4)
+
+`CreateDetailViewAt4`'s `Style` parameter (border/leader style), distinct from
+`Showtype` (`swDetCircleShowType_e`, above). Direct `help.solidworks.com` fetch of
+this enum's own page 403'd (the standing WAF block noted throughout this dossier).
+Values below are corroborated by two independent secondary sources that agree
+exactly with each other: a search-engine summary of a compiled `SwConst.tlb`
+transcription, and a direct fetch of a type-library-derived Pascal constants file
+on GitHub (`SwConst_TLB.pas`) -- whose adjacent `swDetCircleShowType_e` listing in
+the same file matches this dossier's already-verified values for that enum
+exactly, which is the actual basis for trusting its `swDetViewStyle_e` listing too.
+
+| Value | Number | Meaning |
+| --- | --- | --- |
+| swDetViewSTANDARD | 0 | Standard detail view (no leader) |
+| swDetViewBROKEN | 1 | Broken leader |
+| swDetViewLEADER | 2 | Leader shown |
+| swDetViewNOLEADER | 3 | No leader shown |
+| swDetViewCONNECTED | 4 | Connected (leader-less, view touches the circle) |
+
+`insert_detail_view` (sw-8ww.4) always passes `swDetViewSTANDARD` (0) for `Style` --
+none of that tool's parameters map to this enum (its own `style` parameter binds to
+`Showtype`/`swDetCircleShowType_e` instead; see that tool's own docstring for why).
+
+Source (attempted, 403'd): https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swDetViewStyle_e.html
+Corroborating sources: search-engine synthesis of a compiled SwConst.tlb transcription; https://github.com/pisfu/PlanetGear (SwConst_TLB.pas, type-library-derived Pascal source)
+
+**status:** unverified against a primary help.solidworks.com page body -- same sourcing tier as `SwUserPreferenceToggle`/`CreateAuxiliaryViewAt2` elsewhere in this dossier.
 
 #### swSectionViewOptions_e
 

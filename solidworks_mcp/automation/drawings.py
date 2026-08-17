@@ -18,6 +18,8 @@ from ..constants_drawing import (
     SwCreateSectionViewAtOptions,
     SwCustomInfoType,
     SwCustomPropertyAddOption,
+    SwDetCircleShowType,
+    SwDetViewStyle,
     SwDrawingViewTypes,
     SwDwgPaperSizes,
     SwSaveAsOptions,
@@ -162,6 +164,45 @@ _SECTION_TYPE_OPTIONS = {
     "full": 0,
     "aligned": int(SwCreateSectionViewAtOptions.swCreateSectionView_OffsetSection),
     "half": int(SwCreateSectionViewAtOptions.swCreateSectionView_Partial),
+}
+
+# `IDrawingDoc::CreateDetailViewAt4`'s positional signature, in the exact order
+# documented in docs/api/02-views.md: X, Y, Z, Style, Scale1, Scale2, LabelIn,
+# Showtype, FullOutline, JaggedOutline, NoOutline, ShapeIntensity. 12 positional
+# parameters -- ComSignature per this issue's working agreement (>6 params).
+# `Style` (swDetViewStyle_e -- border/leader look) is not one of
+# `insert_detail_view`'s own parameters; it's always bound to its own default
+# below (swDetViewSTANDARD), since none of that tool's arguments map to this
+# enum -- see docs/api/02-views.md's `swDetViewStyle_e` record for why.
+CREATE_DETAIL_VIEW_AT4 = ComSignature("CreateDetailViewAt4", [
+    Param("x", REQUIRED, to_meters),
+    Param("y", REQUIRED, to_meters),
+    Param("z", 0.0, to_meters),
+    Param("style", int(SwDetViewStyle.swDetViewSTANDARD), enum_to_int),
+    Param("scale1", REQUIRED),
+    Param("scale2", REQUIRED),
+    Param("label", ""),
+    Param("showtype", REQUIRED, enum_to_int),
+    Param("full_outline", False, to_bool),
+    Param("jagged_outline", False, to_bool),
+    Param("no_outline", False, to_bool),
+    Param("shape_intensity", 1, enum_to_int),
+])
+
+# `insert_detail_view`'s `style` -> `swDetCircleShowType_e`'s `Showtype`
+# parameter, per docs/api/02-views.md's `CreateDetailViewAt4` and
+# `swDetCircleShowType_e` records. The task-spec-requested `style` name turns
+# out to actually mean this enum, not `swDetViewStyle_e` (a separate,
+# unrelated "border/leader look" enum this tool doesn't expose at all) --
+# `"circle"`'s default value is literally `swDetCircleCIRCLE`'s own name, and
+# `insert_detail_view` always sketches a circle (never an arbitrary profile),
+# matching `CreateDetailViewAt4`'s official example workflow (sketch a circle,
+# call immediately, Showtype:=swDetCircleCIRCLE "use sketch circle to create
+# detail view").
+_DETAIL_VIEW_SHOWTYPE = {
+    "circle": int(SwDetCircleShowType.swDetCircleCIRCLE),
+    "profile": int(SwDetCircleShowType.swDetCirclePROFILE),
+    "none": int(SwDetCircleShowType.swDetCircleDONTSHOW),
 }
 
 
@@ -1732,5 +1773,525 @@ class DrawingOperations:
 
         return self._result(
             True, f"Inserted section view {created_name or ''!r} off {parent_view_name!r}",
+            SwErrors.swSuccess, data,
+        )
+
+    def _delete_sketch_geometry(self, doc, points: List[Tuple[float, float]]) -> None:
+        """Best-effort cleanup of construction sketch geometry left behind by a
+        failed `insert_detail_view`/`insert_broken_out_section` call, via
+        `IModelDocExtension::DeleteSelection2` (docs/api/02-views.md's own
+        record, reused here per that record's sw-8ww.4 addendum) -- selects
+        every point in `points` (view-local space, caller's default unit) as
+        a `"SKETCHSEGMENT"`, the same entity type/selection convention
+        `insert_section_view`'s cut-line selection uses, then deletes the
+        whole selection.
+
+        Never raises and never returns a result dict -- called only from an
+        already-failing path, so a cleanup failure must not replace the
+        original error the caller is about to return; it's only logged.
+        Harmless to call again on an already-selected/already-deleted
+        entity, so callers don't need to track which failure path they're
+        on -- just call this once whenever geometry may exist that the
+        create call didn't consume.
+        """
+        if not points:
+            return
+        try:
+            with ExitStack() as stack:
+                for i, (px, py) in enumerate(points):
+                    stack.enter_context(
+                        self.selected("", "SKETCHSEGMENT", px, py, 0, append=(i > 0), mark=i)
+                    )
+                doc.Extension.DeleteSelection2(0)
+        except Exception as e:
+            logger.debug(f"_delete_sketch_geometry: cleanup failed: {e}")
+
+    def insert_detail_view(
+        self, parent_view_name: str, center_x: float, center_y: float, radius: float,
+        x: float, y: float, label: Optional[str] = None,
+        scale_num: Optional[float] = None, scale_denom: Optional[float] = None,
+        style: str = "circle", full_outline: bool = False,
+    ) -> Dict:
+        """
+        Insert a detail view off a circular region of an existing drawing view
+        via `IDrawingDoc::CreateDetailViewAt4` -- requested as
+        `CreateDetailViewAt5`, which does not exist (docs/api/02-views.md's
+        `CreateDetailViewAt4` record: `At4` is the current highest overload).
+        Owns the whole sequence -- activate the parent view, sketch the detail
+        circle, select it, create the view -- the same shape
+        `insert_section_view` uses for its own prior-selection requirement.
+
+        Args:
+            parent_view_name: Name of the existing drawing view to detail
+                (`IView::GetName2`, e.g. from `list_views`). Validated against
+                the sheet's actual views first (`swInvalidInput` listing the
+                real names on a miss), then activated via
+                `IDrawingDoc::ActivateView` before any sketch geometry is
+                created, so `center_x`/`center_y`/`radius` land in that view's
+                own coordinate space.
+            center_x, center_y, radius: Detail circle, in the parent view's
+                coordinate space, in the caller's default unit (`set_units`) --
+                converted to sheet-space meters here and sketched via
+                `ISketchManager::CreateCircleByRadius`. `radius` must be
+                positive -- rejected with `swInvalidInput` before any COM call
+                otherwise.
+            x, y: Placement of the resulting detail view on the drawing sheet,
+                in the caller's default unit -- `CreateDetailViewAt4`'s own
+                `X`/`Y`. `Z` is always `0` (sheet space is 2D).
+            label: Detail view label letter (e.g. `"A"`). `None`/omitted
+                passes `""` -- unlike `insert_section_view`, there is no
+                documented `IDrDetail`-style post-creation label readback for
+                detail views in this dossier, so `data["label"]` simply echoes
+                back whatever was requested, not a value read from SolidWorks.
+            scale_num, scale_denom: Detail view scale ratio
+                (`CreateDetailViewAt4`'s `Scale1`/`Scale2`). Must be given
+                together or omitted together -- one without the other fails
+                with `swInvalidInput` before any COM call. When both are
+                omitted, defaults to the parent view's own scale
+                (`IView::ScaleDecimal`, read via `_read_prop`) over `1`, or
+                plain `1:1` if that can't be read -- "defaults to the
+                sheet/parent scale" per this issue's Requirements.
+            style: `"circle"` (default), `"profile"`, or `"none"` -- despite
+                the name, this binds to `CreateDetailViewAt4`'s `Showtype`
+                parameter (`swDetCircleShowType_e`), not its separate `Style`
+                parameter (`swDetViewStyle_e`, a border/leader-look enum this
+                tool doesn't expose at all -- always bound to
+                `swDetViewSTANDARD`). See docs/api/02-views.md's
+                `swDetViewStyle_e` record for the full reasoning: `"circle"`'s
+                default value is literally `swDetCircleCIRCLE`'s own member
+                name, and this tool always sketches a circle. An unrecognized
+                value fails with `swInvalidInput`.
+            full_outline: `CreateDetailViewAt4`'s own `FullOutline` flag
+                passed straight through. `JaggedOutline` is always `False` and
+                `NoOutline` is always `False` -- this tool exposes no
+                parameter for either, so neither is silently turned on by
+                default; `ShapeIntensity` is inert or not, but bound to `1`
+                either way.
+
+        Returns:
+            Result dict. On success, `data["view_name"]` is the created
+            view's name. On any failure *after* the detail circle was
+            successfully sketched (selection failure, the create call itself
+            raising or returning `Nothing`), the sketched circle is deleted
+            via `_delete_sketch_geometry` before the error is returned, so a
+            failed call never leaves a stray open sketch on the sheet.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        data = {
+            "parent_view_name": parent_view_name, "center_x": center_x, "center_y": center_y,
+            "radius": radius, "x": x, "y": y, "label": label,
+            "scale_num": scale_num, "scale_denom": scale_denom,
+            "style": style, "full_outline": full_outline,
+        }
+
+        if not isinstance(radius, (int, float)) or isinstance(radius, bool) or radius <= 0:
+            return self._result(
+                False, f"radius must be a positive number; got {radius!r}",
+                SwErrors.swInvalidInput, data,
+            )
+
+        style_key = (style or "").strip().lower()
+        showtype = _DETAIL_VIEW_SHOWTYPE.get(style_key)
+        if showtype is None:
+            return self._result(
+                False,
+                f"Unknown style {style!r}; expected one of "
+                f"{sorted(_DETAIL_VIEW_SHOWTYPE)!r}",
+                SwErrors.swInvalidInput, data,
+            )
+
+        if (scale_num is None) != (scale_denom is None):
+            return self._result(
+                False,
+                "scale_num and scale_denom must be given together, or both "
+                f"omitted; got scale_num={scale_num!r}, scale_denom={scale_denom!r}",
+                SwErrors.swInvalidInput, data,
+            )
+
+        parent_view, available_views, find_err = self._find_view_by_name(doc, parent_view_name, None)
+        if find_err:
+            return find_err
+        if parent_view is None:
+            return self._result(
+                False,
+                f"Unknown parent view {parent_view_name!r}; available views: "
+                f"{available_views!r}",
+                SwErrors.swInvalidInput,
+                {**data, "available_views": available_views},
+            )
+
+        try:
+            activated = doc.ActivateView(parent_view_name)
+        except Exception as e:
+            logger.error(f"insert_detail_view activate view error: {e}")
+            return self._result(False, f"Activate view error: {e}", SwErrors.swFeatureError, data)
+        if not activated:
+            return self._result(
+                False, f"Failed to activate parent view {parent_view_name!r}",
+                SwErrors.swFeatureError, data,
+            )
+
+        if scale_num is not None:
+            scale1, scale2 = scale_num, scale_denom
+        else:
+            parent_scale = self._read_prop(parent_view, "ScaleDecimal")
+            if (isinstance(parent_scale, (int, float)) and not isinstance(parent_scale, bool)
+                    and parent_scale > 0):
+                scale1, scale2 = parent_scale, 1.0
+            else:
+                scale1, scale2 = 1.0, 1.0
+
+        cx_m = self._units.to_meters(center_x)
+        cy_m = self._units.to_meters(center_y)
+        radius_m = self._units.to_meters(radius)
+
+        try:
+            segment = doc.SketchManager.CreateCircleByRadius(cx_m, cy_m, 0.0, radius_m)
+        except Exception as e:
+            logger.error(f"insert_detail_view sketch error: {e}")
+            return self._result(False, f"Sketch detail circle error: {e}", SwErrors.swSketchError, data)
+        if segment is None:
+            return self._result(
+                False,
+                "Failed to sketch detail circle -- ensure the parent view "
+                f"{parent_view_name!r} supports a detail circle",
+                SwErrors.swSketchError, data,
+            )
+
+        # Selected by a point on the circle's *boundary*, not its center --
+        # the center point isn't part of the circle geometry SelectByID2
+        # would hit-test there (docs/api/02-views.md's `CreateCircleByRadius`
+        # Gotchas).
+        boundary_point = [(center_x + radius, center_y)]
+
+        with self.selected("", "SKETCHSEGMENT", center_x + radius, center_y, 0) as sel:
+            if not sel["success"]:
+                self._delete_sketch_geometry(doc, boundary_point)
+                return sel
+
+            try:
+                args = CREATE_DETAIL_VIEW_AT4.bind(
+                    units=self._units, x=x, y=y, z=0,
+                    style=int(SwDetViewStyle.swDetViewSTANDARD),
+                    scale1=scale1, scale2=scale2, label=label or "",
+                    showtype=showtype, full_outline=full_outline,
+                    jagged_outline=False, no_outline=False, shape_intensity=1,
+                )
+                view = doc.CreateDetailViewAt4(*args)
+            except Exception as e:
+                logger.error(f"insert_detail_view error: {e}")
+                self._delete_sketch_geometry(doc, boundary_point)
+                return self._result(False, f"Insert detail view error: {e}",
+                                    SwErrors.swFeatureError, data)
+
+        if view is None:
+            self._delete_sketch_geometry(doc, boundary_point)
+            return self._result(
+                False, f"Failed to create detail view off {parent_view_name!r}",
+                SwErrors.swFeatureError, data,
+            )
+
+        created_name = self._read_prop(view, "GetName2")
+        data["view_name"] = created_name
+        data["scale_num"], data["scale_denom"] = scale1, scale2
+
+        return self._result(
+            True, f"Inserted detail view {created_name or ''!r} off {parent_view_name!r}",
+            SwErrors.swSuccess, data,
+        )
+
+    @staticmethod
+    def _normalize_profile_points(
+        profile_points: Any,
+    ) -> Tuple[Optional[List[Tuple[float, float]]], Optional[str]]:
+        """Validate and normalize `insert_broken_out_section`'s
+        `profile_points` into a list of `(x, y)` float tuples, in the
+        caller's default unit (not yet converted to meters -- that happens
+        per-segment once a parent view is confirmed to exist).
+
+        Each point may be `[x, y]`/`(x, y)` or `{"x": ..., "y": ...}`, the
+        same accepted shapes as `_normalize_cut_points`. Returns `(points,
+        None)` on success, or `(None, error_message)` for anything that isn't
+        a valid 3+-point, 3+-distinct-point profile -- checked entirely in
+        Python, before any COM call, per this issue's Acceptance Criteria
+        ("no COM call" for a profile with fewer than 3 points).
+
+        A trailing point that duplicates the first (an already-closed input,
+        e.g. `[A, B, C, A]`) is dropped before the distinctness check, so an
+        explicitly pre-closed polygon isn't penalized for what
+        `insert_broken_out_section`'s own auto-close step would otherwise
+        turn into a degenerate zero-length closing segment.
+        """
+        if not isinstance(profile_points, (list, tuple)) or len(profile_points) < 3:
+            got = len(profile_points) if isinstance(profile_points, (list, tuple)) else profile_points
+            return None, f"profile_points must have at least 3 (x, y) pairs; got {got!r}"
+
+        points: List[Tuple[float, float]] = []
+        for i, raw in enumerate(profile_points):
+            if isinstance(raw, dict):
+                if "x" not in raw or "y" not in raw:
+                    return None, f"profile_points[{i}] must have 'x' and 'y'; got {raw!r}"
+                px, py = raw["x"], raw["y"]
+            elif isinstance(raw, (list, tuple)) and len(raw) >= 2:
+                px, py = raw[0], raw[1]
+            else:
+                return None, (
+                    f"profile_points[{i}] must be [x, y] or {{'x': ..., 'y': ...}}; got {raw!r}"
+                )
+            try:
+                points.append((float(px), float(py)))
+            except (TypeError, ValueError):
+                return None, f"profile_points[{i}] has non-numeric coordinates: {raw!r}"
+
+        if len(points) >= 2 and points[-1] == points[0]:
+            points = points[:-1]
+
+        if len(set(points)) < 3:
+            return None, "profile_points must contain at least 3 distinct points"
+
+        return points, None
+
+    def insert_broken_out_section(
+        self, parent_view_name: str, profile_points: List[Any],
+        depth: Optional[float] = None, depth_reference: Optional[Dict] = None,
+        preview: bool = False,
+    ) -> Dict:
+        """
+        Insert a broken-out section on an existing drawing view via
+        `IDrawingDoc::CreateBreakOutSection` -- requested as
+        `IView::InsertBrokenOutSection`, which does not exist
+        (docs/api/02-views.md's `CreateBreakOutSection` record: the real
+        method lives on `IDrawingDoc`, not `IView`). Owns the whole sequence
+        -- activate the parent view, sketch the closed profile as line
+        segments, select them, create the section -- the same shape
+        `insert_section_view` uses for its own prior-selection requirement.
+
+        Args:
+            parent_view_name: Name of the existing drawing view to break open
+                (`IView::GetName2`, e.g. from `list_views`). Validated against
+                the sheet's actual views first (`swInvalidInput` listing the
+                real names on a miss), then activated via
+                `IDrawingDoc::ActivateView` before any sketch geometry is
+                created.
+            profile_points: 3+ `[x, y]` (or `{"x":.., "y":..}`) pairs, in the
+                parent view's coordinate space, in the caller's default unit
+                (`set_units`) -- the closed profile boundary, built from `N`
+                `ISketchManager::CreateLine` segments (not `CreateSpline`/
+                `CreatePolyLine` -- see docs/api/02-views.md's Gotchas on why).
+                The loop is auto-closed: an extra segment connects the last
+                point back to the first, so callers pass an *open* point
+                chain (a pre-closed chain -- last point equal to the first --
+                is also accepted; the duplicate is dropped first). Rejected
+                with `swInvalidInput` -- before any COM call -- if fewer than
+                3 points are given, or fewer than 3 of the given points (after
+                dropping a pre-closing duplicate) are distinct.
+            depth: Material-removal depth for the broken-out section, in the
+                caller's default unit -- `CreateBreakOutSection`'s own
+                `Depth`. Mutually exclusive with `depth_reference`: exactly
+                one of the two must be given, or this fails with
+                `swInvalidInput` before any COM call (a search-indexed
+                secondary source on `IBrokenOutSectionFeatureData::Depth`
+                states it "is valid only if `DepthReference` is null and the
+                selection list is empty" -- independent corroboration for
+                this both-or-neither rule).
+            depth_reference: `{"x": ..., "y": ..., "z": 0, "type": "FACE"}` --
+                a sheet-space point (caller's default unit) on the geometry
+                reference to drive the section depth to, selected via
+                `selected(..., type, ...)` (`type` defaults to `"FACE"`, the
+                common case for "cut down to this face"). Applied
+                *after* creation via `IBrokenOutSectionFeatureData
+                ::DepthReference` -- `CreateBreakOutSection` itself has no
+                reference-depth parameter (see docs/api/02-views.md's
+                "Setting DepthReference post-creation" addendum for the full
+                `FeatureByPositionReverse`/`GetDefinition`/`ModifyDefinition`
+                chain this uses, and its sourcing caveats).
+            preview: `True` sketches and selects the profile (validating that
+                it's a usable closed profile), then deletes that construction
+                geometry via `_delete_sketch_geometry` *without* ever calling
+                `CreateBreakOutSection` -- a dry run. Not backed by any real
+                `IBrokenOutSectionFeatureData`/`CreateBreakOutSection` COM
+                concept (a type-library mirror of
+                `IBrokenOutSectionFeatureData` confirms it has no
+                `Preview`-named member at all) -- this is entirely this
+                wrapper's own local convention for "validate without
+                committing," built from primitives already used elsewhere in
+                this method (sketch, select, delete).
+
+        Returns:
+            Result dict. On success (and not `preview`), `data["view_name"]`
+            is the parent view's name (`CreateBreakOutSection` modifies the
+            existing view in place -- it returns a bare `Boolean`, not a new
+            `View`, per the dossier: "A broken-out section is part of an
+            existing drawing view, not a separate view"). On any failure
+            *after* the profile was successfully sketched (a segment failing
+            partway through, selection failure, the create call itself
+            raising or returning `False`), whatever segments were sketched
+            are deleted via `_delete_sketch_geometry` before the error is
+            returned, so a failed call never leaves a stray open sketch on
+            the sheet. A `depth_reference` application failure is reported
+            even though the section itself was created -- `data["view_name"]`
+            still names the view so the caller isn't left without a handle to
+            it, matching `insert_section_view`'s own "a partial/warned
+            operation can't silently read as a clean one" rule for its
+            post-creation settings.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        data = {
+            "parent_view_name": parent_view_name, "depth": depth,
+            "depth_reference": depth_reference, "preview": preview,
+        }
+
+        points, point_err = self._normalize_profile_points(profile_points)
+        if point_err:
+            return self._result(False, point_err, SwErrors.swInvalidInput, data)
+
+        have_depth = depth is not None
+        have_ref = depth_reference is not None
+        if have_depth == have_ref:
+            return self._result(
+                False,
+                "Exactly one of depth or depth_reference must be given "
+                f"(depth={depth!r}, depth_reference={depth_reference!r})",
+                SwErrors.swInvalidInput, data,
+            )
+
+        if have_ref and (not isinstance(depth_reference, dict)
+                         or "x" not in depth_reference or "y" not in depth_reference):
+            return self._result(
+                False,
+                "depth_reference must be a dict with 'x' and 'y' (and optional "
+                f"'z'/'type'); got {depth_reference!r}",
+                SwErrors.swInvalidInput, data,
+            )
+
+        parent_view, available_views, find_err = self._find_view_by_name(doc, parent_view_name, None)
+        if find_err:
+            return find_err
+        if parent_view is None:
+            return self._result(
+                False,
+                f"Unknown parent view {parent_view_name!r}; available views: "
+                f"{available_views!r}",
+                SwErrors.swInvalidInput,
+                {**data, "available_views": available_views},
+            )
+
+        try:
+            activated = doc.ActivateView(parent_view_name)
+        except Exception as e:
+            logger.error(f"insert_broken_out_section activate view error: {e}")
+            return self._result(False, f"Activate view error: {e}", SwErrors.swFeatureError, data)
+        if not activated:
+            return self._result(
+                False, f"Failed to activate parent view {parent_view_name!r}",
+                SwErrors.swFeatureError, data,
+            )
+
+        # Auto-close: an extra segment connects the last point back to the first.
+        loop_points = list(points) + [points[0]]
+
+        segment_midpoints: List[Tuple[float, float]] = []
+        try:
+            for (x1, y1), (x2, y2) in zip(loop_points, loop_points[1:]):
+                x1_m, y1_m = self._units.to_meters(x1), self._units.to_meters(y1)
+                x2_m, y2_m = self._units.to_meters(x2), self._units.to_meters(y2)
+                segment = doc.SketchManager.CreateLine(x1_m, y1_m, 0.0, x2_m, y2_m, 0.0)
+                if segment is None:
+                    self._delete_sketch_geometry(doc, segment_midpoints)
+                    return self._result(
+                        False,
+                        "Failed to sketch profile segment -- ensure the parent view "
+                        f"{parent_view_name!r} supports a broken-out section",
+                        SwErrors.swSketchError, data,
+                    )
+                segment_midpoints.append(((x1 + x2) / 2.0, (y1 + y2) / 2.0))
+        except Exception as e:
+            logger.error(f"insert_broken_out_section sketch error: {e}")
+            self._delete_sketch_geometry(doc, segment_midpoints)
+            return self._result(False, f"Sketch profile error: {e}", SwErrors.swSketchError, data)
+
+        with ExitStack() as stack:
+            for i, (mx, my) in enumerate(segment_midpoints):
+                sel = stack.enter_context(
+                    self.selected("", "SKETCHSEGMENT", mx, my, 0, append=(i > 0), mark=i)
+                )
+                if not sel["success"]:
+                    self._delete_sketch_geometry(doc, segment_midpoints)
+                    return sel
+
+            if preview:
+                self._delete_sketch_geometry(doc, segment_midpoints)
+                return self._result(
+                    True,
+                    f"Profile is valid for a broken-out section on {parent_view_name!r} "
+                    "(preview=True -- not created)",
+                    SwErrors.swSuccess, data,
+                )
+
+            try:
+                depth_m = self._units.to_meters(depth) if have_depth else 0.0
+                created = doc.CreateBreakOutSection(depth_m)
+            except Exception as e:
+                logger.error(f"insert_broken_out_section error: {e}")
+                self._delete_sketch_geometry(doc, segment_midpoints)
+                return self._result(False, f"Insert broken-out section error: {e}",
+                                    SwErrors.swFeatureError, data)
+
+        if not created:
+            self._delete_sketch_geometry(doc, segment_midpoints)
+            return self._result(
+                False,
+                f"Failed to create broken-out section on {parent_view_name!r} -- "
+                "ensure profile_points form a valid closed profile",
+                SwErrors.swFeatureError, data,
+            )
+
+        data["view_name"] = parent_view_name
+
+        if have_ref:
+            ref_type = str(depth_reference.get("type") or "FACE").upper()
+            ref_x, ref_y = depth_reference["x"], depth_reference["y"]
+            ref_z = depth_reference.get("z", 0)
+
+            with self.selected("", ref_type, ref_x, ref_y, ref_z) as ref_sel:
+                if not ref_sel["success"]:
+                    return self._result(
+                        False,
+                        f"Created broken-out section on {parent_view_name!r} but could not "
+                        f"select depth_reference geometry: {ref_sel['message']}",
+                        SwErrors.swFeatureError, data,
+                    )
+                try:
+                    ref_obj = doc.SelectionManager.GetSelectedObject6(1, -1)
+                    feature = doc.FeatureByPositionReverse(0)
+                    feat_data = feature.GetDefinition()
+                    feat_data.DepthReference = ref_obj
+                    applied = feature.ModifyDefinition(feat_data, doc, com_backend.null_dispatch())
+                except Exception as e:
+                    logger.error(f"insert_broken_out_section depth_reference error: {e}")
+                    return self._result(
+                        False,
+                        f"Created broken-out section on {parent_view_name!r} but failed to "
+                        f"apply depth_reference: {e}",
+                        SwErrors.swFeatureError, data,
+                    )
+
+            if not applied:
+                return self._result(
+                    False,
+                    f"Created broken-out section on {parent_view_name!r} but "
+                    "ModifyDefinition rejected the depth_reference",
+                    SwErrors.swFeatureError, data,
+                )
+            data["depth_reference_applied"] = True
+
+        return self._result(
+            True, f"Inserted broken-out section on {parent_view_name!r}",
             SwErrors.swSuccess, data,
         )

@@ -298,6 +298,34 @@ class SwDetCircleShowType(IntEnum):
     swDetCircleDONTSHOW = 2
 
 
+class SwDetViewStyle(IntEnum):
+    """Detail view border/leader style, for IDrawingDoc::CreateDetailViewAt4's
+    ``Style`` parameter (swDetViewStyle_e) -- distinct from
+    ``swDetCircleShowType_e`` (:class:`SwDetCircleShowType`, above), which
+    governs the circle/profile sketch concept instead. Not the same enum as
+    the task-spec-requested "style" name that turned out to actually mean
+    ``Showtype``; see :class:`SwDetCircleShowType`'s own docstring.
+
+    Not independently confirmed against a primary help.solidworks.com page
+    body (the standing WAF block noted throughout docs/api/02-views.md) --
+    corroborated by two independent secondary sources (an AI-search summary
+    of a compiled SwConst.tlb transcription, and a direct fetch of a
+    type-library-derived Pascal source mirror on GitHub) that agree on every
+    member and value, and whose adjacent swDetCircleShowType_e listing
+    matches this file's already-committed :class:`SwDetCircleShowType`
+    exactly -- the same cross-check tier as ``SwUserPreferenceToggle``/
+    ``CreateAuxiliaryViewAt2`` elsewhere in this module.
+
+    Source: docs/api/02-views.md (Enums section, swDetViewStyle_e).
+    """
+
+    swDetViewSTANDARD = 0
+    swDetViewBROKEN = 1
+    swDetViewLEADER = 2
+    swDetViewNOLEADER = 3
+    swDetViewCONNECTED = 4
+
+
 class SwCreateSectionViewAtOptions(IntEnum):
     """Bitmask options for IDrawingDoc::CreateSectionViewAt5 (swCreateSectionViewAtOptions_e).
 
