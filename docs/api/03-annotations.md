@@ -1746,6 +1746,296 @@ Function CreateText( _
   general feature of note-text parsing (via `INote::PropertyLinkedText`), not
   something either `CreateText` variant opts in/out of via a parameter.
 
+### Note enumeration and editing (sw-1xx.3)
+
+Fetched for `list_notes`/`edit_note`'s requirements. **Every direct
+`help.solidworks.com` fetch attempted for this addendum returned the same HTTP 403
+this dossier's intro and `IDrawingDoc::CreateText2`'s own record already document for
+this research environment** — tried against `IView::GetAnnotations` (a 2024/2025
+member that search hits confirm exists, but whose page content 403'd both times),
+`INote::SetText`, `Get_Annotations_Example_VB.htm`, and
+`get_all_notes_in_drawing_template_example_vb.htm` alike, ruling out a
+URL-pattern-specific block. This record instead documents the **legacy,
+independently-corroborated `GetFirst`/`GetNext` walk**, quoted via search-engine
+snippets of two convergent official pages (page content itself not directly
+fetchable) — the official "Get All Notes in Drawing Template Example (VBA)" page:
+
+```vb
+Set swView = swDraw.GetFirstView   ' "This is the drawing template"
+Set swNote = swView.GetFirstNote
+Do While Not swNote Is Nothing
+    Set swAnn = swNote.GetAnnotation
+    Debug.Print " " & swNote.GetName
+    Debug.Print " " & swNote.GetText
+    Set swNote = swNote.GetNext
+Loop
+```
+
+- **Interface:** IView (`GetFirstNote`) / INote (`GetNext`)
+- **Method:** GetFirstNote + GetNext — requested/assumed as `IView::GetAnnotations`
+  (a real, current member, but its page 403'd every attempted fetch, so this dossier
+  falls back to the older, search-corroborated pair instead of guessing
+  `GetAnnotations`' parameters)
+- **Minimum SW version:** not stated in any accessible source
+
+**Signature:**
+
+```vb
+Function GetFirstNote() As System.Object   ' IView, returns first INote or Nothing
+Function GetNext() As System.Object        ' INote, returns next sibling INote or Nothing
+```
+
+**Parameters:** neither method takes any.
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| (none) | | n/a | | Both are zero-arg accessors | |
+
+**Returns:** `System.Object` — an `INote`, or `Nothing`/`None` past the last note in
+the chain (per the quoted example's `Do While Not swNote Is Nothing` termination).
+
+**Prior selection required:** None — both are read directly off an already-held
+`IView`/`INote` reference.
+
+**Source URL(s):**
+- https://help.solidworks.com/2016/english/api/sldworksapi/get_all_notes_in_drawing_template_example_vb.htm (attempted, 403; content via search snippet)
+- https://help.solidworks.com/2025/English/api/sldworksapi/SOLIDWORKS.Interop.sldworks~SOLIDWORKS.Interop.sldworks.IView~GetAnnotations.html (the modern alternative attempted first; 403, not used)
+
+**status:** unverified — corroborated only via search-engine snippets of the official
+page, not a direct page read; the exact call syntax (parens vs. bare property, per
+this API's general property/method inconsistency already noted elsewhere in this
+project) is not independently confirmed.
+
+**Gotchas:**
+- **`IDrawingDoc::GetFirstView`** returns, per the quoted example's own inline
+  comment, the **sheet's own pseudo/template view** first — this is where
+  sheet-level/title-block notes (including `$PRP`/`$PRPSHEET`-linked ones) live, not
+  on any of the sheet's "real" geometry views. `IView::GetNextView` then walks every
+  remaining view **across the whole document** (every real view, then the next
+  sheet's own pseudo-view, and so on) — confirmed by a second, convergent official
+  example ("Change Note Text Example (VBA)"):
+  ```vb
+  While Not swView Is Nothing
+      Set swNote = swView.GetFirstNote
+      While Not swNote Is Nothing
+          ' ... (see INote::GetText/SetText record below for the compound-note branch)
+          Set swNote = swNote.GetNext
+      Wend
+      Set swView = swView.GetNextView
+  Wend
+  ```
+  This project's own `list_views`/`_sheet_view_fill_state` (`02-views.md`) already
+  distinguish a pseudo-view from a real one via `IView::Type == swDrawingSheet`
+  (`SwDrawingViewTypes.swDrawingSheet`), reused by `list_notes`/`edit_note` to tag
+  which walked "view" is actually a sheet.
+- **`GetFirstNote` lives on `IView`, not `INote`** (`view.GetFirstNote`, not
+  `note.GetFirstNote`) — only the chain-walk `GetNext` is on `INote` itself.
+- **`INote::GetAnnotation`** (used in the quoted example) returns the note's
+  `IAnnotation` wrapper — the same object `SetPosition2`/`SetLeader3`/`Layer`
+  (documented above) act on.
+
+---
+
+### IAnnotation::GetName (sw-1xx.3)
+
+- **Interface:** IAnnotation
+- **Method:** GetName — companion `SetName` also exists (per the official "Get and
+  Set Names of Note Example (VBA)" page title)
+- **Minimum SW version:** not stated in any accessible source
+
+**Signature:**
+
+```vb
+Function GetName() As System.String
+Function SetName(ByVal Name As System.String) As System.Boolean
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| Name (SetName) | String | n/a | Yes | New name for the annotation | |
+
+**Returns:** `GetName` — `String`, the annotation's current name (e.g. `"Note1"`).
+`SetName` — `Boolean`, success flag (failure mode not stated in any accessible
+source).
+
+**Prior selection required:** None — read/write directly on an already-held
+`IAnnotation` reference (e.g. from `INote::GetAnnotation`).
+
+**Source URL(s):**
+- https://help.solidworks.com/2019/english/api/sldworksapi/get_and_set_names_of_note_example_vb.htm (attempted, 403; title/content summary via search snippet only)
+
+**status:** unverified — corroborated only via a search-engine summary of the
+official page's title and content, not a direct page read. This is what
+`list_notes`'/`edit_note`'s `note_name` matches against.
+
+---
+
+### IAnnotation::GetPosition (sw-1xx.3)
+
+- **Interface:** IAnnotation
+- **Method:** GetPosition — the read counterpart of `IAnnotation::SetPosition2`
+  (documented above)
+- **Minimum SW version:** not stated in any accessible source
+
+**Signature:**
+
+```vb
+Function GetPosition() As System.Object
+```
+
+**Parameters:** none.
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| (none) | | n/a | | Zero-arg accessor | |
+
+**Returns:** `System.Object` — an array of 3 doubles, the annotation's X/Y/Z origin
+in meters (unit inferred by symmetry with `SetPosition2`'s confirmed meters
+parameters, documented above — not independently restated on this method's own page,
+which 403'd on every fetch attempt).
+
+**Prior selection required:** None — read directly off an already-held
+`IAnnotation` reference.
+
+**Source URL(s):**
+- https://help.solidworks.com/2022/English/api/sldworksapi/SOLIDWORKS.Interop.sldworks~SOLIDWORKS.Interop.sldworks.IAnnotation~GetPosition.html (attempted, 403; content via search snippet only)
+
+**status:** unverified — corroborated only via a search-engine summary, not a direct
+page read; the meters unit is an inference by symmetry with `SetPosition2`, not an
+independently confirmed statement from this method's own page.
+
+---
+
+### IAnnotation::SetLeaderAttachmentPointAtIndex (sw-1xx.3)
+
+- **Interface:** IAnnotation
+- **Method:** SetLeaderAttachmentPointAtIndex
+- **Minimum SW version:** not stated in any accessible source
+
+**Signature:**
+
+```vb
+Function SetLeaderAttachmentPointAtIndex( _
+   ByVal Index As System.Integer, _
+   ByVal X As System.Double, _
+   ByVal Y As System.Double, _
+   ByVal Z As System.Double _
+) As System.Boolean
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| Index | Integer | n/a | Yes | Index of the leader point to set (a multi-point leader, e.g. GTol all-around, has more than one) | |
+| X | Double | meters (by analogy with every other sheet/model-space coordinate in this API — not independently restated on the page snippet) | Yes | X coordinate of the leader attachment point | |
+| Y | Double | meters (by analogy) | Yes | Y coordinate | |
+| Z | Double | meters (by analogy) | Yes | Z coordinate | |
+
+**Returns:** `Boolean` — `True` if the leader attached successfully, `False` if not
+(failure cause not stated in any accessible source).
+
+**Prior selection required:** None via `ISelectionMgr` — invoked directly on an
+already-held `IAnnotation` reference with an **explicit coordinate**, not a picked
+entity. This is the key gotcha: despite the name's resemblance to the
+selection-driven "attach to this picked entity" pattern used elsewhere in this
+dossier (`InsertGtol`, `InsertDatumTargetSymbol3`), it is not selection-based — the
+tool layer's `add_note` therefore accepts an explicit leader attachment point
+(`leader["x"]`/`["y"]`/`["z"]`, caller's unit), not an entity reference.
+
+**Source URL(s):**
+- https://help.solidworks.com/2018/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IAnnotation~SetLeaderAttachmentPointAtIndex.html (attempted, 403; signature via search snippet only, which quoted a real worked-example call: `swAnnot.SetLeaderAttachmentPointAtIndex(0, 0.687021207260901, 0.599975917260352, 250.03275)`)
+
+**status:** unverified — corroborated only via a search-engine snippet quoting a
+real call site (confirming parameter count/order), not a direct page read; the
+meters unit on X/Y/Z is an inference by analogy, not independently confirmed.
+
+---
+
+### INote::GetText + SetText (sw-1xx.3)
+
+- **Interface:** INote
+- **Method:** GetText / SetText, plus the compound-note family
+  (`IsCompoundNote`/`GetTextCount`/`GetTextAtIndex`/`SetTextAtIndex`)
+- **Minimum SW version:** not stated in any accessible source
+
+**Signature:**
+
+```vb
+Function GetText() As System.String
+Function SetText(ByVal Text As System.String) As System.Boolean
+Function IsCompoundNote() As System.Boolean
+Function GetTextCount() As System.Integer
+Function GetTextAtIndex(ByVal Index As System.Integer) As System.String
+Function SetTextAtIndex(ByVal Index As System.Integer, ByVal Text As System.String) As System.Boolean
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| Text (SetText/SetTextAtIndex) | String | n/a | Yes | New note text. A literal line-feed character (`vbLf`/`Chr(10)`) inside the string starts a new line -- confirmed via a search-summarized official example pattern (`"First Line" & vbLf & "Second Line"`). Python's `\n` **is** `Chr(10)`, so this project's `add_note`/`edit_note` `text` argument needs no transformation, passed straight through. | |
+| Index (GetTextAtIndex/SetTextAtIndex) | Integer | n/a | Yes | 1-based run index, per the official "Change Note Text Example (VBA)" page's own loop (`For i = 1 To nTextCount`) | |
+
+**Returns:** `GetText`/`GetTextAtIndex` — `String`. `SetText`/`SetTextAtIndex` —
+`Boolean` success flag. `IsCompoundNote` — `Boolean`, `True` for a note built from
+multiple independently-formatted/linked text runs (e.g. mixing literal text with
+more than one `$PRP`-style link in the same note). `GetTextCount` — `Integer`, the
+number of runs (only meaningful when `IsCompoundNote` is `True`).
+
+**Prior selection required:** None — read/write directly on an already-held `INote`
+reference.
+
+**Source URL(s):**
+- https://help.solidworks.com/2024/English/api/sldworksapi/Change_Note_Text_Example_VB.htm (attempted, 403; quoted verbatim via search snippet):
+  ```vb
+  If swNote.IsCompoundNote Then
+      nTextCount = swNote.GetTextCount
+      For i = 1 To nTextCount
+          sNoteText = swNote.GetTextAtIndex(i)
+          DoReplaceString sNoteText
+          swNote.SetTextAtIndex i, sNoteText
+      Next i
+  Else
+      sNoteText = swNote.GetText
+      DoReplaceString sNoteText
+      swNote.SetText sNoteText
+  End If
+  ```
+
+**status:** unverified — corroborated only via a search-engine snippet quoting the
+official example verbatim, not a direct page read. A tool layer only creating
+single-run notes via `CreateText2` (sw-1xx.3's scope) does not need the compound
+branch, but `list_notes`/`edit_note` should not assume every note it walks is
+simple — `_describe_note` reports `is_compound` for that reason.
+
+**Gotchas:**
+- **`<FONT>` inline bold/italic/underline instruction** — confirmed via a direct,
+  successful fetch of an independent secondary source (not help.solidworks.com, so
+  not subject to the WAF block above):
+  https://www.codestack.net/solidworks-api/document/notes/format-note-text/. Quoted
+  verbatim from that page: the `<FONT>` instruction "has 2 attributes" — `effect`
+  (`U` underline / `RU` remove underline) and `style` (`B` bold / `RB` remove bold /
+  `I` italic / `RI` remove italic) — and "All the text after the `<FONT>`
+  instruction will be formatted according to the value of `effect` and `style`"
+  until the next `<FONT>` tag. Worked example from that page:
+  ```
+  <FONT effect=U>First Line Underline
+  <FONT style=B effect=RU>Second Line Bold
+  <FONT style=RB><FONT style=I>Third Line Italic
+  ```
+  Each dimension (bold vs. italic vs. underline) is independent — chaining
+  `<FONT style=B><FONT style=I>` at the start of a string is this dossier's inferred
+  way to request **both** bold and italic together (the page's own examples never
+  combine two `style=` values in one instruction, only in two consecutive tags),
+  since `style=` only documents one value per instruction. The page frames `<FONT>`
+  as a general note-text parsing feature (demonstrated there via
+  `PropertyLinkedText`), not confirmed independently against plain `SetText`/
+  `CreateText2` `TextString` content — `add_note`'s bold/italic support is therefore
+  an inference by analogy, flagged here rather than asserted as directly confirmed.
+
 ## GD&T (geometric tolerancing)
 
 `IModelDocExtension::CreateGTOL` does not exist — absent from the `IModelDocExtension`
@@ -3074,6 +3364,32 @@ low-value shape members (`swNO_LEADER`/`swSTRAIGHT`/`swBENT`/`swUNDERLINED`/
 `swSPLINE`/`swVDA`).
 
 Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swLeaderStyle_e.html
+
+#### swLeaderSide_e (sw-1xx.3)
+
+Consumed by `IAnnotation::SetLeader3`'s `LeaderSide` parameter (documented above,
+"Annotation object manipulation" section). **Numeric values not found** — every
+`help.solidworks.com` fetch attempted for this enum's own swconst page returned the
+same WAF 403 this dossier's intro and the "Note enumeration, formatting, and
+editing" record above both document; no secondary mirror with the numeric
+assignments was found either. Member *names* only, corroborated by two independent
+search-engine hits quoting real usage (`swLeaderSide_e.swLS_SMART` cast to
+`Integer` in a real code sample; a second hit naming all three members together):
+
+| Value | Number | Meaning |
+| --- | --- | --- |
+| swLS_LEFT | unknown | Leader attaches on the left side |
+| swLS_RIGHT | unknown | Leader attaches on the right side |
+| swLS_SMART | unknown | SolidWorks picks the side automatically |
+
+Source (attempted, returns error):
+https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swLeaderSide_e.html
+
+**status:** unverified — member names only, no numeric values from any accessible
+source. `drawings.py`'s `_LEADER_SIDE_DEFAULT` picks a fixed internal value (not
+tied to any of the three names above with confidence) rather than guess which name
+maps to which number; do not add a public `LeaderSide`-selecting parameter from
+this table without re-deriving the real values first.
 
 #### swGtolShape_e
 

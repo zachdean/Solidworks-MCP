@@ -73,6 +73,10 @@ EXPECTED_TOOL_NAMES = {
     "set_dimension_value",
     "set_dimension_text",
     "autodimension_view",
+    "add_note",
+    "add_property_note",
+    "list_notes",
+    "edit_note",
     # Sketch Tools
     "create_sketch",
     "create_sketch_on_face",

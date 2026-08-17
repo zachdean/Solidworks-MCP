@@ -2,7 +2,8 @@
 Drawing Annotation Tools
 --------------------------
 insert_model_items, add_dimension, add_ordinate_dimensions,
-set_dimension_value, set_dimension_text, autodimension_view.
+set_dimension_value, set_dimension_text, autodimension_view, add_note,
+add_property_note, list_notes, edit_note.
 
 Backed by `DrawingOperations` (solidworks_mcp/automation/drawings.py), per
 docs/api/03-annotations.md.
@@ -297,4 +298,196 @@ def autodimension_view(arguments: dict) -> Dict:
         arguments.get("entities", "all"),
         arguments.get("horizontal_placement", "above"),
         arguments.get("vertical_placement", "left"),
+    )
+
+
+_LEADER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "style": {
+            "type": "string", "default": "none",
+            "description": "'none' (default), 'straight', 'bent', or 'underline'.",
+        },
+        "x": {"type": "number", "description": "Leader attachment point, caller's default unit. Requires y too."},
+        "y": {"type": "number", "description": "Leader attachment point, caller's default unit. Requires x too."},
+        "z": {"type": "number", "description": "Leader attachment point, caller's default unit. Defaults to 0."},
+        "smart_arrow": {
+            "type": "boolean", "default": True,
+            "description": "True (default) for SolidWorks' smart arrowhead style.",
+        },
+        "dashed": {"type": "boolean", "default": False, "description": "True for a dashed leader line."},
+        "perpendicular": {
+            "type": "boolean", "default": False,
+            "description": "True for a perpendicular bent leader (rarely meaningful on notes).",
+        },
+        "all_around": {
+            "type": "boolean", "default": False,
+            "description": "True for an all-around leader symbol (rarely meaningful on notes).",
+        },
+    },
+}
+
+
+@tool(
+    name="add_note",
+    description=(
+        "Add a general or flag note to a drawing sheet via IDrawingDoc::"
+        "CreateText2. x/y place the note relative to the sheet's lower-left "
+        "corner, caller's default unit. leader (optional) attaches a leader "
+        "with a style ('none'/'straight'/'bent'/'underline') and an "
+        "optional attachment point + arrow style -- see the leader schema. "
+        "text accepts '\\n' for multi-line notes (SolidWorks' own line-feed "
+        "convention -- passed straight through, no translation needed). "
+        "bold/italic wrap the text in SolidWorks' '<FONT style=B/I>' inline "
+        "formatting instruction. Returns the note's SolidWorks-assigned "
+        "name (data.name, e.g. 'Note1') -- pass that to edit_note to update "
+        "it later."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "Note text. '\\n' starts a new line."},
+            "x": {"type": "number", "description": "Placement, caller's default unit."},
+            "y": {"type": "number", "description": "Placement, caller's default unit."},
+            "view_name": {
+                "type": "string",
+                "description": "Drawing view to activate first, so the note is authored in its context. Omit for whatever's already active.",
+            },
+            "leader": _LEADER_SCHEMA,
+            "height": {
+                "type": "number",
+                "description": "Text height, caller's default unit. Omit for the document's default note height.",
+            },
+            "angle": {"type": "number", "default": 0, "description": "Text angle, degrees."},
+            "bold": {"type": "boolean", "default": False},
+            "italic": {"type": "boolean", "default": False},
+            "layer": {"type": "string", "description": "Layer name (IAnnotation::Layer) to file the note under."},
+        },
+        "required": ["text", "x", "y"],
+    },
+)
+def add_note(arguments: dict) -> Dict:
+    return sw_automation.add_note(
+        arguments.get("text"),
+        arguments.get("x"),
+        arguments.get("y"),
+        arguments.get("view_name"),
+        arguments.get("leader"),
+        arguments.get("height"),
+        arguments.get("angle", 0),
+        arguments.get("bold", False),
+        arguments.get("italic", False),
+        arguments.get("layer"),
+    )
+
+
+@tool(
+    name="add_property_note",
+    description=(
+        "Add a note whose text is entirely a linked custom-property "
+        "reference -- the mechanism that keeps a title block's 'Weight'/"
+        "'Material'/etc. fields live against the model, via INote::"
+        "PropertyLinkedText. source='sheet' (default) emits "
+        "$PRPSHEET:\"property_name\" (the model shown in the sheet's "
+        "'model shown in' setting -- what title blocks use for part "
+        "properties); source='model' emits $PRP:\"property_name\" (the "
+        "drawing document's own properties). prefix/suffix add literal "
+        "text around the link, e.g. prefix='Weight: '. Accepts the same "
+        "view_name/leader/height/angle/bold/italic/layer options as "
+        "add_note."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "property_name": {"type": "string", "description": "Custom property name to link, e.g. 'SW-Mass'."},
+            "x": {"type": "number", "description": "Placement, caller's default unit."},
+            "y": {"type": "number", "description": "Placement, caller's default unit."},
+            "source": {
+                "type": "string", "default": "sheet",
+                "description": "'sheet' (default, emits $PRPSHEET:...) or 'model' (emits $PRP:...).",
+            },
+            "prefix": {"type": "string", "default": "", "description": "Literal text before the link."},
+            "suffix": {"type": "string", "default": "", "description": "Literal text after the link."},
+            "view_name": {"type": "string", "description": "Same as add_note's view_name."},
+            "leader": _LEADER_SCHEMA,
+            "height": {"type": "number", "description": "Same as add_note's height."},
+            "angle": {"type": "number", "default": 0, "description": "Same as add_note's angle."},
+            "bold": {"type": "boolean", "default": False},
+            "italic": {"type": "boolean", "default": False},
+            "layer": {"type": "string", "description": "Same as add_note's layer."},
+        },
+        "required": ["property_name", "x", "y"],
+    },
+)
+def add_property_note(arguments: dict) -> Dict:
+    note_opts = {}
+    for key in ("view_name", "leader", "height", "angle", "bold", "italic", "layer"):
+        if key in arguments:
+            note_opts[key] = arguments[key]
+    return sw_automation.add_property_note(
+        arguments.get("property_name"),
+        arguments.get("x"),
+        arguments.get("y"),
+        arguments.get("source", "sheet"),
+        arguments.get("prefix", ""),
+        arguments.get("suffix", ""),
+        **note_opts,
+    )
+
+
+@tool(
+    name="list_notes",
+    description=(
+        "Enumerate existing notes -- text, position, layer -- via IView::"
+        "GetFirstNote/INote::GetNext, so an LLM can find (and then "
+        "edit_note) a template's placeholder notes without a mouse. "
+        "view_name restricts to one view's notes; sheet_name restricts to "
+        "one sheet's real views plus its sheet-level/title-block notes. "
+        "Omit both for every note in the whole document."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "view_name": {"type": "string", "description": "Restrict to this view's notes."},
+            "sheet_name": {"type": "string", "description": "Restrict to this sheet's notes. Ignored if view_name is also given."},
+        },
+        "required": [],
+    },
+)
+def list_notes(arguments: dict) -> Dict:
+    return sw_automation.list_notes(
+        arguments.get("view_name"),
+        arguments.get("sheet_name"),
+    )
+
+
+@tool(
+    name="edit_note",
+    description=(
+        "Update an existing note's text and/or position -- how a caller "
+        "fills in a template's placeholder notes without recreating them. "
+        "note_name is IAnnotation::GetName's value (e.g. 'Note1'), as "
+        "returned by add_note/add_property_note's data.name or list_notes' "
+        "data.notes[i].name. Unrecognized: fails listing every note name "
+        "found in the document. text accepts '\\n' for multi-line, same as "
+        "add_note. x/y may be given alone -- the other axis is read back "
+        "from the note's current position and left unchanged."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "note_name": {"type": "string", "description": "IAnnotation::GetName's value for the target note."},
+            "text": {"type": "string", "description": "New text. '\\n' starts a new line."},
+            "x": {"type": "number", "description": "New position, caller's default unit."},
+            "y": {"type": "number", "description": "New position, caller's default unit."},
+        },
+        "required": ["note_name"],
+    },
+)
+def edit_note(arguments: dict) -> Dict:
+    return sw_automation.edit_note(
+        arguments.get("note_name"),
+        arguments.get("text"),
+        arguments.get("x"),
+        arguments.get("y"),
     )

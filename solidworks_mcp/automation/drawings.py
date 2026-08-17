@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .. import com_backend
 from .com_params import (
     ComSignature, Param, REQUIRED, enum_to_int, to_bool, to_meters, to_optional_object,
+    to_radians,
 )
 from ..constants import SwErrors, SwDocumentTypes, SwFileTypes
 from ..constants_drawing import (
@@ -37,6 +38,7 @@ from ..constants_drawing import (
     SwImportModelItemsSource,
     SwInConfigurationOpts,
     SwInsertAnnotation,
+    SwLeaderStyle,
     SwSaveAsOptions,
     SwSaveAsVersion,
     SwSetValueInConfiguration,
@@ -78,6 +80,28 @@ _PAPER_SIZES = {
 # `_VIEW_ENTITY_TYPES`.
 _OPEN_DOC_OPTION_READ_ONLY = 2
 _OPEN_DOC_OPTION_LOAD_LIGHTWEIGHT = 128
+
+# `IAnnotation::SetLeader3`'s `LeaderSide` argument (`swLeaderSide_e`) has three
+# confirmed *member names* (`swLS_LEFT`/`swLS_RIGHT`/`swLS_SMART`, per
+# docs/api/03-annotations.md's Enums section) but no accessible source states
+# their numeric values -- the swconst page itself hit the same WAF block noted
+# throughout this dossier. `add_note` does not expose `LeaderSide` as a public
+# parameter (not required by sw-1xx.3's acceptance criteria); this is this
+# wrapper's own convention value for "let SolidWorks pick a side", same
+# unverified-convention caveat as `_OPEN_DOC_OPTION_READ_ONLY` above -- do not
+# treat this as a confirmed `swLS_*` mapping.
+_LEADER_SIDE_DEFAULT = 0
+
+# `IAnnotation::SetLeader3`'s `LeaderStyle` argument -- the four shapes
+# `add_note`'s `leader["style"]` accepts, mapped to `SwLeaderStyle`'s low-value
+# (non-bitmask) members. Per that record's own Gotchas, all four are valid on
+# notes specifically ("Only notes support underline leaders").
+_NOTE_LEADER_STYLES = {
+    "none": SwLeaderStyle.swNO_LEADER,
+    "straight": SwLeaderStyle.swSTRAIGHT,
+    "bent": SwLeaderStyle.swBENT,
+    "underline": SwLeaderStyle.swUNDERLINED,
+}
 
 # `IDrawingDoc::CreateDrawViewFromModelView3`'s `ViewName` argument accepts the
 # asterisk-prefixed standard-orientation names (docs/api/02-views.md's "Front"
@@ -4140,3 +4164,667 @@ class DrawingOperations:
             True, f"Autodimensioned view {view_name!r} ({scheme_key})",
             SwErrors.swSuccess, data,
         )
+
+    # ========================================================================
+    # Note tools (sw-1xx.3)
+    # ========================================================================
+
+    @staticmethod
+    def _format_note_text(text: str, bold: bool, italic: bool) -> str:
+        """Prepend the `<FONT style=...>` instruction(s) `bold`/`italic` ask
+        for -- per docs/api/03-annotations.md's "Note enumeration, formatting,
+        and editing" record, `style=B`/`style=I` are independent toggles, so
+        requesting both chains two instructions rather than combining values
+        in one. Neither flag set returns `text` unchanged."""
+        prefix = ""
+        if bold:
+            prefix += "<FONT style=B>"
+        if italic:
+            prefix += "<FONT style=I>"
+        return f"{prefix}{text}"
+
+    def _parse_leader(self, leader: Optional[Dict[str, Any]]) -> Tuple[Optional[Dict], Optional[Dict]]:
+        """Validate `add_note`/`add_property_note`'s `leader` argument before
+        any COM call. `None` -- the common case -- passes through as `(None,
+        None)`, which downstream leaves the freshly-created note's default
+        (leaderless) state untouched, satisfying "leader=None produces a
+        leaderless note" without an extra `SetLeader3` round-trip.
+
+        `leader` shape: `{"style": "none"|"straight"|"bent"|"underline",
+        "x"/"y": optional attachment point (caller's unit, both-or-neither),
+        "z": optional, default 0, "smart_arrow": bool default True (the
+        confirmed `SetLeader3` "arrow style" parameter is a bool, not an
+        enum -- see that record's own Gotchas), "dashed"/"perpendicular"/
+        "all_around": bool, default False}.
+        """
+        if leader is None:
+            return None, None
+        if not isinstance(leader, dict):
+            return None, self._result(
+                False, f"leader must be an object or null, got {type(leader).__name__}",
+                SwErrors.swInvalidInput, {"leader": leader},
+            )
+
+        style_raw = leader.get("style", "none")
+        style_key = (style_raw or "none").strip().lower() if isinstance(style_raw, str) else ""
+        style_enum = _NOTE_LEADER_STYLES.get(style_key)
+        if style_enum is None:
+            return None, self._result(
+                False,
+                f"Unknown leader style {style_raw!r}; expected one of "
+                f"{sorted(_NOTE_LEADER_STYLES)!r}",
+                SwErrors.swInvalidInput, {"leader": leader},
+            )
+
+        x, y = leader.get("x"), leader.get("y")
+        if (x is None) != (y is None):
+            return None, self._result(
+                False, "leader x/y must both be given or both omitted",
+                SwErrors.swInvalidInput, {"leader": leader},
+            )
+        if x is not None and (
+            isinstance(x, bool) or isinstance(y, bool)
+            or not isinstance(x, (int, float)) or not isinstance(y, (int, float))
+        ):
+            return None, self._result(
+                False, f"leader x/y must be numbers, got x={x!r}, y={y!r}",
+                SwErrors.swInvalidInput, {"leader": leader},
+            )
+        z = leader.get("z", 0)
+        if isinstance(z, bool) or not isinstance(z, (int, float)):
+            z = 0
+
+        return {
+            "style_key": style_key, "style_enum": style_enum,
+            "x": x, "y": y, "z": z,
+            "smart_arrow": bool(leader.get("smart_arrow", True)),
+            "dashed": bool(leader.get("dashed", False)),
+            "perpendicular": bool(leader.get("perpendicular", False)),
+            "all_around": bool(leader.get("all_around", False)),
+        }, None
+
+    def _validate_note_geometry(self, x: float, y: float, height: Optional[float],
+                                 angle: float) -> Optional[Dict]:
+        """Type/range-check `add_note`/`add_property_note`'s `x`/`y`/`height`/
+        `angle` -- split out from `_create_note_object` so callers can run it
+        *before* any COM call (including `select_view_by_name`'s
+        `ActivateView`), per the working agreement's "validate before COM
+        calls" rule. Returns an error dict, or `None` if everything checks out.
+        """
+        if isinstance(x, bool) or isinstance(y, bool) \
+                or not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+            return self._result(
+                False, f"x/y must be numbers, got x={x!r}, y={y!r}", SwErrors.swInvalidInput,
+            )
+        if height is not None and (
+            isinstance(height, bool) or not isinstance(height, (int, float)) or height < 0
+        ):
+            return self._result(
+                False, f"height must be a non-negative number, got {height!r}",
+                SwErrors.swInvalidInput,
+            )
+        if isinstance(angle, bool) or not isinstance(angle, (int, float)):
+            return self._result(
+                False, f"angle must be a number, got {angle!r}", SwErrors.swInvalidInput,
+            )
+        return None
+
+    def _create_note_object(self, doc, text_string: str, x: float, y: float,
+                             height: Optional[float], angle: float) -> Tuple[Any, Optional[Dict]]:
+        """`IDrawingDoc::CreateText2(TextString, TextX, TextY, TextZ, TextHeight,
+        TextAngle) As INote` -- shared by `add_note`/`add_property_note`.
+
+        `x`/`y` are sheet-space coordinates relative to the sheet's
+        lower-left corner (per the dossier's own Remarks quote), in the
+        caller's default unit, converted to meters here; `TextZ` is always
+        `0.0` (2D sheet space). `height` (caller's unit) converts to meters,
+        or `0.0` -- SolidWorks' own "use the document's default note height"
+        sentinel, by analogy with this project's other optional-dimension
+        parameters -- when omitted. `angle` (degrees) converts to radians.
+
+        Assumes `x`/`y`/`height`/`angle` were already validated via
+        `_validate_note_geometry` -- callers that skip that step (there are
+        none in this file) would still be caught here, just after any prior
+        COM call the caller made.
+        """
+        geometry_err = self._validate_note_geometry(x, y, height, angle)
+        if geometry_err:
+            return None, geometry_err
+
+        x_m, y_m = self._units.to_meters(x), self._units.to_meters(y)
+        height_m = self._units.to_meters(height) if height is not None else 0.0
+        angle_rad = to_radians(angle)
+
+        try:
+            note = doc.CreateText2(text_string, x_m, y_m, 0.0, height_m, angle_rad)
+        except Exception as e:
+            logger.error(f"add_note: CreateText2 error: {e}")
+            return None, self._result(False, f"Create note error: {e}", SwErrors.swFeatureError)
+
+        if note is None:
+            return None, self._result(
+                False, "CreateText2 returned nothing -- note not created", SwErrors.swFeatureError,
+            )
+        return note, None
+
+    def _finalize_note(self, note: Any, leader_parsed: Optional[Dict],
+                        layer: Optional[str]) -> Tuple[Any, Optional[Dict]]:
+        """Apply `leader_parsed`/`layer` to a freshly-created `note` via its
+        `IAnnotation` wrapper (`INote::GetAnnotation`), and return that
+        wrapper (for name/position read-back) -- shared tail of
+        `add_note`/`add_property_note`.
+
+        Returns `(annotation, None)` on success -- `annotation` may be
+        `None` if `GetAnnotation` itself came back empty, which is only a
+        hard failure when there was a `leader`/`layer` to apply; a caller
+        that got this far with neither still gets `(None, None)` back
+        rather than an error, since nothing needed the wrapper.
+        """
+        try:
+            annotation = note.GetAnnotation()
+        except Exception as e:
+            logger.error(f"add_note: GetAnnotation error: {e}")
+            return None, self._result(False, f"Get note annotation error: {e}", SwErrors.swFeatureError)
+
+        if leader_parsed is None and not layer:
+            return annotation, None
+
+        if annotation is None:
+            return None, self._result(
+                False, "Note has no IAnnotation wrapper (GetAnnotation returned nothing) "
+                "-- cannot set leader/layer", SwErrors.swFeatureError,
+            )
+
+        if leader_parsed is not None:
+            try:
+                status = annotation.SetLeader3(
+                    int(leader_parsed["style_enum"]), _LEADER_SIDE_DEFAULT,
+                    leader_parsed["smart_arrow"], leader_parsed["perpendicular"],
+                    leader_parsed["all_around"], leader_parsed["dashed"],
+                )
+            except Exception as e:
+                logger.error(f"add_note: SetLeader3 error: {e}")
+                return None, self._result(False, f"Set leader error: {e}", SwErrors.swFeatureError)
+
+            status_code = int(status) if isinstance(status, (int, float)) else None
+            if status_code != 0:
+                return None, self._result(
+                    False,
+                    f"Could not set leader style {leader_parsed['style_key']!r} "
+                    f"(SetLeader3 status {status_code})",
+                    SwErrors.swFeatureError, {"status_code": status_code},
+                )
+
+            if leader_parsed["x"] is not None:
+                try:
+                    x_m = self._units.to_meters(leader_parsed["x"])
+                    y_m = self._units.to_meters(leader_parsed["y"])
+                    z_m = self._units.to_meters(leader_parsed["z"] or 0)
+                    attached = annotation.SetLeaderAttachmentPointAtIndex(0, x_m, y_m, z_m)
+                except Exception as e:
+                    logger.error(f"add_note: SetLeaderAttachmentPointAtIndex error: {e}")
+                    return None, self._result(
+                        False, f"Set leader attachment point error: {e}", SwErrors.swFeatureError,
+                    )
+                if attached is False:
+                    return None, self._result(
+                        False,
+                        "Could not set leader attachment point "
+                        "(SetLeaderAttachmentPointAtIndex returned False)",
+                        SwErrors.swFeatureError,
+                    )
+
+        if layer:
+            try:
+                annotation.Layer = layer
+            except Exception as e:
+                logger.error(f"add_note: set Layer error: {e}")
+                return None, self._result(False, f"Set layer error: {e}", SwErrors.swFeatureError)
+
+        return annotation, None
+
+    def _note_data(self, note: Any, annotation: Any, view_name: Optional[str],
+                    height: Optional[float], angle: float, bold: bool, italic: bool,
+                    layer: Optional[str]) -> Dict:
+        """Best-effort result payload shared by `add_note`/`add_property_note`
+        -- name/position read back from `annotation` (via `IAnnotation::
+        GetName`/`GetPosition`, both meters on the wire), everything else
+        just the caller's own (already-validated) arguments."""
+        name = self._read_prop(annotation, "GetName") if annotation is not None else None
+
+        x = y = None
+        position = self._read_prop(annotation, "GetPosition") if annotation is not None else None
+        if isinstance(position, (list, tuple)) and len(position) >= 2:
+            try:
+                x = self._units.from_meters(float(position[0]))
+                y = self._units.from_meters(float(position[1]))
+            except (TypeError, ValueError):
+                x = y = None
+
+        return {
+            "name": name, "view_name": view_name, "x": x, "y": y,
+            "height": height, "angle": angle, "bold": bold, "italic": italic,
+            "layer": layer or None,
+        }
+
+    def add_note(self, text: str, x: float, y: float, view_name: Optional[str] = None,
+                  leader: Optional[Dict[str, Any]] = None, height: Optional[float] = None,
+                  angle: float = 0, bold: bool = False, italic: bool = False,
+                  layer: Optional[str] = None) -> Dict:
+        """
+        Add a general/flag note to a drawing sheet via `IDrawingDoc::
+        CreateText2`, optionally with a leader and/or a layer assignment.
+
+        Args:
+            text: Note text. `\\n` (a literal line feed) is SolidWorks' own
+                multi-line separator for note text (confirmed via
+                `vbLf`/`Chr(10)` -- Python's `\\n` is the same byte, so no
+                translation happens here) -- passed straight through.
+            x, y: Placement, relative to the sheet's lower-left corner,
+                caller's default unit -- converted to meters.
+            view_name: Drawing view to activate first via
+                `select_view_by_name`, so the note is authored in that
+                view's context. Omitted: whatever view/sheet is already
+                active.
+            leader: Optional dict -- see `_parse_leader`'s docstring for the
+                full shape. `None` (default) leaves the note leaderless.
+            height: Text height, caller's default unit -- converted to
+                meters, or SolidWorks' document-default sentinel (`0.0`)
+                when omitted.
+            angle: Text angle in degrees (default `0`) -- converted to
+                radians at the COM boundary.
+            bold, italic: Wrapped as `<FONT style=B>`/`<FONT style=I>`
+                instruction(s) at the start of `text` (see
+                `_format_note_text`).
+            layer: Optional layer name (`IAnnotation::Layer`) to file the
+                note under.
+
+        Returns:
+            Result dict. `data["name"]` is the note's SolidWorks-assigned
+            name (`IAnnotation::GetName`, e.g. `"Note1"`) -- what
+            `edit_note`'s `note_name` expects. `data["x"]`/`["y"]` are read
+            back via `IAnnotation::GetPosition` rather than echoing the
+            input, so a caller sees what SolidWorks actually did with it.
+        """
+        if not isinstance(text, str):
+            return self._result(
+                False, f"text must be a string, got {type(text).__name__}",
+                SwErrors.swInvalidInput, {"text": text},
+            )
+
+        leader_parsed, leader_err = self._parse_leader(leader)
+        if leader_err:
+            return leader_err
+
+        geometry_err = self._validate_note_geometry(x, y, height, angle)
+        if geometry_err:
+            return geometry_err
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        if view_name:
+            activated = self.select_view_by_name(view_name)
+            if not activated["success"]:
+                return activated
+
+        text_string = self._format_note_text(text, bold, italic)
+        note, create_err = self._create_note_object(doc, text_string, x, y, height, angle)
+        if create_err:
+            return create_err
+
+        annotation, finalize_err = self._finalize_note(note, leader_parsed, layer)
+        if finalize_err:
+            return finalize_err
+
+        data = self._note_data(note, annotation, view_name, height, angle, bold, italic, layer)
+        data["text"] = text
+        return self._result(True, f"Added note {data['name'] or '(unnamed)'!r}",
+                             SwErrors.swSuccess, data)
+
+    def add_property_note(self, property_name: str, x: float, y: float, source: str = "sheet",
+                           prefix: str = "", suffix: str = "", **note_opts) -> Dict:
+        """
+        Convenience wrapper over `add_note` that creates a note whose text is
+        entirely a custom-property link -- the mechanism that keeps a title
+        block's "Weight"/"Material"/etc. fields live against the model.
+
+        Args:
+            property_name: Custom property name to link, e.g. `"SW-Mass"`.
+            x, y: Placement, same as `add_note`.
+            source: `"sheet"` (default) emits `$PRPSHEET:"name"` (the model
+                shown in the sheet's "Use custom property values from model
+                shown in" setting -- the one title blocks use for part
+                properties like mass/material) or `"model"` emits
+                `$PRP:"name"` (the drawing document's own properties).
+            prefix, suffix: Literal text around the link, e.g.
+                `add_property_note("SW-Mass", 10, 10, prefix="Weight: ")`.
+            **note_opts: Any of `add_note`'s other keyword arguments
+                (`view_name`, `leader`, `height`, `angle`, `bold`, `italic`,
+                `layer`) -- forwarded as-is. `bold`/`italic` are applied to
+                the linked-text string itself (see below), not to an
+                initial `CreateText2` call, since `PropertyLinkedText`
+                replaces the note's entire content.
+
+        Returns:
+            Result dict, same shape as `add_note`, plus `data["source"]`,
+            `data["property_name"]`, and `data["linked_text"]` (the exact
+            string assigned to `INote::PropertyLinkedText`).
+        """
+        prefix_map = {"sheet": "PRPSHEET", "model": "PRP"}
+        source_key = (source or "").strip().lower()
+        if source_key not in prefix_map:
+            return self._result(
+                False, f"Unknown source {source!r}; expected one of {sorted(prefix_map)!r}",
+                SwErrors.swInvalidInput, {"source": source},
+            )
+
+        note_opts = dict(note_opts)
+        bold = bool(note_opts.pop("bold", False))
+        italic = bool(note_opts.pop("italic", False))
+        leader = note_opts.pop("leader", None)
+        view_name = note_opts.pop("view_name", None)
+        height = note_opts.pop("height", None)
+        angle = note_opts.pop("angle", 0)
+        layer = note_opts.pop("layer", None)
+        if note_opts:
+            return self._result(
+                False, f"Unknown note_opts: {sorted(note_opts)!r}",
+                SwErrors.swInvalidInput, {"note_opts": note_opts},
+            )
+
+        leader_parsed, leader_err = self._parse_leader(leader)
+        if leader_err:
+            return leader_err
+
+        geometry_err = self._validate_note_geometry(x, y, height, angle)
+        if geometry_err:
+            return geometry_err
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        if view_name:
+            activated = self.select_view_by_name(view_name)
+            if not activated["success"]:
+                return activated
+
+        note, create_err = self._create_note_object(doc, "", x, y, height, angle)
+        if create_err:
+            return create_err
+
+        linked_text = self._format_note_text(
+            f'{prefix}${prefix_map[source_key]}:"{property_name}"{suffix}', bold, italic,
+        )
+        try:
+            note.PropertyLinkedText = linked_text
+        except Exception as e:
+            logger.error(f"add_property_note: PropertyLinkedText error: {e}")
+            return self._result(False, f"Link property error: {e}", SwErrors.swFeatureError,
+                                 {"linked_text": linked_text})
+
+        annotation, finalize_err = self._finalize_note(note, leader_parsed, layer)
+        if finalize_err:
+            return finalize_err
+
+        data = self._note_data(note, annotation, view_name, height, angle, bold, italic, layer)
+        data.update({
+            "source": source_key, "property_name": property_name, "linked_text": linked_text,
+        })
+        return self._result(True, f"Added property note linking {property_name!r} ({source_key})",
+                             SwErrors.swSuccess, data)
+
+    # ------------------------------------------------------------------
+    # Note discovery / editing
+    # ------------------------------------------------------------------
+
+    def _iter_document_views(self, doc):
+        """Walk every view in the document via `IDrawingDoc::GetFirstView` /
+        `IView::GetNextView` -- per docs/api/03-annotations.md's "Note
+        enumeration" record, `GetFirstView` returns the active sheet's own
+        pseudo/template view first (where sheet-level/title-block notes
+        live), then `GetNextView` walks every real view, then the next
+        sheet's own pseudo-view, and so on across the whole document."""
+        try:
+            view = doc.GetFirstView()
+        except Exception as e:
+            logger.warning(f"_iter_document_views: GetFirstView failed: {e}")
+            view = None
+        while view is not None:
+            yield view
+            try:
+                nxt = view.GetNextView()
+            except Exception as e:
+                logger.warning(f"_iter_document_views: GetNextView failed: {e}")
+                nxt = None
+            view = nxt if nxt else None
+
+    def _iter_view_notes(self, view):
+        """Walk every note attached to `view` via `IView::GetFirstNote` /
+        `INote::GetNext`."""
+        try:
+            note = view.GetFirstNote()
+        except Exception as e:
+            logger.warning(f"_iter_view_notes: GetFirstNote failed: {e}")
+            note = None
+        while note is not None:
+            yield note
+            try:
+                nxt = note.GetNext()
+            except Exception as e:
+                logger.warning(f"_iter_view_notes: GetNext failed: {e}")
+                nxt = None
+            note = nxt if nxt else None
+
+    def _describe_note(self, note: Any, view_name: Optional[str]) -> Dict:
+        """`list_notes`/`edit_note`'s per-note description: text, position,
+        layer, and the view it was found on."""
+        try:
+            annotation = note.GetAnnotation()
+        except Exception:
+            annotation = None
+
+        name = self._read_prop(annotation, "GetName") if annotation is not None else None
+        layer = self._read_prop(annotation, "Layer") if annotation is not None else None
+
+        x = y = None
+        position = self._read_prop(annotation, "GetPosition") if annotation is not None else None
+        if isinstance(position, (list, tuple)) and len(position) >= 2:
+            try:
+                x = self._units.from_meters(float(position[0]))
+                y = self._units.from_meters(float(position[1]))
+            except (TypeError, ValueError):
+                x = y = None
+
+        is_compound = bool(self._read_prop(note, "IsCompoundNote"))
+        text = self._read_prop(note, "GetText")
+
+        return {
+            "name": name, "text": text, "is_compound": is_compound,
+            "x": x, "y": y, "layer": layer or None, "view_name": view_name,
+        }
+
+    def list_notes(self, view_name: Optional[str] = None,
+                    sheet_name: Optional[str] = None) -> Dict:
+        """
+        Enumerate existing notes -- text, position, layer -- via `IView::
+        GetFirstNote`/`INote::GetNext`, so an LLM can find (and then
+        `edit_note`) a template's placeholder notes without a mouse.
+
+        Args:
+            view_name: Restrict to notes attached to this one view (the
+                view is activated first via `select_view_by_name`).
+                Mutually exclusive in effect with `sheet_name` -- if both are
+                given, `view_name` wins and `sheet_name` is ignored.
+            sheet_name: Restrict to notes on this sheet's own real views
+                plus its sheet-level/title-block notes. Omitted (with
+                `view_name` also omitted): every note in the whole document.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        notes: List[Dict] = []
+
+        if view_name:
+            activated = self.select_view_by_name(view_name)
+            if not activated["success"]:
+                return activated
+            try:
+                view = doc.ActiveDrawingView
+            except Exception as e:
+                logger.error(f"list_notes({view_name!r}) error: {e}")
+                return self._result(False, f"List notes error: {e}", SwErrors.swSelectionError)
+            notes = [self._describe_note(n, view_name) for n in self._iter_view_notes(view)]
+            return self._result(
+                True, f"{len(notes)} note(s) in view {view_name!r}", SwErrors.swSuccess,
+                {"view_name": view_name, "sheet_name": sheet_name, "notes": notes},
+            )
+
+        allowed_view_names = None
+        if sheet_name:
+            sheet, err = self._resolve_sheet(doc, sheet_name)
+            if err:
+                return err
+            try:
+                views_raw = sheet.GetViews() or []
+            except Exception as e:
+                logger.error(f"list_notes(sheet_name={sheet_name!r}) error: {e}")
+                return self._result(False, f"List notes error: {e}", SwErrors.swUnknownError)
+            allowed_view_names = {
+                self._read_prop(v, "GetName2") for v in views_raw
+                if self._read_prop(v, "GetName2")
+            }
+
+        sheet_type_code = int(SwDrawingViewTypes.swDrawingSheet)
+        for view in self._iter_document_views(doc):
+            v_name = self._read_prop(view, "GetName2")
+            type_code = self._read_prop(view, "Type")
+            is_sheet_pseudo = (
+                isinstance(type_code, (int, float)) and not isinstance(type_code, bool)
+                and int(type_code) == sheet_type_code
+            )
+            include = True
+            if allowed_view_names is not None:
+                include = (v_name in allowed_view_names) or (is_sheet_pseudo and v_name == sheet_name)
+            if include:
+                notes.extend(self._describe_note(n, v_name) for n in self._iter_view_notes(view))
+
+        return self._result(
+            True, f"{len(notes)} note(s)" + (f" on sheet {sheet_name!r}" if sheet_name else ""),
+            SwErrors.swSuccess, {"view_name": view_name, "sheet_name": sheet_name, "notes": notes},
+        )
+
+    def edit_note(self, note_name: str, text: Optional[str] = None,
+                   x: Optional[float] = None, y: Optional[float] = None) -> Dict:
+        """
+        Update an existing note's text and/or position -- how a caller fills
+        in a template's placeholder notes (e.g. a title block authored with
+        a `"<PART NAME>"` placeholder note that already carries the right
+        `$PRPSHEET` links elsewhere) without recreating them.
+
+        Args:
+            note_name: `IAnnotation::GetName`'s value for the target note
+                (e.g. `"Note1"`, or whatever it was renamed to) -- as
+                returned by `add_note`/`add_property_note`'s `data["name"]`
+                or `list_notes`' `data["notes"][i]["name"]`. Unrecognized:
+                fails with `swInvalidInput` listing every note name found in
+                the document, rather than a bare "not found".
+            text: New text (`INote::SetText`) -- same `\\n` multi-line
+                convention as `add_note`.
+            x, y: New position, caller's default unit -- converted to
+                meters. Either may be given alone; the other axis (and Z)
+                are read back from the note's current position
+                (`IAnnotation::GetPosition`) and left unchanged.
+
+        Returns:
+            Result dict. Fails with `swFeatureError` if `SetText`/
+            `SetPosition2` themselves report failure (SolidWorks declines
+            without raising for e.g. a locked/read-only note).
+        """
+        if text is None and x is None and y is None:
+            return self._result(
+                False, "Specify at least one of text/x/y", SwErrors.swInvalidInput,
+                {"note_name": note_name},
+            )
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        target_note = None
+        target_annotation = None
+        available_names: List[str] = []
+        for view in self._iter_document_views(doc):
+            for note in self._iter_view_notes(view):
+                try:
+                    annotation = note.GetAnnotation()
+                except Exception:
+                    annotation = None
+                name = self._read_prop(annotation, "GetName") if annotation is not None else None
+                if name:
+                    available_names.append(name)
+                if name == note_name:
+                    target_note, target_annotation = note, annotation
+                    break
+            if target_note is not None:
+                break
+
+        if target_note is None:
+            return self._result(
+                False,
+                f"Note {note_name!r} not found; available notes: {sorted(set(available_names))!r}",
+                SwErrors.swInvalidInput,
+                {"note_name": note_name, "available_notes": sorted(set(available_names))},
+            )
+
+        data: Dict[str, Any] = {"note_name": note_name}
+
+        if text is not None:
+            try:
+                set_ok = target_note.SetText(text)
+            except Exception as e:
+                logger.error(f"edit_note({note_name!r}) SetText error: {e}")
+                return self._result(False, f"Set note text error: {e}", SwErrors.swFeatureError, data)
+            if set_ok is False:
+                return self._result(
+                    False, f"Could not set text on note {note_name!r} (SetText returned False)",
+                    SwErrors.swFeatureError, data,
+                )
+            data["text"] = text
+
+        if x is not None or y is not None:
+            if target_annotation is None:
+                return self._result(
+                    False, f"Note {note_name!r} has no IAnnotation wrapper -- cannot reposition",
+                    SwErrors.swFeatureError, data,
+                )
+            try:
+                current = target_annotation.GetPosition()
+            except Exception:
+                current = None
+            if not isinstance(current, (list, tuple)) or len(current) < 3:
+                current = (0.0, 0.0, 0.0)
+
+            x_m = self._units.to_meters(x) if x is not None else current[0]
+            y_m = self._units.to_meters(y) if y is not None else current[1]
+            z_m = current[2]
+
+            try:
+                moved = target_annotation.SetPosition2(x_m, y_m, z_m)
+            except Exception as e:
+                logger.error(f"edit_note({note_name!r}) SetPosition2 error: {e}")
+                return self._result(False, f"Set note position error: {e}", SwErrors.swFeatureError, data)
+            if moved is False:
+                return self._result(
+                    False, f"Could not reposition note {note_name!r} (SetPosition2 returned False)",
+                    SwErrors.swFeatureError, data,
+                )
+            if x is not None:
+                data["x"] = x
+            if y is not None:
+                data["y"] = y
+
+        return self._result(True, f"Updated note {note_name!r}", SwErrors.swSuccess, data)
