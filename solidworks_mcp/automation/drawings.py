@@ -4,8 +4,11 @@ SolidWorks Drawing Operations
 Access and operate on drawing (.slddrw) documents.
 """
 
+import datetime
+import json
 import os
 import logging
+import re
 import string
 from contextlib import ExitStack
 from math import ceil, sqrt
@@ -225,6 +228,38 @@ _EDRAWINGS_ADDIN_ERROR_BITS = (
     | int(SwFileSaveError.swFileSaveAsBadEDrawingsVersion)
     | int(SwFileSaveError.swFileSaveAsNotSupported)
 )
+
+
+_BATCH_EXPORT_FORMAT_EXTENSIONS = {
+    "pdf": ".pdf",
+    "dxf": ".dxf",
+    "dwg": ".dwg",
+    "edrawings": ".edrw",
+}
+
+# Characters illegal in a Windows file/directory name, plus C0 control
+# characters -- `batch_export_pack`'s filename_pattern tokens (a sheet name
+# in particular) are caller/model-controlled data, not a path this project
+# constructs itself, so each resolved token is sanitized before it ever
+# reaches `os.path.join` rather than trusting it not to contain `/`, `\`, or
+# `:` (which could otherwise escape `output_dir` or be misread as a drive/
+# alternate-data-stream separator).
+_ILLEGAL_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _sanitize_filename_component(value: Any) -> str:
+    """Replace every Windows-illegal character in `value` with `_` and trim
+    the leading/trailing dots and spaces Windows also disallows at the end
+    of a name. May return an empty string -- e.g. `batch_export_pack`'s
+    `{rev}` token is legitimately `""` when no revision custom property is
+    set, and that has to stay empty here rather than being forced into a
+    literal `"_"` inside the middle of a larger pattern. Callers that need
+    a single sanitized value to *itself* be a non-empty path segment (a
+    whole formatted filename, not one token feeding into it) are
+    responsible for that fallback themselves.
+    """
+    text = _ILLEGAL_FILENAME_CHARS.sub("_", str(value))
+    return text.strip(" .")
 
 
 def _looks_like_missing_addin(message: str) -> bool:
@@ -1973,6 +2008,418 @@ class DrawingOperations:
             SwErrors.swSuccess if overall_success else SwErrors.swUnknownError,
             {"configuration": config_name, "results": results},
         )
+
+    # ========================================================================
+    # Composite batch export
+    # ========================================================================
+
+    def _resolve_batch_export_filename(
+        self, pattern: str, *, drawing: str, sheet: str, index: int, date: str, rev: str,
+    ) -> str:
+        """Resolve `batch_export_pack`'s `filename_pattern` (a `str.format`
+        template over the `{drawing}`/`{sheet}`/`{index}`/`{date}`/`{rev}`
+        tokens) into a filesystem-safe base filename (no extension).
+
+        Each token value is sanitized individually via
+        `_sanitize_filename_component` *before* substitution -- not only the
+        final formatted string -- so a `/` or `:` inside a sheet name can't
+        be read as a path separator once it lands inside the larger pattern
+        string. The fully-formatted result is sanitized once more afterward
+        to catch anything the caller's own pattern literal introduced.
+
+        Raises:
+            ValueError: if `pattern` references any token other than the
+                five documented ones (an unresolvable `str.format` field).
+        """
+        tokens = {
+            "drawing": _sanitize_filename_component(drawing),
+            "sheet": _sanitize_filename_component(sheet),
+            "index": index,
+            "date": date,
+            "rev": _sanitize_filename_component(rev),
+        }
+        try:
+            name = pattern.format(**tokens)
+        except (KeyError, IndexError) as e:
+            raise ValueError(
+                f"filename_pattern {pattern!r} references an unknown token: {e}; "
+                f"supported tokens are {{drawing}}, {{sheet}}, {{index}}, {{date}}, {{rev}}"
+            )
+        # Unlike each individual token above, the fully-formatted name must
+        # not be empty -- it's used directly as a path segment.
+        return _sanitize_filename_component(name) or "_"
+
+    def _save_native_copy(self, doc: Any, path: str) -> Dict:
+        """Save a `.SLDDRW` copy of `doc` at `path` for `batch_export_pack`'s
+        `include_native`, via `IModelDocExtension::SaveAs3` with
+        `swSaveAsOptions_Silent | swSaveAsOptions_Copy`.
+
+        Unlike `save_drawing`'s plain `Silent`-only `Save3`/`SaveAs3` (which
+        re-points the open document at a given `filepath`), the `Copy` bit
+        here writes `path` as a side copy and leaves the active document's
+        own identity/path untouched -- the behavior an "archive copy" of a
+        drawing that's still being worked on needs. Otherwise mirrors
+        `export_pdf`'s `Errors`/`Warnings` byref decoding and on-disk
+        existence verification.
+        """
+        errors = com_backend.byref_int()
+        warnings = com_backend.byref_int()
+        try:
+            export_data = com_backend.null_dispatch()
+            advanced_options = com_backend.null_dispatch()
+            options = (
+                int(SwSaveAsOptions.swSaveAsOptions_Silent)
+                | int(SwSaveAsOptions.swSaveAsOptions_Copy)
+            )
+            saved = doc.Extension.SaveAs3(
+                path, int(SwSaveAsVersion.swSaveAsCurrentVersion), options,
+                export_data, advanced_options, errors, warnings,
+            )
+        except Exception as e:
+            logger.error(f"batch_export_pack native archive save error: {e}")
+            return self._result(
+                False, f"Native archive save error: {e}", SwErrors.swFileSaveError)
+
+        error_code = int(errors.value or 0)
+        warning_code = int(warnings.value or 0)
+        decoded = decode_save_error(error_code)
+        data = {
+            "path": path, "errors": error_code, "warnings": warning_code,
+            "decoded_errors": decoded,
+        }
+
+        if not saved or error_code != 0:
+            reason = decoded if error_code != 0 else "SaveAs3 returned false"
+            return self._result(
+                False, f"Native archive save failed: {reason}", SwErrors.swFileSaveError, data)
+
+        if not os.path.exists(path):
+            return self._result(
+                False,
+                f"SaveAs3 reported success but no file was written to {path!r}",
+                SwErrors.swExportError, data,
+            )
+
+        data["size_bytes"] = os.path.getsize(path)
+        return self._result(True, f"Saved native archive: {path}", SwErrors.swSuccess, data)
+
+    def batch_export_pack(
+        self, output_dir: str, formats: Optional[List[str]] = None,
+        per_sheet: bool = False, filename_pattern: str = "{drawing}_{sheet}",
+        include_native: bool = True, rebuild_first: bool = True,
+        overwrite: bool = False,
+    ) -> Dict:
+        """
+        Export every deliverable for the active drawing in one call -- a
+        genuinely higher-level tool, not a raw API wrapper, so a caller
+        doesn't have to orchestrate N per-sheet/per-format calls to
+        `export_pdf`/`export_dxf_dwg`/`export_edrawings` itself. Builds on
+        those three tools plus `rebuild_document`, `activate_sheet`, and
+        `get_custom_properties`; the only COM this method makes directly is
+        `IModelDoc2::GetTitle`/`IDrawingDoc::GetSheetNames` (to resolve
+        filename tokens) and, for `include_native`, its own `SaveAs3` copy
+        (see `_save_native_copy`).
+
+        Per this project's "continue on a per-file failure" rule, one file
+        failing does not abort the batch -- every other file is still
+        attempted, and the failure is named in the returned manifest.
+        Overall `success` is `False` if *any* file failed.
+
+        Args:
+            output_dir: Destination directory for every produced file plus
+                `manifest.json`. Created (including parents) if missing.
+            formats: Export formats to produce, from `{"pdf", "dxf", "dwg",
+                "edrawings"}` (case-insensitive). Defaults to `["pdf"]` when
+                omitted (`None`); an explicit `[]` produces no per-format
+                files (only useful with `include_native=True`). Any entry
+                outside that set fails with `swInvalidInput` before any COM
+                call -- there is no "native" entry here, since a whole-
+                document archive copy is `include_native`, not a per-format
+                export.
+            per_sheet: `False` (default): one combined multi-sheet file per
+                format, via that export tool's own `sheets="all"` mode.
+                `True`: one file per sheet per format, each named from
+                `filename_pattern` and exported via that sheet specifically
+                (`export_pdf`'s `sheets=[name]`, or `activate_sheet` +
+                `sheets="current"` for `export_dxf_dwg`/`export_edrawings`,
+                which have no "these specific sheets" mode of their own).
+            filename_pattern: `str.format`-style pattern used for every
+                produced file's base name (extension appended
+                separately). Supported tokens:
+                - `{drawing}`: the active drawing's title
+                  (`IModelDoc2::GetTitle`), file extension stripped.
+                - `{sheet}`: the sheet name being exported; `"all"` for a
+                  combined (`per_sheet=False`) or native-archive file, which
+                  aren't tied to one sheet.
+                - `{index}`: the sheet's 1-based position in
+                  `IDrawingDoc::GetSheetNames`'s order; `0` for a combined
+                  or native-archive file.
+                - `{date}`: today's date as `YYYY-MM-DD`.
+                - `{rev}`: the document-level `"Revision"` or `"Rev"`
+                  custom property (case-insensitive key match, first one
+                  found), or `""` if neither is set.
+                Any other `{...}` field fails with `swInvalidInput` before
+                any COM call. Each token's *value* is sanitized for the
+                filesystem before it's substituted (see `overwrite` below),
+                so a sheet name containing `/` or `:` can't inject a path
+                separator. `per_sheet=True` additionally requires the
+                pattern to contain `{sheet}` and/or `{index}` -- without
+                either, every sheet would resolve to the identical
+                filename, which would either silently overwrite sheet 2
+                onward (`overwrite=True`) or refuse to export them
+                (`overwrite=False`); rejected up front instead of letting
+                either happen silently.
+            include_native: Also save a `.SLDDRW` copy of the active
+                drawing into `output_dir` for archive (see
+                `_save_native_copy` -- a side copy, not a re-point of the
+                open document).
+            rebuild_first: Force a rebuild (`rebuild_document(force=True)`)
+                before the first export -- dimension values and BOM
+                quantities can be stale otherwise. A rebuild failure is
+                recorded in the result's `data["rebuild"]` but does not
+                abort the batch; every export is still attempted (its own
+                per-file success/failure reflects the drawing's actual
+                state, rebuilt or not).
+            overwrite: `False` (default): refuse to touch (no COM call) any
+                output path that already exists in `output_dir` -- recorded
+                as a failed manifest entry rather than skipped silently.
+                `True`: overwrite freely.
+
+        Returns:
+            Result dict. `data` has `output_dir`, `manifest_path` (the
+            written `manifest.json`, or `None` if it could not be written),
+            `files` (one entry per attempted output: `path`, `format`
+            (`"pdf"`/`"dxf"`/`"dwg"`/`"edrawings"`/`"native"`), `sheet`
+            (`None` for a combined/native file), `success`, `size_bytes`,
+            `timestamp`, and `error` when failed), `total`/`succeeded`/
+            `failed` counts, `failures` (the failed subset only, for a
+            quick look without scanning all of `files`), and `rebuild`
+            (`{"attempted", "success", "message"}`). Overall `success` is
+            `False` if any file failed, if there is nothing to export
+            (`formats` is `[]` and `include_native` is `False`), or for any
+            of the fail-fast input-validation cases documented above.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        fmt_list = ["pdf"] if formats is None else [str(f).lower() for f in formats]
+        unknown_formats = [f for f in fmt_list if f not in _BATCH_EXPORT_FORMAT_EXTENSIONS]
+        if unknown_formats:
+            return self._result(
+                False,
+                f"Unknown format(s) {unknown_formats!r}; expected one of "
+                f"{sorted(_BATCH_EXPORT_FORMAT_EXTENSIONS)!r}",
+                SwErrors.swInvalidInput,
+            )
+
+        if not fmt_list and not include_native:
+            return self._result(
+                False,
+                "Nothing to export: formats is empty and include_native is False",
+                SwErrors.swInvalidInput,
+            )
+
+        if not isinstance(filename_pattern, str) or not filename_pattern.strip():
+            return self._result(
+                False, "filename_pattern must be a non-empty string", SwErrors.swInvalidInput)
+
+        if per_sheet and "{sheet}" not in filename_pattern and "{index}" not in filename_pattern:
+            return self._result(
+                False,
+                "per_sheet=True requires filename_pattern to contain {sheet} and/or "
+                "{index}, or every sheet would resolve to the same filename",
+                SwErrors.swInvalidInput,
+            )
+
+        try:
+            self._resolve_batch_export_filename(
+                filename_pattern, drawing="drawing", sheet="sheet", index=0,
+                date="date", rev="rev")
+        except ValueError as e:
+            return self._result(False, str(e), SwErrors.swInvalidInput)
+
+        try:
+            available_sheets = _normalize_sheet_names(doc.GetSheetNames())
+        except Exception as e:
+            logger.error(f"batch_export_pack GetSheetNames error: {e}")
+            return self._result(
+                False, f"Could not read sheet names: {e}", SwErrors.swUnknownError)
+        if not available_sheets:
+            return self._result(
+                False, "Drawing has no sheets to export", SwErrors.swFeatureError)
+
+        output_dir = os.path.abspath(output_dir)
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            return self._result(
+                False, f"Could not create output directory {output_dir!r}: {e}",
+                SwErrors.swExportError)
+
+        title = self._get_doc_title(doc)
+        drawing_name = os.path.splitext(title)[0] if title else "drawing"
+
+        rev = ""
+        try:
+            props_result = self.get_custom_properties()
+            if props_result.get("success"):
+                properties = (props_result.get("data") or {}).get("properties") or {}
+                for key, value in properties.items():
+                    if isinstance(key, str) and key.strip().lower() in ("revision", "rev") and value:
+                        rev = str(value)
+                        break
+        except Exception as e:
+            logger.debug(f"batch_export_pack: could not read {{rev}} custom property: {e}")
+
+        date_str = datetime.date.today().strftime("%Y-%m-%d")
+
+        if rebuild_first:
+            rebuild_result = self.rebuild_document(force=True)
+            rebuild_data = {
+                "attempted": True, "success": bool(rebuild_result.get("success")),
+                "message": rebuild_result.get("message"),
+            }
+        else:
+            rebuild_data = {"attempted": False, "success": None, "message": None}
+
+        manifest_entries: List[Dict[str, Any]] = []
+
+        def _attempt(path: str, fmt: str, sheet_name: Optional[str], export_fn) -> None:
+            if os.path.exists(path) and not overwrite:
+                manifest_entries.append({
+                    "path": path, "format": fmt, "sheet": sheet_name,
+                    "success": False, "size_bytes": None,
+                    "error": f"{path!r} already exists (overwrite=False)",
+                    "timestamp": datetime.datetime.now().isoformat(),
+                })
+                return
+            try:
+                result = export_fn()
+            except Exception as e:
+                logger.error(f"batch_export_pack export error ({fmt}, {sheet_name}): {e}")
+                result = {"success": False, "message": str(e)}
+            success = bool(result.get("success"))
+            entry: Dict[str, Any] = {
+                "path": path, "format": fmt, "sheet": sheet_name, "success": success,
+                "timestamp": datetime.datetime.now().isoformat(),
+            }
+            if success:
+                export_data = result.get("data") or {}
+                size = export_data.get("size_bytes")
+                if size is None and os.path.exists(path):
+                    size = os.path.getsize(path)
+                entry["size_bytes"] = size
+            else:
+                entry["size_bytes"] = None
+                entry["error"] = result.get("message")
+            manifest_entries.append(entry)
+
+        if per_sheet:
+            for index, sheet_name in enumerate(available_sheets, start=1):
+                activate_result = self.activate_sheet(sheet_name)
+                activate_ok = bool(activate_result.get("success"))
+                filename_base = self._resolve_batch_export_filename(
+                    filename_pattern, drawing=drawing_name, sheet=sheet_name,
+                    index=index, date=date_str, rev=rev)
+                for fmt in fmt_list:
+                    path = os.path.join(
+                        output_dir, filename_base + _BATCH_EXPORT_FORMAT_EXTENSIONS[fmt])
+                    if fmt == "pdf":
+                        _attempt(
+                            path, fmt, sheet_name,
+                            lambda p=path, s=sheet_name: self.export_pdf(p, sheets=[s]))
+                    elif not activate_ok:
+                        manifest_entries.append({
+                            "path": path, "format": fmt, "sheet": sheet_name,
+                            "success": False, "size_bytes": None,
+                            "error": f"Could not activate sheet {sheet_name!r}: "
+                                     f"{activate_result.get('message')}",
+                            "timestamp": datetime.datetime.now().isoformat(),
+                        })
+                    elif fmt in ("dxf", "dwg"):
+                        _attempt(
+                            path, fmt, sheet_name,
+                            lambda p=path, f=fmt: self.export_dxf_dwg(
+                                p, format=f, sheets="current", multisheet="single_file"))
+                    else:  # edrawings
+                        _attempt(
+                            path, fmt, sheet_name,
+                            lambda p=path: self.export_edrawings(p, sheets="current"))
+        else:
+            filename_base = self._resolve_batch_export_filename(
+                filename_pattern, drawing=drawing_name, sheet="all", index=0,
+                date=date_str, rev=rev)
+            for fmt in fmt_list:
+                path = os.path.join(
+                    output_dir, filename_base + _BATCH_EXPORT_FORMAT_EXTENSIONS[fmt])
+                if fmt == "pdf":
+                    _attempt(path, fmt, None, lambda p=path: self.export_pdf(p, sheets="all"))
+                elif fmt in ("dxf", "dwg"):
+                    _attempt(
+                        path, fmt, None,
+                        lambda p=path, f=fmt: self.export_dxf_dwg(
+                            p, format=f, sheets="all", multisheet="single_file"))
+                else:  # edrawings
+                    _attempt(
+                        path, fmt, None, lambda p=path: self.export_edrawings(p, sheets="all"))
+
+        if include_native:
+            native_base = self._resolve_batch_export_filename(
+                filename_pattern, drawing=drawing_name, sheet="all", index=0,
+                date=date_str, rev=rev)
+            native_path = os.path.join(output_dir, native_base + ".slddrw")
+            _attempt(
+                native_path, "native", None,
+                lambda p=native_path: self._save_native_copy(doc, p))
+
+        manifest_path = os.path.join(output_dir, "manifest.json")
+        manifest_document = {
+            "generated_at": datetime.datetime.now().isoformat(),
+            "drawing": drawing_name,
+            "output_dir": output_dir,
+            "files": manifest_entries,
+        }
+        try:
+            with open(manifest_path, "w") as f:
+                json.dump(manifest_document, f, indent=2)
+        except OSError as e:
+            logger.error(f"batch_export_pack manifest write error: {e}")
+            manifest_path = None
+
+        failures = [e for e in manifest_entries if not e["success"]]
+        succeeded = len(manifest_entries) - len(failures)
+        overall_success = bool(manifest_entries) and not failures
+
+        if not manifest_entries:
+            message = "Nothing was exported"
+        elif overall_success:
+            message = f"Exported {succeeded}/{len(manifest_entries)} file(s)"
+        else:
+            message = (
+                f"Exported {succeeded}/{len(manifest_entries)} file(s); "
+                f"{len(failures)} failed"
+            )
+
+        data = {
+            "output_dir": output_dir,
+            "manifest_path": manifest_path,
+            "files": manifest_entries,
+            "total": len(manifest_entries),
+            "succeeded": succeeded,
+            "failed": len(failures),
+            "failures": [
+                {
+                    "path": e["path"], "format": e["format"], "sheet": e["sheet"],
+                    "error": e.get("error"),
+                }
+                for e in failures
+            ],
+            "rebuild": rebuild_data,
+        }
+        return self._result(
+            overall_success, message,
+            SwErrors.swSuccess if overall_success else SwErrors.swExportError, data)
 
     # ========================================================================
     # Sheet management tools

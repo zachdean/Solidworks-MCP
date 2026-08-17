@@ -3,7 +3,7 @@ Drawing Document & Session Tools
 ---------------------------------
 new_drawing_from_template, get_document_type, open_or_activate_document,
 rebuild_document, save_drawing, export_pdf, export_dxf_dwg, export_edrawings,
-get_custom_properties, set_custom_properties.
+get_custom_properties, set_custom_properties, batch_export_pack.
 
 Backed by `DrawingOperations` (solidworks_mcp/automation/drawings.py), per
 docs/api/01-documents-and-sheets.md.
@@ -337,4 +337,72 @@ def set_custom_properties(arguments: dict) -> Dict:
     return sw_automation.set_custom_properties(
         arguments.get("properties", {}),
         arguments.get("configuration"),
+    )
+
+
+@tool(
+    name="batch_export_pack",
+    description=(
+        "Export every deliverable for the active drawing in one call, so a "
+        "caller doesn't have to orchestrate N per-sheet/per-format calls to "
+        "export_pdf/export_dxf_dwg/export_edrawings itself. Continues past a "
+        "per-file failure (recorded in the returned manifest and in a "
+        "manifest.json written to output_dir) rather than aborting the whole "
+        "batch; overall success is False if any file failed. filename_pattern "
+        "tokens: {drawing} (document title), {sheet} ('all' unless "
+        "per_sheet=True), {index} (1-based sheet position, 0 unless "
+        "per_sheet=True), {date} (YYYY-MM-DD), {rev} (the 'Revision'/'Rev' "
+        "custom property, or ''). Each token value is sanitized for the "
+        "filesystem before use."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "output_dir": {
+                "type": "string",
+                "description": "Destination directory for every produced file plus manifest.json",
+            },
+            "formats": {
+                "type": "array",
+                "items": {"type": "string", "enum": ["pdf", "dxf", "dwg", "edrawings"]},
+                "default": ["pdf"],
+                "description": "Export formats to produce; omit for ['pdf']",
+            },
+            "per_sheet": {
+                "type": "boolean", "default": False,
+                "description": "One combined multi-sheet file per format (False) or one file per sheet per format (True)",
+            },
+            "filename_pattern": {
+                "type": "string", "default": "{drawing}_{sheet}",
+                "description": (
+                    "str.format pattern for output filenames (extension appended "
+                    "separately). Tokens: {drawing}, {sheet}, {index}, {date}, {rev}. "
+                    "per_sheet=True requires {sheet} and/or {index}"
+                ),
+            },
+            "include_native": {
+                "type": "boolean", "default": True,
+                "description": "Also save a .SLDDRW archive copy (a side copy, not a re-point of the open document)",
+            },
+            "rebuild_first": {
+                "type": "boolean", "default": True,
+                "description": "Force a rebuild before the first export; failure is recorded but does not abort the batch",
+            },
+            "overwrite": {
+                "type": "boolean", "default": False,
+                "description": "Refuse (no COM call) to overwrite an existing output path unless True",
+            },
+        },
+        "required": ["output_dir"],
+    },
+)
+def batch_export_pack(arguments: dict) -> Dict:
+    return sw_automation.batch_export_pack(
+        arguments.get("output_dir", ""),
+        arguments.get("formats"),
+        arguments.get("per_sheet", False),
+        arguments.get("filename_pattern", "{drawing}_{sheet}"),
+        arguments.get("include_native", True),
+        arguments.get("rebuild_first", True),
+        arguments.get("overwrite", False),
     )

@@ -52,6 +52,7 @@ EXPECTED_TOOL_NAMES = {
     "export_edrawings",
     "get_custom_properties",
     "set_custom_properties",
+    "batch_export_pack",
     # Drawing Sheet Management Tools
     "add_sheet",
     "activate_sheet",
