@@ -31,7 +31,7 @@ if package_dir not in sys.path:
     sys.path.insert(0, package_dir)
 
 # Import and run server
-from solidworks_mcp.server import run
+from solidworks_mcp.server import run  # noqa: E402
 
 if __name__ == "__main__":
     run()
