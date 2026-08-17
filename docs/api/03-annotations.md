@@ -2533,6 +2533,15 @@ annotation-producing factory in this dossier (`InsertGtol`, `InsertDatumTag2`,
 
 **status:** unverified (search-snippet corroboration only, as above)
 
+**Update (sw-1xx.5):** `GetAnnotation` is directly confirmed to exist on two more
+concrete types via the curl-workaround-fetched `ISFSymbol_members.html` and
+`IWeldSymbol_members.html` member-index pages (see the sw-1xx.5 addendum below) --
+each lists a `GetAnnotation` member. This doesn't upgrade `IDatumTargetSym`'s own
+status above (still unverified, out of this issue's scope), but it does corroborate
+the general pattern this record's analogy leans on: every annotation-producing
+factory in this dossier's GD&T/surface-finish/weld family exposes `GetAnnotation`
+back to the shared `IAnnotation` wrapper.
+
 ---
 
 #### IView::GetFirstDatumTag + IDatumTag::GetNext + IDatumTag::GetLabel
@@ -2852,6 +2861,258 @@ Symbol insertion" — done before the call, via UI selection carried into the ma
   (`swWeldSymmetric`/`swWeldDashedLineOnTop`/`swWeldDashedLineOnBottom`) — neither
   independently fetched here, and not required by this dossier's requested enum list —
   plus the `Contour`/`swWeldSymbolContourTypes_e` documented in the Enums section.
+
+### Surface finish/weld symbol "all-around" leader, and IWeldSymbol content setters (sw-1xx.5)
+
+Fetched for `add_surface_finish`/`add_weld_symbol`'s `all_around`/`field_weld`/
+`both_sides`/`tail_text` requirements. All four methods below were fetched directly
+via the curl workaround documented under `swSFLaySym_e` in the Enums section
+(`help.solidworks.com`'s Next.js page ships its real content as a JSON blob a bare
+fetch tool never executes the script to retrieve; a browser-`User-Agent`'d `curl`
+gets the same static HTML the site serves any first-time visitor, `__NEXT_DATA__`
+JSON included).
+
+**A genuine contradiction in the official docs, resolved here:**
+`IAnnotation::SetLeader3`'s own Parameters table (documented earlier in this
+dossier) describes its `AllAround` argument as "`True` to enable all-around (weld,
+**surface finish**, or GTol) symbol display" — naming all three annotation types.
+But that same page's Gotchas/Remarks-derived bullet list states "GTols and weld
+symbols are **the only types** that support all-around leader symbols" — omitting
+surface finish entirely. These two statements, both transcribed from the same
+source page, disagree. This dossier resolves it as follows: `add_surface_finish`'s
+`all_around` uses `SetLeader3` anyway (trusting the per-parameter description, the
+more specific of the two claims) — **unverified beyond that textual conflict**, not
+confirmed against a live session; `add_weld_symbol`'s `all_around` instead uses
+`IWeldSymbol::SetPeripheral` (below), a dedicated, unambiguous, officially
+worked-example-demonstrated setter for exactly this concept on a weld symbol
+specifically (the UI calls it "Peripheral": "Creates a circle at the bend in the
+weld line to indicate that the weld is applied all around the contour" per
+`HIDD_WELD.htm`), sidestepping the `SetLeader3` ambiguity for the type it's certain
+about.
+
+#### ISFSymbol::GetAnnotation / IWeldSymbol::GetAnnotation
+
+- **Interface:** ISFSymbol / IWeldSymbol
+- **Method:** GetAnnotation
+- **Minimum SW version:** not stated in any accessible source
+
+**Signature:**
+
+```vb
+Function GetAnnotation() As System.Object   ' returns the IAnnotation wrapper
+```
+
+**Returns:** `System.Object` — an `IAnnotation`, the same wrapper type documented
+throughout this dossier (`INote`/`IGtol`/`IDatumTag`).
+
+**Prior selection required:** None — invoked directly on an already-held
+`ISFSymbol`/`IWeldSymbol` reference (the object `InsertSurfaceFinishSymbol3`/
+`InsertWeldSymbol3` returns).
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.ISFSymbol_members.html (member index; lists `GetAnnotation`)
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IWeldSymbol_members.html (member index; lists `GetAnnotation`)
+
+**status:** verified — **this upgrades the sw-1xx.4 addendum's "assumed by strong
+analogy, unverified" note for `IDatumTargetSym::GetAnnotation`** from a guess to a
+corroborated pattern (still not independently confirmed for `IDatumTargetSym`
+itself, which stays unverified, out of this issue's scope) -- every
+annotation-producing factory this dossier documents (`InsertGtol`,
+`InsertDatumTag2`, `InsertSurfaceFinishSymbol3`, `InsertWeldSymbol3`, `CreateText2`)
+now has at least one directly-confirmed `GetAnnotation` sibling.
+
+**Gotchas:**
+- `add_surface_finish` does **not** call `SetPosition2` after creation --
+  `InsertSurfaceFinishSymbol3` already takes `LocX`/`LocY`/`LocZ` at creation time
+  (see that method's own record above), so `GetAnnotation` is only reached when
+  `all_around` needs `SetLeader3`. `add_weld_symbol` always calls `GetAnnotation` ->
+  `SetPosition2`, since `InsertWeldSymbol3` takes no position parameters at all.
+  `IAnnotation::SetPosition2`'s own per-type origin table (see that record above)
+  independently corroborates both types route position through `IAnnotation`:
+  "Surface Finish Symbols -- Lower-left point of symbol", "Weld Symbols -- Left
+  endpoint of the main horizontal line in the symbol".
+
+#### IWeldSymbol::SetText's `Top` parameter and drafting-standard dependence
+
+`SetText`'s own Parameters documentation (fetched directly via the curl workaround,
+matching the description this dossier's original pass already recorded) states
+`Top`'s meaning literally as "`True` to set the text in the portion of the symbol
+above the horizontal line, `False` to set the text in the portion of the symbol
+below the horizontal line" -- **not** "arrow side" or "this side" in those words.
+`add_weld_symbol`'s docstring/tool description calling `Top=True` the "arrow side"
+weld and `Top=False` the "other side" weld is this dossier's own interpretive
+layer, sourced from `HIDD_WELD.htm`'s UI documentation: "The ISO standard uses the
+weld symbols on (above) the line for a 'near side' or 'this side' weld and weld
+symbols on the dashed line (below) for a 'far side' or 'other side' weld **by
+default**. If you change the drafting standard to ISO, the software changes the
+weld symbols" -- i.e. this above/below <-> near-side/far-side mapping is
+ISO-drafting-standard-specific, not universal across every standard SolidWorks
+supports (ANSI/GOST/JIS use different symbol conventions per `c_weld_symbols.htm`).
+This project treats `Top=True` as arrow-side unconditionally, consistent with its
+own established ISO convention elsewhere (`add_gtol`'s hardcoded `IGTOL`
+library) and independently reinforced by `SetText`'s own Remarks (fetched
+directly): "Specify `Symbol` with one of the currently supported **ISO** weld
+symbols: `BUTT BUSQ BUSV BUSB BUSVBR BUSBR BUSU BUSJ BACK FILL PLUG SPOT SEAM
+SEAMC JSPT JSM`" -- the `Symbol` parameter's own accepted-value list is ISO-only,
+so a document set to a non-ISO drafting standard is out of scope for this
+mechanism regardless of the `Top` question.
+
+**Gotchas:**
+- The task's own Requirements describe `add_weld_symbol` as "AWS-style" — worth
+  flagging plainly: the underlying `IWeldSymbol::SetText` mechanism only accepts
+  ISO-standard symbol codes (per its own Remarks, quoted above), not AWS/ANSI ones.
+  `add_weld_symbol`'s docstring and tool description call it "ISO-style" rather
+  than "AWS-style" to match what the COM layer actually enforces.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IWeldSymbol~SetText.html
+- https://help.solidworks.com/2025/english/SolidWorks/sldworks/HIDD_WELD.htm
+
+**status:** verified
+
+#### IWeldSymbol::SetPeripheral
+
+- **Interface:** IWeldSymbol
+- **Method:** SetPeripheral
+- **Minimum SW version:** SOLIDWORKS 99, datecode 1999207
+
+**Signature:**
+
+```vb
+Function SetPeripheral(ByVal Peripheral As System.Boolean) As System.Boolean
+```
+
+**Parameters:** `Peripheral` — `True` for a peripheral (all-around) weld, `False` if
+not.
+
+**Returns:** `Boolean` — `True` if set successfully.
+
+**Prior selection required:** None via `ISelectionMgr` — invoked directly on an
+already-held `IWeldSymbol` reference (the object `InsertWeldSymbol3` returns).
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IWeldSymbol~SetPeripheral.html
+
+**status:** verified
+
+#### IWeldSymbol::SetFieldWeld
+
+- **Interface:** IWeldSymbol
+- **Method:** SetFieldWeld
+- **Minimum SW version:** SOLIDWORKS 99, datecode 1999207
+
+**Signature:**
+
+```vb
+Function SetFieldWeld(ByVal FieldWeld As System.Integer) As System.Boolean
+```
+
+**Parameters:** `FieldWeld` — `swWeldSymbolField_e` (see Enums section): whether this
+is a field/site weld, and if so, which way the flag points.
+
+**Returns:** `Boolean` — `True` if set successfully.
+
+**Prior selection required:** None — same pattern as `SetPeripheral` above.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IWeldSymbol~SetFieldWeld.html
+
+**status:** verified
+
+**Gotchas:**
+- `add_weld_symbol`'s boolean `field_weld` parameter maps `True` ->
+  `swFieldWeldUp` and `False` -> `swFieldWeldNone` — this project's own
+  simplification of the 3-way enum (there is no documented "default" orientation to
+  infer a boolean flag-direction choice from, so the tool layer doesn't expose
+  `swFieldWeldDown` as a public option at all).
+
+#### IWeldSymbol::SetProcess
+
+- **Interface:** IWeldSymbol
+- **Method:** SetProcess
+- **Minimum SW version:** SOLIDWORKS 99, datecode 1999207
+
+**Signature:**
+
+```vb
+Function SetProcess( _
+   ByVal Process As System.Boolean, _
+   ByVal Text As System.String, _
+   ByVal Reference As System.Boolean _
+) As System.Boolean
+```
+
+**Parameters:**
+
+| Name | Type | Meaning |
+| --- | --- | --- |
+| Process | Boolean | `True` to set the welding-process indication flag |
+| Text | String | Tail text -- per `HIDD_WELD.htm`'s "Specification process" field: "Type text ... in any number of lines, to appear in the tail of the symbol" |
+| Reference | Boolean | `True` to draw a reference box around `Text` |
+
+**Returns:** `Boolean` — `True` if set successfully.
+
+**Prior selection required:** None — same pattern as `SetPeripheral` above.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IWeldSymbol~SetProcess.html
+- https://help.solidworks.com/2025/english/SolidWorks/sldworks/HIDD_WELD.htm (conceptual "Weld Symbol Properties" page, confirms `Text`'s "tail of the symbol" placement and the `Reference` checkbox)
+
+**status:** verified
+
+**Gotchas:**
+- `add_weld_symbol`'s `tail_text` maps to `Text` here with `Process=True`,
+  `Reference=False` -- `Reference` (the box-around-text option) isn't exposed as a
+  public parameter (cosmetic, not in this task's Requirements).
+
+#### IWeldSymbol::SetSymmetric
+
+- **Interface:** IWeldSymbol
+- **Method:** SetSymmetric
+- **Minimum SW version:** SOLIDWORKS 99, datecode 1999207
+
+**Signature:**
+
+```vb
+Function SetSymmetric(ByVal Symmetric As System.Integer) As System.Boolean
+```
+
+**Parameters:** `Symmetric` — `swWeldSymbolSymmetric_e` (see Enums section).
+
+**Returns:** `Boolean` — `True` if set successfully.
+
+**Prior selection required:** None — same pattern as `SetPeripheral` above.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IWeldSymbol~SetSymmetric.html
+
+**status:** verified
+
+**Gotchas:**
+- `add_weld_symbol`'s boolean `both_sides` maps `True` -> `swWeldSymmetric` per
+  `HIDD_WELD.htm`'s "Symmetric" field description ("Properties on one side of the
+  symbol line also appear on the other side"). `False` skips the call entirely
+  (leaving `InsertWeldSymbol3`'s own creation-time default) rather than picking
+  arbitrarily between the two non-symmetric variants (`swWeldDashedLineOnTop`/
+  `swWeldDashedLineOnBottom`), neither of which this task's Requirements asks for.
+
+#### Weld symbol name-code semantics (partial, honesty note)
+
+The 16 ISO `Symbol` codes this dossier's original pass already listed (`BUTT, BUSQ,
+BUSV, BUSB, BUSVBR, BUSBR, BUSU, BUSJ, BACK, FILL, PLUG, SPOT, SEAM, SEAMC, JSPT,
+JSM`) have no `help.solidworks.com` page enumerating what each individual code
+means (they are entries in the installed `gtol.sym` text file, not a fetchable API
+page). This pass corroborates, with reasonable confidence from the `BU`-prefix
+grouping pattern and cross-reference against `c_weld_symbols.htm`/`HIDD_WELD.htm`'s
+conceptual descriptions and standard AWS/ISO groove-weld terminology, friendly
+names for 10 of the 16: `FILL`=fillet, `PLUG`=plug/slot, `SPOT`=spot, `SEAM`=seam,
+`BACK`=backing, `BUTT`=(generic) butt, `BUSQ`=square groove, `BUSV`=V-groove,
+`BUSB`=bevel groove, `BUSU`=U-groove, `BUSJ`=J-groove. The remaining 5
+(`BUSVBR`, `BUSBR`, `SEAMC`, `JSPT`, `JSM`) have no corroborated meaning found in
+this pass — **do not guess names for these**; `add_weld_symbol`'s `symbol`/
+`other_side_symbol` parameters accept the raw ISO code string directly (case
+-insensitive) for any of the 16, so those 5 remain reachable without a friendly
+alias.
 
 ## Center marks and centerlines
 
@@ -3628,6 +3889,66 @@ Real under the exact requested name — no rename/discrepancy to flag. Consumed 
 
 Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swSFSymType_e.html
 
+#### swSFLaySym_e (sw-1xx.5)
+
+Real under the exact requested name. Consumed by `InsertSurfaceFinishSymbol3`'s
+`LaySymbol` parameter (direction-of-lay symbol, combined with `SymType` to form the
+full surface finish symbol per the "Surface Finish Symbols" conceptual page: "Surface
+finish symbols are formed by combining the Symbol and Lay Direction"). Direct fetch
+of the `swconst` page 403'd with a bare `WebFetch` (same WAF block this dossier's
+intro documents), but succeeded via this project's own documented workaround (`curl
+-A "Mozilla/5.0 ..." <url>`, per `README.md`'s canonical-source-urls retry
+convention) — the page is a client-rendered Next.js shell whose actual content ships
+as a JSON blob (`__NEXT_DATA__` script tag, `props.pageProps.helpContentData.helpText`)
+rather than as static HTML, which is why a bare fetch (no JS execution) sees only the
+empty shell.
+
+| Value | Number | Meaning |
+| --- | --- | --- |
+| swSFNone | 0 | No direction-of-lay symbol |
+| swSFCircular | 1 | Circular |
+| swSFCross | 2 | Crossed |
+| swSFMultiDir | 3 | Multi-directional |
+| swSFParallel | 4 | Parallel |
+| swSFPerp | 5 | Perpendicular |
+| swSFRadial | 6 | Radial |
+| swSFParticulate | 7 | Particulate (non-directional) |
+
+Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swSFLaySym_e.html
+(fetched directly via the curl workaround above; member names/order cross-checked
+against a convergent search-engine snippet quoting the same 8 members before the
+direct fetch was attempted)
+
+**status:** verified
+
+#### swArrowStyle_e (sw-1xx.5)
+
+Real under the exact requested name. Consumed by `InsertSurfaceFinishSymbol3`'s
+`ArrowType` parameter, `InsertDatumTargetSymbol3`'s `ArrowStyle` parameter (sw-1xx.4
+left this one unfetched — its worked example passes `12`, confirmed below to be
+`swSMART_ARROWHEAD`), and `IAnnotation::SetArrowHeadStyleAtIndex`. Fetched via the
+same curl workaround as `swSFLaySym_e` above.
+
+| Value | Number | Meaning |
+| --- | --- | --- |
+| swOPEN_ARROWHEAD | 0 | No fill |
+| swCLOSED_ARROWHEAD | 1 | Filled |
+| swSLASH_ARROWHEAD | 2 | Slash |
+| swDOT_ARROWHEAD | 3 | Filled circle |
+| swORIGIN_ARROWHEAD | 4 | No-fill circle |
+| swWIDE_ARROWHEAD | 5 | Wide |
+| swISOWIDE_ARROWHEAD | 6 | ISO wide |
+| swRUS_ARROWHEAD | 7 | GOST standard |
+| swCLOSETOP_ARROWHEAD | 8 | Filled top only |
+| swCLOSEBOT_ARROWHEAD | 9 | Filled bottom only |
+| swNO_ARROWHEAD | 10 | None |
+| swSHOULDER_ARROWHEAD | 11 | No arrowhead; filled triangle at leader attachment point |
+| swSMART_ARROWHEAD | 12 | Filled arrowhead with lightning bolt |
+
+Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swArrowStyle_e.html
+
+**status:** verified
+
 #### swWeldSymbolContourTypes_e
 
 Requested as `swWeldSymbolType_e`, which does not exist (confirmed by file-not-found
@@ -3644,6 +3965,36 @@ consumed by `SetText`'s `Contour` parameter.
 | swWeldContourConcave | 4 | Concave contour |
 
 Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swWeldSymbolContourTypes_e.html
+
+#### swWeldSymbolField_e (sw-1xx.5)
+
+Consumed by `IWeldSymbol::SetFieldWeld`'s `FieldWeld` parameter (see the sw-1xx.5
+addendum below). Fetched via the curl workaround (see `swSFLaySym_e` above).
+
+| Value | Number | Meaning |
+| --- | --- | --- |
+| swFieldWeldNone | 1 | No field/site weld marking on this annotation |
+| swFieldWeldUp | 2 | Field/site weld marking, flag pointing up |
+| swFieldWeldDown | 3 | Field/site weld marking, flag pointing down |
+
+Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swWeldSymbolField_e.html
+
+**status:** verified
+
+#### swWeldSymbolSymmetric_e (sw-1xx.5)
+
+Consumed by `IWeldSymbol::SetSymmetric`'s `Symmetric` parameter (see the sw-1xx.5
+addendum below). Fetched via the curl workaround (see `swSFLaySym_e` above).
+
+| Value | Number | Meaning |
+| --- | --- | --- |
+| swWeldSymmetric | 1 | The weld symbol is symmetric -- content on one side of the reference line is mirrored to the other side |
+| swWeldDashedLineOnTop | 2 | Not symmetric, dashed identification line above |
+| swWeldDashedLineOnBottom | 3 | Not symmetric, dashed identification line below |
+
+Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swWeldSymbolSymmetric_e.html
+
+**status:** verified
 
 #### swCenterMarkStyle_e
 

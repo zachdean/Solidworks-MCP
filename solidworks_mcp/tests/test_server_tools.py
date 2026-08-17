@@ -100,6 +100,8 @@ EXPECTED_TOOL_NAMES = {
     "add_datum_feature",
     "add_gtol",
     "add_datum_target",
+    "add_surface_finish",
+    "add_weld_symbol",
     # Sketch Tools
     "create_sketch",
     "create_sketch_on_face",

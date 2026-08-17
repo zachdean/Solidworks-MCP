@@ -4,7 +4,7 @@ Drawing Annotation Tools
 insert_model_items, add_dimension, add_ordinate_dimensions,
 set_dimension_value, set_dimension_text, autodimension_view, add_note,
 add_property_note, list_notes, edit_note, list_datums, add_datum_feature,
-add_gtol, add_datum_target.
+add_gtol, add_datum_target, add_surface_finish, add_weld_symbol.
 
 Backed by `DrawingOperations` (solidworks_mcp/automation/drawings.py), per
 docs/api/03-annotations.md.
@@ -677,4 +677,120 @@ def add_datum_target(arguments: dict) -> Dict:
         arguments.get("size"),
         arguments.get("x"),
         arguments.get("y"),
+    )
+
+
+@tool(
+    name="add_surface_finish",
+    description=(
+        "Add a surface finish symbol via IModelDocExtension::"
+        "InsertSurfaceFinishSymbol3. symbol_type: 'basic', "
+        "'machining_required', or 'machining_prohibited'. roughness_max/"
+        "roughness_min are optional roughness values (roughness_min must be "
+        "<= roughness_max if both given); machining_allowance and "
+        "production_method are optional display text. lay_direction: "
+        "'circular', 'cross', 'multi_directional', 'parallel', "
+        "'perpendicular', 'radial', or 'particulate' -- omit for no lay "
+        "symbol. all_around enables the all-around leader symbol "
+        "(IAnnotation::SetLeader3)."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "view_name": {"type": "string", "description": "Drawing view the entity lives in."},
+            "entity": {**_GTOL_ENTITY_SCHEMA, "description": "Edge/face/vertex to attach the symbol to."},
+            "x": {"type": "number", "description": "Placement, caller's default unit."},
+            "y": {"type": "number", "description": "Placement, caller's default unit."},
+            "symbol_type": {
+                "type": "string", "default": "basic",
+                "description": "'basic', 'machining_required', or 'machining_prohibited'.",
+            },
+            "roughness_max": {"type": "number", "description": "Maximum roughness value."},
+            "roughness_min": {"type": "number", "description": "Minimum roughness value."},
+            "machining_allowance": {"type": "string", "description": "Material removal allowance text."},
+            "lay_direction": {
+                "type": "string",
+                "description": "'circular', 'cross', 'multi_directional', 'parallel', "
+                                "'perpendicular', 'radial', or 'particulate'.",
+            },
+            "production_method": {"type": "string", "description": "Production method/treatment text."},
+            "all_around": {"type": "boolean", "default": False, "description": "Enable all-around leader."},
+        },
+        "required": ["view_name", "entity", "x", "y"],
+    },
+)
+def add_surface_finish(arguments: dict) -> Dict:
+    return sw_automation.add_surface_finish(
+        arguments.get("view_name"),
+        arguments.get("entity"),
+        arguments.get("x"),
+        arguments.get("y"),
+        arguments.get("symbol_type", "basic"),
+        arguments.get("roughness_max"),
+        arguments.get("roughness_min"),
+        arguments.get("machining_allowance"),
+        arguments.get("lay_direction"),
+        arguments.get("production_method"),
+        arguments.get("all_around", False),
+    )
+
+
+@tool(
+    name="add_weld_symbol",
+    description=(
+        "Add an ISO-style weld symbol via IModelDoc2::InsertWeldSymbol3 + "
+        "IWeldSymbol::SetText (SetText's Symbol only accepts ISO codes, not "
+        "AWS/ANSI ones). symbol (default 'fillet') is the arrow-side weld "
+        "symbol, per the ISO drafting-standard default -- a friendly alias "
+        "('fillet', 'plug', 'slot', 'spot', "
+        "'seam', 'backing', 'butt', 'square_groove', 'v_groove', "
+        "'bevel_groove', 'u_groove', 'j_groove') or a raw ISO code (BUTT, "
+        "BUSQ, BUSV, BUSB, BUSVBR, BUSBR, BUSU, BUSJ, BACK, FILL, PLUG, "
+        "SPOT, SEAM, SEAMC, JSPT, JSM), case-insensitive. size is displayed "
+        "to the left of the symbol; length/pitch (intermittent weld -- must "
+        "both be given or both omitted) are displayed to the right as "
+        "'length-pitch'. contour: 'none', 'flat', 'convex', or 'concave'. "
+        "field_weld adds a field/site weld marking. all_around enables the "
+        "all-around (peripheral) weld symbol. both_sides mirrors arrow-side "
+        "content to the other side. other_side_symbol sets distinct "
+        "other-side content (same accepted shapes as symbol). tail_text is "
+        "the specification/process text in the symbol's tail."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "view_name": {"type": "string", "description": "Drawing view the entity lives in."},
+            "entity": {**_GTOL_ENTITY_SCHEMA, "description": "Edge/face to attach the weld symbol to."},
+            "x": {"type": "number", "description": "Placement, caller's default unit."},
+            "y": {"type": "number", "description": "Placement, caller's default unit."},
+            "symbol": {"type": "string", "default": "fillet", "description": "Arrow-side weld symbol."},
+            "size": {"type": "number", "description": "Weld size, displayed left of the symbol."},
+            "length": {"type": "number", "description": "Intermittent weld length. Requires pitch."},
+            "pitch": {"type": "number", "description": "Intermittent weld pitch. Requires length."},
+            "contour": {"type": "string", "description": "'none', 'flat', 'convex', or 'concave'."},
+            "field_weld": {"type": "boolean", "default": False, "description": "Add a field/site weld marking."},
+            "all_around": {"type": "boolean", "default": False, "description": "Enable the all-around symbol."},
+            "both_sides": {"type": "boolean", "default": False, "description": "Mirror content to the other side."},
+            "other_side_symbol": {"type": "string", "description": "Distinct other-side weld symbol."},
+            "tail_text": {"type": "string", "description": "Specification/process text in the tail."},
+        },
+        "required": ["view_name", "entity", "x", "y"],
+    },
+)
+def add_weld_symbol(arguments: dict) -> Dict:
+    return sw_automation.add_weld_symbol(
+        arguments.get("view_name"),
+        arguments.get("entity"),
+        arguments.get("x"),
+        arguments.get("y"),
+        arguments.get("symbol", "fillet"),
+        arguments.get("size"),
+        arguments.get("length"),
+        arguments.get("pitch"),
+        arguments.get("contour"),
+        arguments.get("field_weld", False),
+        arguments.get("all_around", False),
+        arguments.get("both_sides", False),
+        arguments.get("other_side_symbol"),
+        arguments.get("tail_text"),
     )

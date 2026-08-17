@@ -862,6 +862,44 @@ class SwSFSymType(IntEnum):
     swSFMachining_Req = 9
 
 
+class SwSFLaySym(IntEnum):
+    """Surface finish direction-of-lay symbol for InsertSurfaceFinishSymbol3 (swSFLaySym_e).
+
+    Source: docs/api/03-annotations.md (Enums section).
+    """
+
+    swSFNone = 0
+    swSFCircular = 1
+    swSFCross = 2
+    swSFMultiDir = 3
+    swSFParallel = 4
+    swSFPerp = 5
+    swSFRadial = 6
+    swSFParticulate = 7
+
+
+class SwArrowStyle(IntEnum):
+    """Arrowhead style for InsertSurfaceFinishSymbol3, InsertDatumTargetSymbol3, and
+    IAnnotation::SetArrowHeadStyleAtIndex (swArrowStyle_e).
+
+    Source: docs/api/03-annotations.md (Enums section).
+    """
+
+    swOPEN_ARROWHEAD = 0
+    swCLOSED_ARROWHEAD = 1
+    swSLASH_ARROWHEAD = 2
+    swDOT_ARROWHEAD = 3
+    swORIGIN_ARROWHEAD = 4
+    swWIDE_ARROWHEAD = 5
+    swISOWIDE_ARROWHEAD = 6
+    swRUS_ARROWHEAD = 7
+    swCLOSETOP_ARROWHEAD = 8
+    swCLOSEBOT_ARROWHEAD = 9
+    swNO_ARROWHEAD = 10
+    swSHOULDER_ARROWHEAD = 11
+    swSMART_ARROWHEAD = 12
+
+
 class SwWeldSymbolContourTypes(IntEnum):
     """Weld symbol contour, consumed by IWeldSymbol::SetText's Contour parameter (swWeldSymbolContourTypes_e).
 
@@ -875,6 +913,28 @@ class SwWeldSymbolContourTypes(IntEnum):
     swWeldContourFlat = 2
     swWeldContourConvex = 3
     swWeldContourConcave = 4
+
+
+class SwWeldSymbolField(IntEnum):
+    """Field/site weld marking for IWeldSymbol::SetFieldWeld (swWeldSymbolField_e).
+
+    Source: docs/api/03-annotations.md (Enums section).
+    """
+
+    swFieldWeldNone = 1
+    swFieldWeldUp = 2
+    swFieldWeldDown = 3
+
+
+class SwWeldSymbolSymmetric(IntEnum):
+    """Symmetric weld characteristic for IWeldSymbol::SetSymmetric (swWeldSymbolSymmetric_e).
+
+    Source: docs/api/03-annotations.md (Enums section).
+    """
+
+    swWeldSymmetric = 1
+    swWeldDashedLineOnTop = 2
+    swWeldDashedLineOnBottom = 3
 
 
 class SwCenterMarkStyle(IntEnum):

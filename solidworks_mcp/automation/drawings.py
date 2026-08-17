@@ -23,6 +23,7 @@ from ..constants import SwErrors, SwDocumentTypes, SwFileTypes
 from ..constants_drawing import (
     SwAddOrdinateDims,
     SwAlignViewTypes,
+    SwArrowStyle,
     SwAutodimEntities,
     SwAutodimHorizontalPlacement,
     SwAutodimScheme,
@@ -62,10 +63,15 @@ from ..constants_drawing import (
     SwSaveAsVersion,
     SwSetValueInConfiguration,
     SwSetValueReturnStatus,
+    SwSFLaySym,
+    SwSFSymType,
     SwUserPreferenceIntegerValue,
     SwUserPreferenceStringListValue,
     SwUserPreferenceToggle,
     SwViewAlignment,
+    SwWeldSymbolContourTypes,
+    SwWeldSymbolField,
+    SwWeldSymbolSymmetric,
     decode_save_error,
 )
 from ..utils import find_template
@@ -926,6 +932,117 @@ INSERT_DATUM_TARGET_SYMBOL3 = ComSignature("InsertDatumTargetSymbol3", [
     Param("show_symbol", True, to_bool),
     Param("moveable_datum_style", 0, enum_to_int),
 ])
+
+# `add_surface_finish`'s `symbol_type` -> `InsertSurfaceFinishSymbol3`'s `SymType`
+# (`swSFSymType_e`). Only the 3 non-JIS characteristics the task's Requirements name
+# ("basic / machining required / machining prohibited") are exposed; the JIS
+# variants exist in the enum but have no requested public key.
+_SF_SYMBOL_TYPES = {
+    "basic": int(SwSFSymType.swSFBasic),
+    "machining_required": int(SwSFSymType.swSFMachining_Req),
+    "machining_prohibited": int(SwSFSymType.swSFDont_Machine),
+}
+
+# `add_surface_finish`'s `lay_direction` -> `InsertSurfaceFinishSymbol3`'s
+# `LaySymbol` (`swSFLaySym_e`). Omitted `lay_direction` binds `LaySymbol`'s own
+# default (`swSFNone` -- no lay symbol), same as the explicit `"none"` key here.
+_SF_LAY_DIRECTIONS = {
+    "none": int(SwSFLaySym.swSFNone),
+    "circular": int(SwSFLaySym.swSFCircular),
+    "cross": int(SwSFLaySym.swSFCross),
+    "multi_directional": int(SwSFLaySym.swSFMultiDir),
+    "parallel": int(SwSFLaySym.swSFParallel),
+    "perpendicular": int(SwSFLaySym.swSFPerp),
+    "radial": int(SwSFLaySym.swSFRadial),
+    "particulate": int(SwSFLaySym.swSFParticulate),
+}
+
+# `IModelDocExtension::InsertSurfaceFinishSymbol3`'s positional signature, in the
+# exact order documented in docs/api/03-annotations.md: SymType, LeaderType, LocX,
+# LocY, LocZ, LaySymbol, ArrowType, MachAllowance, OtherVals, ProdMethod, SampleLen,
+# MaxRoughness, MinRoughness, RoughnessSpacing. 14 positional parameters --
+# ComSignature per this issue's working agreement (>6 params). `add_surface_finish`
+# always binds `leader_type=swSTRAIGHT` (never `swNO_LEADER`) since the tool's own
+# `x`/`y` are required parameters that the dossier's own Gotchas say are silently
+# ignored under `swNO_LEADER`; `arrow_type` (cosmetic, not in this task's
+# Requirements) always binds its own `swOPEN_ARROWHEAD` default. `sample_len`/
+# `other_vals` aren't exposed as public parameters either (not in this task's
+# Requirements) and always bind `""`.
+INSERT_SURFACE_FINISH_SYMBOL3 = ComSignature("InsertSurfaceFinishSymbol3", [
+    Param("sym_type", REQUIRED, enum_to_int),
+    Param("leader_type", int(SwLeaderStyle.swSTRAIGHT), enum_to_int),
+    Param("loc_x", 0.0, to_meters),
+    Param("loc_y", 0.0, to_meters),
+    Param("loc_z", 0.0, to_meters),
+    Param("lay_symbol", 0, enum_to_int),
+    Param("arrow_type", int(SwArrowStyle.swOPEN_ARROWHEAD), enum_to_int),
+    Param("mach_allowance", ""),
+    Param("other_vals", ""),
+    Param("prod_method", ""),
+    Param("sample_len", ""),
+    Param("max_roughness", ""),
+    Param("min_roughness", ""),
+    Param("roughness_spacing", ""),
+])
+
+# `add_weld_symbol`'s `symbol`/`other_side_symbol` -> `IWeldSymbol::SetText`'s
+# `Symbol` parameter -- the fixed 16-member ISO code list documented in
+# docs/api/03-annotations.md's "Surface finish and weld symbols" section Gotchas.
+# Friendly aliases are given only for the 10 codes this dossier's sw-1xx.5 addendum
+# corroborates with reasonable confidence; the raw code (case-insensitive) is always
+# accepted too, including the 5 codes with no corroborated friendly name
+# (`BUSVBR`, `BUSBR`, `SEAMC`, `JSPT`, `JSM`) -- see that addendum's "Weld symbol
+# name-code semantics" record for why those aren't guessed.
+_WELD_SYMBOL_CODES = {
+    "BUTT", "BUSQ", "BUSV", "BUSB", "BUSVBR", "BUSBR", "BUSU", "BUSJ",
+    "BACK", "FILL", "PLUG", "SPOT", "SEAM", "SEAMC", "JSPT", "JSM",
+}
+_WELD_SYMBOL_ALIASES = {
+    "fillet": "FILL",
+    "plug": "PLUG",
+    "slot": "PLUG",
+    "spot": "SPOT",
+    "seam": "SEAM",
+    "backing": "BACK",
+    "butt": "BUTT",
+    "square_groove": "BUSQ",
+    "v_groove": "BUSV",
+    "bevel_groove": "BUSB",
+    "u_groove": "BUSU",
+    "j_groove": "BUSJ",
+}
+
+# `add_weld_symbol`'s `contour` -> `IWeldSymbol::SetText`'s `Contour` parameter
+# (`swWeldSymbolContourTypes_e`). Omitted `contour` binds `"none"`
+# (`swWeldContourNone`), the same value `Contour` gets in the dossier's own official
+# worked example.
+_WELD_CONTOURS = {
+    "none": int(SwWeldSymbolContourTypes.swWeldContourNone),
+    "flat": int(SwWeldSymbolContourTypes.swWeldContourFlat),
+    "convex": int(SwWeldSymbolContourTypes.swWeldContourConvex),
+    "concave": int(SwWeldSymbolContourTypes.swWeldContourConcave),
+}
+
+
+def _resolve_weld_symbol(value: Any, label: str) -> Tuple[Optional[str], Optional[str]]:
+    """One `add_weld_symbol` `symbol`/`other_side_symbol` value -> its ISO code
+    (`_WELD_SYMBOL_CODES` member) or an error message -- exactly one of the two
+    return slots is populated. Accepts a friendly `_WELD_SYMBOL_ALIASES` key
+    (case-insensitive) or a raw ISO code (case-insensitive)."""
+    if not isinstance(value, str) or not value.strip():
+        return None, f"{label} must be a non-empty string, got {value!r}"
+    raw = value.strip()
+    alias = _WELD_SYMBOL_ALIASES.get(raw.lower())
+    if alias is not None:
+        return alias, None
+    code = raw.upper()
+    if code in _WELD_SYMBOL_CODES:
+        return code, None
+    return None, (
+        f"unknown {label} {value!r}; expected one of {sorted(_WELD_SYMBOL_ALIASES)!r} "
+        f"or a raw ISO code {sorted(_WELD_SYMBOL_CODES)!r}"
+    )
+
 
 _DIMENSION_TYPES = {
     "smart": {
@@ -9070,3 +9187,467 @@ class DrawingOperations:
             data["name"] = self._read_prop(annotation, "GetName")
 
         return self._result(True, f"Added datum target {label!r}", SwErrors.swSuccess, data)
+
+    # ------------------------------------------------------------------
+    # Surface finish and weld symbols
+    # ------------------------------------------------------------------
+
+    def add_surface_finish(self, view_name: str, entity: Dict[str, Any], x: float, y: float,
+                            symbol_type: str = "basic", roughness_max: Optional[float] = None,
+                            roughness_min: Optional[float] = None,
+                            machining_allowance: Optional[str] = None,
+                            lay_direction: Optional[str] = None,
+                            production_method: Optional[str] = None,
+                            all_around: bool = False) -> Dict:
+        """
+        Add a surface finish symbol via `IModelDocExtension::
+        InsertSurfaceFinishSymbol3`.
+
+        Args:
+            view_name: Drawing view the entity lives in.
+            entity: Entity reference in the shape `list_view_entities`
+                returns -- an edge, face, or vertex per the dossier's own
+                "Prior selection required" note.
+            x, y: Symbol placement, caller's default unit -- converted to
+                meters and passed as `InsertSurfaceFinishSymbol3`'s `LocX`/
+                `LocY` creation-time parameters. Honored because
+                `add_surface_finish` always creates with a straight leader
+                (never `swNO_LEADER`) -- see that method's own dossier
+                Gotchas ("LocX/LocY/LocZ are silently ignored unless
+                LeaderType != swNO_LEADER").
+            symbol_type: `"basic"`, `"machining_required"`, or
+                `"machining_prohibited"` -- see `_SF_SYMBOL_TYPES`.
+            roughness_max, roughness_min: Optional roughness values -- the
+                caller's own numbers formatted as COM display-text strings
+                via `_format_gtol_number` (NOT converted to meters;
+                `MaxRoughness`/`MinRoughness` are `String`-typed COM
+                parameters with no documented unit, the same open ambiguity
+                `add_gtol`'s `tolerance` flags). If both are given,
+                `roughness_min` must be <= `roughness_max`.
+            machining_allowance: Optional material-removal-allowance display
+                text (`MachAllowance`).
+            lay_direction: Optional direction-of-lay symbol -- see
+                `_SF_LAY_DIRECTIONS`. Omitted: no lay symbol (`swSFNone`).
+            production_method: Optional production-method/treatment display
+                text (`ProdMethod`).
+            all_around: `True` to enable the all-around leader symbol via
+                `IAnnotation::SetLeader3` -- see the sw-1xx.5 dossier
+                addendum's "all-around" discrepancy note for why this uses
+                `SetLeader3` rather than a dedicated setter (unlike
+                `add_weld_symbol`, which has one).
+
+        Returns:
+            Result dict. `data["name"]` is `IAnnotation::GetName`'s value,
+            read back best-effort.
+        """
+        symbol_key = (symbol_type or "").strip().lower() if isinstance(symbol_type, str) else ""
+        sym_type_enum = _SF_SYMBOL_TYPES.get(symbol_key)
+        if sym_type_enum is None:
+            return self._result(
+                False,
+                f"Unknown symbol_type {symbol_type!r}; expected one of {sorted(_SF_SYMBOL_TYPES)!r}",
+                SwErrors.swInvalidInput, {"symbol_type": symbol_type},
+            )
+
+        if lay_direction is None:
+            lay_key = "none"
+        elif isinstance(lay_direction, str):
+            lay_key = lay_direction.strip().lower()
+        else:
+            lay_key = ""
+        lay_symbol_enum = _SF_LAY_DIRECTIONS.get(lay_key)
+        if lay_symbol_enum is None:
+            return self._result(
+                False,
+                f"Unknown lay_direction {lay_direction!r}; expected one of "
+                f"{sorted(_SF_LAY_DIRECTIONS)!r}",
+                SwErrors.swInvalidInput, {"lay_direction": lay_direction},
+            )
+
+        parsed_entity, entity_err = _parse_entity_ref(entity)
+        if entity_err:
+            return self._result(
+                False, f"entity: {entity_err}", SwErrors.swInvalidInput, {"entity": entity},
+            )
+
+        if isinstance(x, bool) or isinstance(y, bool) \
+                or not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+            return self._result(
+                False, f"x/y must be numbers, got x={x!r}, y={y!r}", SwErrors.swInvalidInput,
+            )
+
+        for label, value in (("roughness_max", roughness_max), ("roughness_min", roughness_min)):
+            if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
+                return self._result(
+                    False, f"{label} must be a number, got {value!r}", SwErrors.swInvalidInput,
+                    {label: value},
+                )
+        if roughness_max is not None and roughness_min is not None and roughness_min > roughness_max:
+            return self._result(
+                False,
+                f"roughness_min ({roughness_min!r}) must be <= roughness_max ({roughness_max!r})",
+                SwErrors.swInvalidInput,
+                {"roughness_min": roughness_min, "roughness_max": roughness_max},
+            )
+
+        for label, value in (("machining_allowance", machining_allowance),
+                              ("production_method", production_method)):
+            if value is not None and not isinstance(value, str):
+                return self._result(
+                    False, f"{label} must be a string, got {value!r}", SwErrors.swInvalidInput,
+                    {label: value},
+                )
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        activated = self.select_view_by_name(view_name)
+        if not activated["success"]:
+            return activated
+
+        type_str, ex, ey, ez = parsed_entity
+        data = {
+            "view_name": view_name, "symbol_type": symbol_key, "lay_direction": lay_key,
+            "x": x, "y": y, "all_around": bool(all_around),
+        }
+
+        with self.selected("", type_str, ex, ey, ez) as sel:
+            if not sel["success"]:
+                return sel
+
+            try:
+                args = INSERT_SURFACE_FINISH_SYMBOL3.bind(
+                    units=self._units, sym_type=sym_type_enum, loc_x=x, loc_y=y,
+                    lay_symbol=lay_symbol_enum,
+                    mach_allowance=machining_allowance or "",
+                    prod_method=production_method or "",
+                    max_roughness=(
+                        self._format_gtol_number(roughness_max) if roughness_max is not None else ""
+                    ),
+                    min_roughness=(
+                        self._format_gtol_number(roughness_min) if roughness_min is not None else ""
+                    ),
+                )
+                created = doc.Extension.InsertSurfaceFinishSymbol3(*args)
+            except Exception as e:
+                logger.error(f"add_surface_finish({view_name!r}) InsertSurfaceFinishSymbol3 error: {e}")
+                return self._result(
+                    False, f"Insert surface finish symbol error: {e}", SwErrors.swFeatureError, data,
+                )
+            if created is None:
+                return self._result(
+                    False,
+                    "InsertSurfaceFinishSymbol3 returned nothing -- surface finish symbol not created",
+                    SwErrors.swFeatureError, data,
+                )
+
+            try:
+                annotation = created.GetAnnotation()
+            except Exception as e:
+                logger.warning(f"add_surface_finish({view_name!r}) GetAnnotation error: {e}")
+                annotation = None
+
+            if all_around:
+                if annotation is None:
+                    return self._result(
+                        False,
+                        "Surface finish symbol has no IAnnotation wrapper (GetAnnotation "
+                        "returned nothing) -- cannot set all-around leader",
+                        SwErrors.swFeatureError, data,
+                    )
+                try:
+                    status = annotation.SetLeader3(
+                        int(SwLeaderStyle.swBENT), _LEADER_SIDE_DEFAULT, True, False, True, False,
+                    )
+                except Exception as e:
+                    logger.error(f"add_surface_finish({view_name!r}) SetLeader3 error: {e}")
+                    return self._result(
+                        False, f"Set all-around leader error: {e}", SwErrors.swFeatureError, data,
+                    )
+                status_code = int(status) if isinstance(status, (int, float)) else None
+                if status_code != 0:
+                    return self._result(
+                        False, f"Could not set all-around leader (SetLeader3 status {status_code})",
+                        SwErrors.swFeatureError, {**data, "status_code": status_code},
+                    )
+
+            data["name"] = self._read_prop(annotation, "GetName") if annotation is not None else None
+
+        return self._result(
+            True,
+            f"Added {symbol_key} surface finish symbol" + (f" {data['name']!r}" if data["name"] else ""),
+            SwErrors.swSuccess, data,
+        )
+
+    def add_weld_symbol(self, view_name: str, entity: Dict[str, Any], x: float, y: float,
+                         symbol: str = "fillet", size: Optional[float] = None,
+                         length: Optional[float] = None, pitch: Optional[float] = None,
+                         contour: Optional[str] = None, field_weld: bool = False,
+                         all_around: bool = False, both_sides: bool = False,
+                         other_side_symbol: Optional[str] = None,
+                         tail_text: Optional[str] = None) -> Dict:
+        """
+        Add an ISO-style weld symbol via `IModelDoc2::InsertWeldSymbol3` +
+        `IWeldSymbol::SetText` (and content setters). `SetText`'s own Remarks
+        state its `Symbol` parameter only accepts "currently supported ISO
+        weld symbols" -- not AWS/ANSI ones -- see the sw-1xx.5 dossier
+        addendum's "Top parameter and drafting-standard dependence" record.
+
+        Args:
+            view_name: Drawing view the entity lives in.
+            entity: Entity reference in the shape `list_view_entities`
+                returns -- an edge or face per the dossier's own official
+                worked example's selection precondition.
+            x, y: Symbol placement, caller's default unit -- converted to
+                meters and applied via `IAnnotation::SetPosition2` after
+                creation (`InsertWeldSymbol3` itself takes no position
+                parameters, unlike `InsertSurfaceFinishSymbol3`).
+            symbol: Arrow-side ("this side") weld symbol -- a friendly alias
+                (`_WELD_SYMBOL_ALIASES`) or a raw ISO code
+                (`_WELD_SYMBOL_CODES`), case-insensitive. Sent via `SetText`'s
+                `Symbol` with `Top=True`; `Top`'s own documented meaning is
+                "above the horizontal line", which this project maps to
+                "arrow side" per the ISO drafting-standard default
+                (`HIDD_WELD.htm`) -- see the sw-1xx.5 dossier addendum for
+                the standard-dependence caveat.
+            size: Optional weld size, displayed to the left of the symbol
+                (`SetText`'s `Left`) -- the caller's own number formatted as
+                display text via `_format_gtol_number`, the same
+                NOT-converted-to-meters convention as `add_gtol`'s
+                `tolerance`.
+            length, pitch: Optional intermittent-weld length/pitch,
+                displayed to the right of the symbol (`SetText`'s `Right`)
+                as `"{length}-{pitch}"` per `HIDD_WELD.htm`'s documented
+                "Length-Pitch" format. Both-or-neither.
+            contour: Optional `"none"`/`"flat"`/`"convex"`/`"concave"`
+                (`SetText`'s `Contour`, `swWeldSymbolContourTypes_e`).
+                Omitted: `"none"`.
+            field_weld: `True` to add a field/site weld marking via
+                `IWeldSymbol::SetFieldWeld` (always `swFieldWeldUp` -- see
+                the sw-1xx.5 dossier addendum for why this boolean only
+                exposes that one orientation).
+            all_around: `True` to enable the all-around (peripheral) weld
+                symbol via `IWeldSymbol::SetPeripheral`.
+            both_sides: `True` to mirror arrow-side content to the other
+                side via `IWeldSymbol::SetSymmetric` (`swWeldSymmetric`).
+                `False` skips the call entirely rather than picking a
+                default among the two non-symmetric variants.
+            other_side_symbol: Optional other-side weld symbol -- same
+                accepted shapes as `symbol`. Applied via a second `SetText`
+                call with `Top=False`.
+            tail_text: Optional tail (specification/process) text via
+                `IWeldSymbol::SetProcess`.
+
+        Returns:
+            Result dict. `data["name"]` is `IAnnotation::GetName`'s value,
+            read back best-effort.
+        """
+        symbol_code, symbol_err = _resolve_weld_symbol(symbol, "symbol")
+        if symbol_err:
+            return self._result(False, symbol_err, SwErrors.swInvalidInput, {"symbol": symbol})
+
+        other_code = None
+        if other_side_symbol is not None:
+            other_code, other_err = _resolve_weld_symbol(other_side_symbol, "other_side_symbol")
+            if other_err:
+                return self._result(
+                    False, other_err, SwErrors.swInvalidInput,
+                    {"other_side_symbol": other_side_symbol},
+                )
+
+        if contour is None:
+            contour_key = "none"
+        elif isinstance(contour, str):
+            contour_key = contour.strip().lower()
+        else:
+            contour_key = ""
+        contour_enum = _WELD_CONTOURS.get(contour_key)
+        if contour_enum is None:
+            return self._result(
+                False, f"Unknown contour {contour!r}; expected one of {sorted(_WELD_CONTOURS)!r}",
+                SwErrors.swInvalidInput, {"contour": contour},
+            )
+
+        parsed_entity, entity_err = _parse_entity_ref(entity)
+        if entity_err:
+            return self._result(
+                False, f"entity: {entity_err}", SwErrors.swInvalidInput, {"entity": entity},
+            )
+
+        if isinstance(x, bool) or isinstance(y, bool) \
+                or not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+            return self._result(
+                False, f"x/y must be numbers, got x={x!r}, y={y!r}", SwErrors.swInvalidInput,
+            )
+
+        if size is not None and (
+            isinstance(size, bool) or not isinstance(size, (int, float)) or size < 0
+        ):
+            return self._result(
+                False, f"size must be a non-negative number, got {size!r}", SwErrors.swInvalidInput,
+                {"size": size},
+            )
+
+        if (length is None) != (pitch is None):
+            return self._result(
+                False, "length and pitch must both be given or both omitted",
+                SwErrors.swInvalidInput, {"length": length, "pitch": pitch},
+            )
+        for label, value in (("length", length), ("pitch", pitch)):
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0
+            ):
+                return self._result(
+                    False, f"{label} must be a non-negative number, got {value!r}",
+                    SwErrors.swInvalidInput, {label: value},
+                )
+
+        if tail_text is not None and not isinstance(tail_text, str):
+            return self._result(
+                False, f"tail_text must be a string, got {tail_text!r}", SwErrors.swInvalidInput,
+                {"tail_text": tail_text},
+            )
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        activated = self.select_view_by_name(view_name)
+        if not activated["success"]:
+            return activated
+
+        type_str, ex, ey, ez = parsed_entity
+        left_text = self._format_gtol_number(size) if size is not None else ""
+        right_text = (
+            f"{self._format_gtol_number(length)}-{self._format_gtol_number(pitch)}"
+            if length is not None else ""
+        )
+        data = {
+            "view_name": view_name, "symbol": symbol_code, "other_side_symbol": other_code,
+            "contour": contour_key, "field_weld": bool(field_weld), "all_around": bool(all_around),
+            "both_sides": bool(both_sides), "x": x, "y": y,
+        }
+
+        with self.selected("", type_str, ex, ey, ez) as sel:
+            if not sel["success"]:
+                return sel
+
+            try:
+                weld = doc.InsertWeldSymbol3()
+            except Exception as e:
+                logger.error(f"add_weld_symbol({view_name!r}) InsertWeldSymbol3 error: {e}")
+                return self._result(False, f"Insert weld symbol error: {e}", SwErrors.swFeatureError, data)
+            if weld is None:
+                return self._result(
+                    False, "InsertWeldSymbol3 returned nothing -- weld symbol not created",
+                    SwErrors.swFeatureError, data,
+                )
+
+            try:
+                set_ok = weld.SetText(True, left_text, symbol_code, right_text, "", contour_enum)
+            except Exception as e:
+                logger.error(f"add_weld_symbol({view_name!r}) SetText error: {e}")
+                return self._result(False, f"Set weld text error: {e}", SwErrors.swFeatureError, data)
+            if set_ok is False:
+                return self._result(
+                    False, "Could not set weld symbol text (SetText returned False)",
+                    SwErrors.swFeatureError, data,
+                )
+
+            if other_code is not None:
+                try:
+                    other_ok = weld.SetText(False, "", other_code, "", "", contour_enum)
+                except Exception as e:
+                    logger.error(f"add_weld_symbol({view_name!r}) SetText (other side) error: {e}")
+                    return self._result(
+                        False, f"Set other-side weld text error: {e}", SwErrors.swFeatureError, data,
+                    )
+                if other_ok is False:
+                    return self._result(
+                        False, "Could not set other-side weld symbol text (SetText returned False)",
+                        SwErrors.swFeatureError, data,
+                    )
+
+            if field_weld:
+                try:
+                    fw_ok = weld.SetFieldWeld(int(SwWeldSymbolField.swFieldWeldUp))
+                except Exception as e:
+                    logger.error(f"add_weld_symbol({view_name!r}) SetFieldWeld error: {e}")
+                    return self._result(False, f"Set field weld error: {e}", SwErrors.swFeatureError, data)
+                if fw_ok is False:
+                    return self._result(
+                        False, "Could not set field weld (SetFieldWeld returned False)",
+                        SwErrors.swFeatureError, data,
+                    )
+
+            if all_around:
+                try:
+                    peripheral_ok = weld.SetPeripheral(True)
+                except Exception as e:
+                    logger.error(f"add_weld_symbol({view_name!r}) SetPeripheral error: {e}")
+                    return self._result(
+                        False, f"Set all-around weld error: {e}", SwErrors.swFeatureError, data,
+                    )
+                if peripheral_ok is False:
+                    return self._result(
+                        False, "Could not set all-around weld (SetPeripheral returned False)",
+                        SwErrors.swFeatureError, data,
+                    )
+
+            if both_sides:
+                try:
+                    sym_ok = weld.SetSymmetric(int(SwWeldSymbolSymmetric.swWeldSymmetric))
+                except Exception as e:
+                    logger.error(f"add_weld_symbol({view_name!r}) SetSymmetric error: {e}")
+                    return self._result(
+                        False, f"Set symmetric weld error: {e}", SwErrors.swFeatureError, data,
+                    )
+                if sym_ok is False:
+                    return self._result(
+                        False, "Could not set symmetric weld (SetSymmetric returned False)",
+                        SwErrors.swFeatureError, data,
+                    )
+
+            if tail_text:
+                try:
+                    proc_ok = weld.SetProcess(True, tail_text, False)
+                except Exception as e:
+                    logger.error(f"add_weld_symbol({view_name!r}) SetProcess error: {e}")
+                    return self._result(False, f"Set tail text error: {e}", SwErrors.swFeatureError, data)
+                if proc_ok is False:
+                    return self._result(
+                        False, "Could not set tail text (SetProcess returned False)",
+                        SwErrors.swFeatureError, data,
+                    )
+
+            try:
+                annotation = weld.GetAnnotation()
+            except Exception as e:
+                logger.warning(f"add_weld_symbol({view_name!r}) GetAnnotation error: {e}")
+                annotation = None
+
+            if annotation is None:
+                return self._result(
+                    False, "Weld symbol has no IAnnotation wrapper (GetAnnotation returned nothing) "
+                    "-- cannot set position", SwErrors.swFeatureError, data,
+                )
+
+            try:
+                x_m, y_m = self._units.to_meters(x), self._units.to_meters(y)
+                positioned = annotation.SetPosition2(x_m, y_m, 0.0)
+            except Exception as e:
+                logger.error(f"add_weld_symbol({view_name!r}) SetPosition2 error: {e}")
+                return self._result(False, f"Set position error: {e}", SwErrors.swFeatureError, data)
+            if positioned is False:
+                return self._result(
+                    False, "Could not set weld symbol position (SetPosition2 returned False)",
+                    SwErrors.swFeatureError, data,
+                )
+
+            data["name"] = self._read_prop(annotation, "GetName")
+
+        return self._result(
+            True, f"Added {symbol_code} weld symbol" + (f" {data['name']!r}" if data["name"] else ""),
+            SwErrors.swSuccess, data,
+        )
