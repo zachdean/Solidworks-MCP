@@ -58,6 +58,9 @@ EXPECTED_TOOL_NAMES = {
     "activate_sheet",
     "list_sheets",
     "get_active_sheet",
+    "set_sheet_properties",
+    "set_sheet_scale",
+    "get_sheet_properties",
     # Drawing View Creation & Discovery Tools
     "insert_model_view",
     "insert_standard_3_view",

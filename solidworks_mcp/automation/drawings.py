@@ -115,6 +115,38 @@ def _paper_size_name(code: Any) -> Optional[str]:
     return _PAPER_SIZE_NAMES.get(code_int, f"unknown paper size {code_int}")
 
 
+def _template_in_name(code: Any) -> Optional[str]:
+    """Readable `SwDwgTemplates` member name for a `templateIn` code read
+    back off `ISheet::GetProperties2` (index 1) -- e.g. `"swDwgTemplateNone"`
+    or `"swDwgTemplateCustom"`, or `f"unknown template {code!r}"` for
+    anything unrecognized. `None` only when `code` itself couldn't be read.
+    """
+    if code is None:
+        return None
+    try:
+        return SwDwgTemplates(int(code)).name
+    except (TypeError, ValueError):
+        return f"unknown template {code!r}"
+
+
+def _scale_ratio_string(scale_num: Any, scale_denom: Any) -> Optional[str]:
+    """`"1:2"`-style readable ratio for `get_sheet_properties`, alongside the
+    numeric `scale_num`/`scale_denom` pair it's derived from. Whole-valued
+    floats (`GetProperties2`'s own return type) render without a trailing
+    `.0` (`"1:2"`, not `"1.0:2.0"`); `None` if either component is missing."""
+    if scale_num is None or scale_denom is None:
+        return None
+
+    def _fmt(value: Any) -> str:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+        return str(int(number)) if number.is_integer() else str(number)
+
+    return f"{_fmt(scale_num)}:{_fmt(scale_denom)}"
+
+
 def _normalize_sheet_names(raw: Any) -> List[str]:
     """`IDrawingDoc::GetSheetNames` returns a `Variant` array of strings at
     the COM layer, but per docs/api/01-documents-and-sheets.md's Gotchas
@@ -170,6 +202,34 @@ NEW_SHEET4 = ComSignature("NewSheet4", [
     Param("zone_bottom_margin", 0.0),
     Param("zone_row", 0, enum_to_int),
     Param("zone_col", 0, enum_to_int),
+])
+
+# `IDrawingDoc::SetupSheet5`'s positional signature, in the exact order
+# documented in docs/api/01-documents-and-sheets.md: Name, PaperSize,
+# TemplateIn, Scale1, Scale2, FirstAngle, TemplateName, Width, Height,
+# PropertyViewName, RemoveModifiedNotes. 11 positional parameters --
+# ComSignature per this issue's working agreement (>6 params). Like
+# `NewSheet4`, this is a method on `IDrawingDoc` itself (not `ISheet`) --
+# `Name` identifies *which* sheet to reconfigure, it does not rename it.
+#
+# `set_sheet_properties` has no `property_view_name` parameter of its own
+# (not requested by this issue's acceptance criteria), so it's always bound
+# to `""` here -- same "caller didn't ask for it" convention `add_sheet`
+# already applies to `NewSheet4`'s own zone parameters. `remove_modified_notes`
+# is likewise always bound to `False` (the least-destructive default: leave
+# modified notes alone) -- not exposed as a public parameter either.
+SETUP_SHEET5 = ComSignature("SetupSheet5", [
+    Param("name", REQUIRED),
+    Param("paper_size", REQUIRED, enum_to_int),
+    Param("template_in", REQUIRED, enum_to_int),
+    Param("scale1", REQUIRED),
+    Param("scale2", REQUIRED),
+    Param("first_angle", False, to_bool),
+    Param("template_name", ""),
+    Param("width", 0.0, to_meters),
+    Param("height", 0.0, to_meters),
+    Param("property_view_name", ""),
+    Param("remove_modified_notes", False, to_bool),
 ])
 
 # `ISldWorks::OpenDoc6`'s `Options` argument (swOpenDocOptions_e) is only
@@ -2937,6 +2997,380 @@ class DrawingOperations:
         data = {"name": name, **self._sheet_properties(sheet)}
         message = f"Active sheet: {name!r}" if name else "Active sheet"
         return self._result(True, message, SwErrors.swSuccess, data)
+
+    def _resolve_named_sheet(
+        self, doc: Any, sheet_name: Optional[str],
+    ) -> Tuple[Any, Optional[str], Optional[Dict]]:
+        """Resolve `sheet_name` (via `IDrawingDoc::Sheet`) or, if omitted,
+        the current sheet (via `IDrawingDoc::GetCurrentSheet`), for
+        `set_sheet_properties`/`set_sheet_scale`/`get_sheet_properties`.
+
+        Distinct from the file's other `_resolve_sheet` helper (used by the
+        view-insertion tools) -- this one also returns the resolved sheet's
+        *name* (needed as `SetupSheet5`'s own `Name` argument) and lists
+        available sheets on an unknown `sheet_name`, matching
+        `activate_sheet`'s own error convention rather than that helper's
+        plainer "not found" message.
+
+        Returns `(sheet, name, None)` on success, or `(None, None, error)` --
+        `swInvalidInput` (listing available sheets, same convention as
+        `activate_sheet`) for an unknown `sheet_name`, `swFeatureError` for
+        "no active sheet" when `sheet_name` is omitted.
+        """
+        if sheet_name:
+            try:
+                sheet = doc.Sheet(sheet_name)
+            except Exception as e:
+                logger.error(f"resolve sheet error: {e}")
+                return None, None, self._result(
+                    False, f"Resolve sheet error: {e}", SwErrors.swUnknownError)
+            if not sheet:
+                try:
+                    available = _normalize_sheet_names(doc.GetSheetNames())
+                except Exception:
+                    available = []
+                return None, None, self._result(
+                    False,
+                    f"Sheet {sheet_name!r} not found; available sheets: {available!r}",
+                    SwErrors.swInvalidInput,
+                    {"name": sheet_name, "available_sheets": available},
+                )
+            return sheet, sheet_name, None
+
+        try:
+            sheet = doc.GetCurrentSheet()
+        except Exception as e:
+            logger.error(f"resolve sheet error: {e}")
+            return None, None, self._result(
+                False, f"Resolve sheet error: {e}", SwErrors.swUnknownError)
+        if not sheet:
+            return None, None, self._result(False, "No active sheet", SwErrors.swFeatureError)
+        return sheet, self._read_prop(sheet, "Name"), None
+
+    def _read_sheet_setup_state(self, sheet: Any) -> Optional[Dict[str, Any]]:
+        """Raw `ISheet::GetProperties2`/`GetTemplateName` fields needed to
+        preserve whichever `set_sheet_properties` parameters the caller
+        omits: `paper_size_code`, `template_in_code`, `scale_num`,
+        `scale_denom`, `first_angle` (a raw bool, unlike `_sheet_properties`'s
+        rendered `projection` name string), `width`/`height` (converted to
+        the caller's unit via `self._units.from_meters`, same as
+        `_sheet_properties` -- so they can be fed straight back into
+        `SETUP_SHEET5`'s `to_meters`-converting `width`/`height` Params
+        without a caller ever seeing raw meters), and `template_path`.
+
+        `template_path` is `None` whenever `ISheet::GetTemplateName` fails,
+        or returns its documented `"*.drt"` sentinel for "this sheet doesn't
+        use a real template file" (docs/api/01-documents-and-sheets.md's
+        `GetTemplateName` Gotchas) -- a `GetTemplateName` failure alone
+        doesn't invalidate the rest of this read, unlike a malformed
+        `GetProperties2` array below.
+
+        Returns `None` on anything that isn't the documented 8-element
+        `GetProperties2` array -- mirrors `_sheet_properties`'s own
+        defensiveness, but returns `None` rather than an all-`None` dict
+        since callers here need to distinguish "couldn't read current
+        state" (an error) from "read it, every field happened to be None".
+        """
+        try:
+            props = sheet.GetProperties2()
+        except Exception:
+            return None
+        if not isinstance(props, (list, tuple)) or len(props) < 7:
+            return None
+        try:
+            template_path = sheet.GetTemplateName()
+        except Exception:
+            template_path = None
+        if not template_path or template_path == "*.drt":
+            template_path = None
+        try:
+            return {
+                "paper_size_code": int(props[0]),
+                "template_in_code": int(props[1]),
+                "scale_num": float(props[2]),
+                "scale_denom": float(props[3]),
+                "first_angle": bool(props[4]),
+                "width": self._units.from_meters(float(props[5])),
+                "height": self._units.from_meters(float(props[6])),
+                "template_path": template_path,
+            }
+        except (TypeError, ValueError):
+            return None
+
+    def set_sheet_properties(
+        self, sheet_name: Optional[str] = None, paper_size: Optional[str] = None,
+        template_path: Optional[str] = None, scale_num: Optional[float] = None,
+        scale_denom: Optional[float] = None, first_angle: Optional[bool] = None,
+        width: Optional[float] = None, height: Optional[float] = None,
+    ) -> Dict:
+        """
+        Update an existing sheet's setup via `IDrawingDoc::SetupSheet5`,
+        preserving every field the caller doesn't pass.
+
+        Unlike `add_sheet`/`NewSheet4` (no prior state to preserve),
+        `SetupSheet5` is a full positional overwrite -- passing it a
+        caller's *partial* update naively would silently reset every field
+        the caller didn't mean to touch. This wrapper reads the sheet's
+        current setup first (`ISheet::GetProperties2`) and only substitutes
+        the fields actually supplied.
+
+        Args:
+            sheet_name: Sheet to update. Omitted (default): the current
+                active sheet (`IDrawingDoc::GetCurrentSheet`).
+            paper_size: One of `"A"`, `"B"`, `"C"`, `"D"`, `"E"`, `"A0"`-`"A4"`
+                (case-insensitive), or `"custom"` to size the sheet from
+                `width`/`height` instead. Omitted: keeps the sheet's current
+                paper size. Switching a named size on a sheet whose
+                `TemplateIn` is `swDwgTemplateNone` sends the sheet's
+                current `Width`/`Height` alongside it (see that parameter
+                below) -- the dossier's SetupSheet5 table doesn't state
+                which one SolidWorks honors in that combination, so whether
+                the sheet visibly resizes is unconfirmed against a live
+                session.
+            template_path: Full path to a custom `.slddrt` sheet-format
+                template -- binds `TemplateIn` to `swDwgTemplateCustom` and
+                this path as `TemplateName`. Omitted: keeps the sheet's
+                current `TemplateIn`/`TemplateName`, read back via
+                `GetProperties2`'s `templateIn` element and
+                `ISheet::GetTemplateName` respectively -- if the sheet
+                currently uses a custom template but `GetTemplateName`
+                can't be read back (an unexpected COM failure; not the
+                normal path), this fails with `swInvalidInput` rather than
+                guessing a `TemplateName`, since a wrong guess there would
+                silently replace the sheet's actual current sheet-format
+                file (per the dossier's SetupSheet5 Gotchas).
+            scale_num, scale_denom: Scale numerator/denominator. Omitted:
+                keeps the sheet's current scale. `scale_denom=0` fails with
+                `swInvalidInput` without touching COM.
+            first_angle: `True` for first-angle projection, `False` for
+                third-angle. Omitted: keeps the sheet's current projection.
+                Per the dossier's SetupSheet5 Gotchas, a projection change
+                only takes visible effect after a rebuild -- this method
+                calls `IModelDoc2::ForceRebuild3` itself (best-effort,
+                ignored on failure) whenever the effective projection
+                actually changes.
+            width, height: Sheet dimensions in the caller's unit, converted
+                to meters at the COM boundary. Passing either requires the
+                *effective* paper size (after applying `paper_size`, or the
+                sheet's current one otherwise) to be `"custom"` --
+                `swInvalidInput` otherwise. Either given must be positive;
+                `swInvalidInput` otherwise. Omitted: keeps the sheet's
+                current dimensions (`ISheet::GetProperties2`'s own
+                `width`/`height`) regardless of the effective paper size --
+                per the dossier's SetupSheet5 table, `Width`/`Height` are
+                live SolidWorks-side whenever `TemplateIn` is
+                `swDwgTemplateNone`, which this wrapper only ever binds
+                `TemplateIn` to besides `swDwgTemplateCustom` -- so passing
+                the sheet's real current size here, not `0`, is what keeps
+                e.g. a scale-only update from silently shrinking it.
+
+        Returns:
+            Result dict; `data` echoes the resolved sheet parameters on
+            success. Fails with `swFeatureError` if `SetupSheet5` itself
+            returns `False` -- its own dossier record documents no specific
+            failure cause for that.
+        """
+        if scale_denom is not None and scale_denom == 0:
+            return self._result(
+                False, "scale_denom must be nonzero", SwErrors.swInvalidInput)
+        if width is not None and width <= 0:
+            return self._result(
+                False, f"width must be positive (got {width!r})", SwErrors.swInvalidInput)
+        if height is not None and height <= 0:
+            return self._result(
+                False, f"height must be positive (got {height!r})", SwErrors.swInvalidInput)
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        sheet, name, err = self._resolve_named_sheet(doc, sheet_name)
+        if err:
+            return err
+        if not name:
+            return self._result(
+                False, "Could not determine the target sheet's name -- "
+                "SetupSheet5 requires it to identify which sheet to update",
+                SwErrors.swUnknownError,
+            )
+
+        current = self._read_sheet_setup_state(sheet)
+        if current is None:
+            return self._result(
+                False, f"Could not read current properties for sheet {name!r}",
+                SwErrors.swUnknownError, {"name": name},
+            )
+
+        if paper_size is not None:
+            paper_key = paper_size.strip().upper()
+            if paper_key == "CUSTOM":
+                effective_paper_size = int(SwDwgPaperSizes.swDwgPapersUserDefined)
+            else:
+                sizes = _PAPER_SIZES.get(paper_key)
+                if sizes is None:
+                    valid = sorted(_PAPER_SIZES) + ["custom"]
+                    return self._result(
+                        False,
+                        f"Unknown paper_size {paper_size!r}; expected one of {valid!r}",
+                        SwErrors.swInvalidInput,
+                    )
+                effective_paper_size = int(sizes[0])
+        else:
+            effective_paper_size = current["paper_size_code"]
+
+        is_custom = effective_paper_size == int(SwDwgPaperSizes.swDwgPapersUserDefined)
+        if (width is not None or height is not None) and not is_custom:
+            return self._result(
+                False,
+                "width/height are only valid when the effective paper_size is "
+                f"'custom' (got paper_size={paper_size!r})",
+                SwErrors.swInvalidInput,
+                {"paper_size": paper_size},
+            )
+
+        # Per the dossier's SetupSheet5 table, Width/Height are valid
+        # whenever TemplateIn is swDwgTemplateNone *or* PaperSize is
+        # swDwgPapersUserDefined -- an OR, not an AND restricted to a custom
+        # paper size. This wrapper only ever binds TemplateIn to
+        # swDwgTemplateNone or swDwgTemplateCustom (never one of the
+        # swDwgTemplates_e sized-template members), so on the common
+        # TemplateIn=None sheet -- e.g. anything `add_sheet` created with its
+        # own defaults -- Width/Height are live even for a plain named
+        # paper_size like "A3". Defaulting them to `current`'s real
+        # dimensions here (rather than `0`) whenever the caller didn't
+        # override them is what keeps a scale-only update from silently
+        # zeroing out the sheet's actual size on exactly that sheet.
+        effective_width = width if width is not None else current["width"]
+        effective_height = height if height is not None else current["height"]
+
+        if template_path:
+            template_in = int(SwDwgTemplates.swDwgTemplateCustom)
+            template_name = template_path
+        elif current["template_in_code"] == int(SwDwgTemplates.swDwgTemplateCustom):
+            if not current["template_path"]:
+                return self._result(
+                    False,
+                    f"Sheet {name!r} reports TemplateIn=swDwgTemplateCustom, but "
+                    "ISheet::GetTemplateName doesn't report a real template file "
+                    "for it (a COM read failure, or its documented \"*.drt\" "
+                    "no-real-template sentinel); pass template_path explicitly "
+                    "to avoid silently clearing whatever it's actually set to",
+                    SwErrors.swInvalidInput,
+                    {"name": name},
+                )
+            template_in = int(SwDwgTemplates.swDwgTemplateCustom)
+            template_name = current["template_path"]
+        else:
+            template_in = current["template_in_code"]
+            template_name = ""
+
+        effective_scale_num = scale_num if scale_num is not None else current["scale_num"]
+        effective_scale_denom = scale_denom if scale_denom is not None else current["scale_denom"]
+        effective_first_angle = first_angle if first_angle is not None else current["first_angle"]
+
+        try:
+            args = SETUP_SHEET5.bind(
+                units=self._units,
+                name=name, paper_size=effective_paper_size, template_in=template_in,
+                scale1=effective_scale_num, scale2=effective_scale_denom,
+                first_angle=effective_first_angle, template_name=template_name,
+                width=effective_width, height=effective_height,
+            )
+            ok = doc.SetupSheet5(*args)
+        except Exception as e:
+            logger.error(f"set_sheet_properties error: {e}")
+            return self._result(False, f"Set sheet properties error: {e}", SwErrors.swUnknownError)
+
+        data = {
+            "name": name,
+            "paper_size": _paper_size_name(effective_paper_size),
+            "template_path": (
+                template_name if template_in == int(SwDwgTemplates.swDwgTemplateCustom) else None
+            ),
+            "scale_num": effective_scale_num, "scale_denom": effective_scale_denom,
+            "first_angle": bool(effective_first_angle),
+            "width": effective_width, "height": effective_height,
+        }
+
+        if not ok:
+            return self._result(
+                False,
+                f"Failed to update sheet {name!r} -- SetupSheet5 returned false "
+                "(SolidWorks does not document a specific failure cause for this call)",
+                SwErrors.swFeatureError, data,
+            )
+
+        if bool(effective_first_angle) != current["first_angle"]:
+            # Per docs/api/01-documents-and-sheets.md's SetupSheet5 Gotchas:
+            # a projection change needs a rebuild to actually show up in the
+            # drawing views. Best-effort -- SetupSheet5 itself already
+            # succeeded, so a rebuild failure here doesn't fail the call.
+            try:
+                doc.ForceRebuild3(False)
+            except Exception as e:
+                logger.warning(f"set_sheet_properties: post-update rebuild failed: {e}")
+
+        return self._result(True, f"Updated sheet {name!r}", SwErrors.swSuccess, data)
+
+    def set_sheet_scale(
+        self, scale_num: float, scale_denom: float, sheet_name: Optional[str] = None,
+    ) -> Dict:
+        """Thin convenience over `set_sheet_properties` -- update only a
+        sheet's scale, leaving every other field untouched."""
+        return self.set_sheet_properties(
+            sheet_name=sheet_name, scale_num=scale_num, scale_denom=scale_denom)
+
+    def get_sheet_properties(self, sheet_name: Optional[str] = None) -> Dict:
+        """
+        Read back a sheet's name, paper size, scale (numeric pair and a
+        readable `"1:2"`-style ratio string), projection angle, dimensions,
+        and template info via `ISheet::GetProperties2` + `GetTemplateName`.
+
+        Args:
+            sheet_name: Sheet to read. Omitted (default): the current active
+                sheet (`IDrawingDoc::GetCurrentSheet`).
+
+        Returns:
+            Result dict. `data["template_path"]` is `None` when the sheet
+            doesn't use a real template file -- `GetTemplateName`'s
+            documented `"*.drt"` sentinel for that case, per the dossier's
+            `ISheet::GetTemplateName` Gotchas -- otherwise the template's
+            full path.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        sheet, name, err = self._resolve_named_sheet(doc, sheet_name)
+        if err:
+            return err
+        if not name:
+            return self._result(
+                False, "Could not determine the sheet's name", SwErrors.swUnknownError)
+
+        current = self._read_sheet_setup_state(sheet)
+        if current is None:
+            return self._result(
+                False, f"Could not read properties for sheet {name!r}",
+                SwErrors.swUnknownError, {"name": name},
+            )
+
+        data = {
+            "name": name,
+            "paper_size_code": current["paper_size_code"],
+            "paper_size": _paper_size_name(current["paper_size_code"]),
+            "scale_num": current["scale_num"], "scale_denom": current["scale_denom"],
+            "scale_ratio": _scale_ratio_string(current["scale_num"], current["scale_denom"]),
+            "projection": (
+                SwDrawingProjectionType.swDrawing1stAngleProjection.name
+                if current["first_angle"]
+                else SwDrawingProjectionType.swDrawing3rdAngleProjection.name
+            ),
+            "width": current["width"], "height": current["height"],
+            "template_in": _template_in_name(current["template_in_code"]),
+            "template_path": current["template_path"],
+        }
+        return self._result(True, f"Sheet {name!r} properties", SwErrors.swSuccess, data)
 
     # ========================================================================
     # View creation / discovery tools

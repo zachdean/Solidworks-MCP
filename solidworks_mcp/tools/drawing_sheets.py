@@ -1,7 +1,8 @@
 """
 Drawing Sheet Management Tools
 --------------------------------
-add_sheet, activate_sheet, list_sheets, get_active_sheet.
+add_sheet, activate_sheet, list_sheets, get_active_sheet, set_sheet_properties,
+set_sheet_scale, get_sheet_properties.
 
 Backed by `DrawingOperations` (solidworks_mcp/automation/drawings.py), per
 docs/api/01-documents-and-sheets.md.
@@ -105,3 +106,119 @@ def list_sheets(arguments: dict) -> Dict:
 )
 def get_active_sheet(arguments: dict) -> Dict:
     return sw_automation.get_active_sheet()
+
+
+@tool(
+    name="set_sheet_properties",
+    description=(
+        "Update a sheet's setup (paper size, template, scale, projection, "
+        "custom dimensions) via IDrawingDoc::SetupSheet5. Reads the sheet's "
+        "current setup first and only overrides the fields supplied here -- "
+        "any field left out keeps its current value rather than being reset."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "sheet_name": {
+                "type": "string",
+                "description": "Sheet to update. Omitted: the current active sheet.",
+            },
+            "paper_size": {
+                "type": "string",
+                "description": (
+                    "A, B, C, D, E, A0-A4, or 'custom' (requires width/height). "
+                    "Omitted: keeps the sheet's current paper size."
+                ),
+            },
+            "template_path": {
+                "type": "string",
+                "description": (
+                    "Full path to a custom .slddrt sheet-format template. "
+                    "Omitted: keeps the sheet's current template."
+                ),
+            },
+            "scale_num": {"type": "number", "description": "Scale numerator"},
+            "scale_denom": {
+                "type": "number",
+                "description": "Scale denominator; must be nonzero",
+            },
+            "first_angle": {
+                "type": "boolean",
+                "description": "True for first-angle projection, false for third-angle",
+            },
+            "width": {
+                "type": "number",
+                "description": "Sheet width; only valid when the effective paper_size is 'custom'",
+            },
+            "height": {
+                "type": "number",
+                "description": "Sheet height; only valid when the effective paper_size is 'custom'",
+            },
+        },
+        "required": [],
+    },
+)
+def set_sheet_properties(arguments: dict) -> Dict:
+    return sw_automation.set_sheet_properties(
+        arguments.get("sheet_name"),
+        arguments.get("paper_size"),
+        arguments.get("template_path"),
+        arguments.get("scale_num"),
+        arguments.get("scale_denom"),
+        arguments.get("first_angle"),
+        arguments.get("width"),
+        arguments.get("height"),
+    )
+
+
+@tool(
+    name="set_sheet_scale",
+    description=(
+        "Convenience wrapper over set_sheet_properties that updates only a "
+        "sheet's scale via IDrawingDoc::SetupSheet5, leaving every other "
+        "field (paper size, template, projection, dimensions) untouched."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "scale_num": {"type": "number", "description": "Scale numerator"},
+            "scale_denom": {
+                "type": "number",
+                "description": "Scale denominator; must be nonzero",
+            },
+            "sheet_name": {
+                "type": "string",
+                "description": "Sheet to update. Omitted: the current active sheet.",
+            },
+        },
+        "required": ["scale_num", "scale_denom"],
+    },
+)
+def set_sheet_scale(arguments: dict) -> Dict:
+    return sw_automation.set_sheet_scale(
+        arguments.get("scale_num"),
+        arguments.get("scale_denom"),
+        arguments.get("sheet_name"),
+    )
+
+
+@tool(
+    name="get_sheet_properties",
+    description=(
+        "Read back a sheet's name, paper size, scale (numeric pair and a "
+        "readable ratio string), projection angle, dimensions, and template "
+        "info via ISheet::GetProperties2."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "sheet_name": {
+                "type": "string",
+                "description": "Sheet to read. Omitted: the current active sheet.",
+            },
+        },
+        "required": [],
+    },
+)
+def get_sheet_properties(arguments: dict) -> Dict:
+    return sw_automation.get_sheet_properties(arguments.get("sheet_name"))

@@ -738,6 +738,42 @@ Function GetProperties2() As System.Object
 - `ISheet::GetSize` is called out on the same page ("See Also") as an alternative/companion for just the sheet's size and standard-size classification; not fetched independently for this dossier since `GetProperties2` alone covers every field `list_sheets`/`get_active_sheet` need.
 - Same `Object` → typed-array casting requirement as `GetSheetNames`/`GetCurrentSheet` elsewhere in this dossier — a real interop layer requires an explicit cast to `double[]`, not a direct index into the raw `Object`.
 
+### ISheet::GetTemplateName
+
+- **Interface:** ISheet
+- **Method:** GetTemplateName
+- **Minimum SW version:** Not stated on the SOLIDWORKS 2025 help page (no Availability section present) — same omission pattern as `GetSheetNames`/`SetupSheet5`'s page elsewhere in this dossier; not evidence of a new method.
+
+Not part of the original sw-kzy epic's source research issue; added while building `set_sheet_properties`/`get_sheet_properties` (sw-kzy.2), which need to read a sheet's *current* custom-template path back — `ISheet::GetProperties2` (above) only exposes `templateIn` (whether the sheet uses a template at all), not the path string itself, and `IDrawingDoc`'s own member list (see the sheet-deletion record below) has no template-path getter either. `ISheet::GetTemplateName` is not itself on `IDrawingDoc`'s member list — it is exclusively an `ISheet` member, found via `IDrawingDoc`'s own "ISheet Interface Members" page, fetched specifically to answer this: does *any* documented COM member expose a sheet's current template path back to a caller?
+
+**Signature:**
+
+```vb
+Function GetTemplateName() As System.String
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| (none) | n/a | n/a | n/a | Method takes no arguments | |
+
+**Returns:** `String`. Per the help page's own "Return Value" line: "Template path name."
+
+**Prior selection required:** None — called directly on an already-resolved `ISheet` reference, same as `ISheet::GetProperties2` above.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.ISheet~GetTemplateName.html — fetched directly via the same `curl` + browser `User-Agent` workaround `GetProperties2`'s record above documents (the bare `WebFetch` tool 403s on `help.solidworks.com`). Page content confirmed authentic via its own embedded `helpContentData` JSON payload (title `"GetTemplateName Method (ISheet)"`).
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.ISheet_members.html — fetched directly (same method) to confirm `GetTemplateName` is a real, current `ISheet` member (alongside `GetTemplateSketch`, `ReloadTemplate`, `SetTemplateName`) and to search for any *other* undocumented-here template-path getter — none found besides this one.
+
+**status:** verified (single primary source; no independent second-source cross-check was located for this specific method, unlike `GetProperties2`'s 2021/2025 byte-identical-page corroboration above)
+
+**Gotchas:**
+- **Answers `set_sheet_properties`'s open question directly: a template-path getter does exist.** A caller can read a sheet's current custom template path back via this method — `set_sheet_properties` (sw-kzy.2) uses it to preserve `TemplateName` across a partial update instead of refusing to touch a sheet that already uses a custom template.
+- **The `"*.drt"` sentinel.** Per this page's own Remarks: "If the sheet does not use a template, i.e., uses a custom layout, this method returns `"*.drt"`." (SolidWorks' own terminology collision: this "custom layout" wording refers to `SetupSheet5`'s `TemplateIn = swDwgTemplateNone` case — sized directly from `PaperSize`/`Width`/`Height` — not to `swDwgTemplateCustom`, which is the *opposite* case, a real custom `.slddrt` file.) `get_sheet_properties`/`set_sheet_properties` treat this literal string as "no real path" (reported as `None`/preserved as `""`) rather than surfacing `"*.drt"` itself as if it were a usable `TemplateName` value — passing that literal back into `SetupSheet5`'s `TemplateName` parameter is untested and not assumed safe.
+- Per Remarks: "To ensure a correct return value, open the document in edit mode." Not independently verified against the fake-COM harness (no such distinction exists there); flagged here for a caller hitting an unexpectedly-empty/stale value against a real session, same caveat `GetProperties2`'s record above documents for its own read-mode Remark.
+- `ISheet::SetTemplateName`/`ReloadTemplate`/`GetTemplateSketch` are sibling members on the same page's "See Also" — not fetched independently for this dossier since `set_sheet_properties` writes a new template via `SetupSheet5`'s own `TemplateName` parameter (already documented above), not `SetTemplateName`.
+
 ### IDrawingDoc sheet deletion (via selection — no direct DeleteSheet API)
 
 - **Interface:** IDrawingDoc (no direct method; workaround uses IModelDocExtension)
