@@ -203,8 +203,8 @@ class SolidWorksFinder:
         Find SolidWorks template file
 
         Args:
-            template_type: "part", "assembly", "drawing", or a table-template
-                type ("bom" -- see `_find_table_template`)
+            template_type: "part", "assembly", "drawing", or any key of
+                `TABLE_TEMPLATE_EXTENSIONS` (see `_find_table_template`)
             sw_exe_path: SolidWorks exe path (auto-detect if None)
 
         Returns:
@@ -224,15 +224,7 @@ class SolidWorksFinder:
             logger.error(f"Unknown template type: {template_type}")
             return None
 
-        # Get SolidWorks directory
-        if sw_exe_path:
-            sw_dir = os.path.dirname(sw_exe_path)
-        else:
-            sw_exe = cls.find()
-            if sw_exe:
-                sw_dir = os.path.dirname(sw_exe)
-            else:
-                sw_dir = None
+        sw_dir = cls._install_dir(sw_exe_path)
 
         # Search relative to SolidWorks install
         if sw_dir:
@@ -251,6 +243,23 @@ class SolidWorksFinder:
 
         logger.warning(f"Template not found: {template_type}")
         return None
+
+    @classmethod
+    def _install_dir(cls, sw_exe_path: str = None) -> Optional[str]:
+        """The SolidWorks install directory -- `sw_exe_path`'s own folder when
+        the caller already knows the exe, else auto-detected via `find()`.
+
+        Shared by `find_template` and `_find_table_template` so the
+        "caller-supplied exe, else detect" fallback policy (and the `find()`
+        call it guards, which can cost a registry lookup plus a Program Files
+        walk) is stated once.
+
+        Returns `None` if no install could be located.
+        """
+        if sw_exe_path:
+            return os.path.dirname(sw_exe_path)
+        sw_exe = cls.find()
+        return os.path.dirname(sw_exe) if sw_exe else None
 
     @classmethod
     def _find_table_template(cls, template_type: str, sw_exe_path: str = None) -> Optional[str]:
@@ -272,12 +281,7 @@ class SolidWorksFinder:
             logger.error(f"Unknown table template type: {template_type}")
             return None
 
-        if sw_exe_path:
-            sw_dir = os.path.dirname(sw_exe_path)
-        else:
-            sw_exe = cls.find()
-            sw_dir = os.path.dirname(sw_exe) if sw_exe else None
-
+        sw_dir = cls._install_dir(sw_exe_path)
         if not sw_dir:
             logger.warning(f"Template not found: {template_type} (SolidWorks install not found)")
             return None
@@ -301,14 +305,19 @@ class SolidWorksFinder:
             if not os.path.isdir(locale_dir):
                 continue
             try:
-                filenames = sorted(os.listdir(locale_dir))
+                # Filter before ordering: a real `lang/<locale>` folder holds
+                # thousands of entries, and only the matching extension's
+                # order decides which template wins.
+                filename = min(
+                    (f for f in os.listdir(locale_dir) if f.lower().endswith(extension)),
+                    default=None,
+                )
             except OSError:
                 continue
-            for filename in filenames:
-                if filename.lower().endswith(extension):
-                    template_path = os.path.join(locale_dir, filename)
-                    logger.info(f"Found {template_type} template: {template_path}")
-                    return template_path
+            if filename is not None:
+                template_path = os.path.join(locale_dir, filename)
+                logger.info(f"Found {template_type} template: {template_path}")
+                return template_path
 
         logger.warning(f"Template not found: {template_type}")
         return None

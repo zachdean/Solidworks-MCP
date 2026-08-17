@@ -16,9 +16,27 @@ from typing import Dict
 from ._automation import sw_automation
 from .registry import tool
 
-# Every entity-taking tool below resolves its reference through the same
-# `_parse_entity_ref`, which accepts the same four kinds regardless of which
-# tool asked -- so they all advertise one schema rather than drifting copies.
+def entity_ref_schema(kind_description: str) -> Dict:
+    """The JSON Schema for an entity reference -- one `kind` plus the x/y/z
+    the automation layer's `_parse_entity_ref` resolves it at.
+
+    Every entity-taking tool resolves its reference through that same
+    `_parse_entity_ref`, so the coordinate contract is stated once here and
+    only the `kind` description varies: which kinds a given tool actually
+    accepts is tool-specific (see the callers), but what x/y/z mean never is.
+    """
+    return {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "description": kind_description},
+            "x": {"type": "number", "description": "Caller's default unit."},
+            "y": {"type": "number", "description": "Caller's default unit."},
+            "z": {"type": "number", "description": "Caller's default unit. Defaults to 0."},
+        },
+        "required": ["kind", "x", "y"],
+    }
+
+
 # The description names 'dimension' separately on purpose: list_view_entities
 # only ever emits edge/vertex/face, and 'dimension' is only a meaningful
 # attach point for the GD&T tools (add_datum_feature/add_gtol). Advertising it
@@ -26,24 +44,12 @@ from .registry import tool
 # was merged from the per-tool copies -- invites a caller to send it to
 # add_center_marks/add_centerlines, where it parses fine and then selects
 # nothing at the COM boundary.
-_ENTITY_REF_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "kind": {
-            "type": "string",
-            "description": (
-                "Entity kind: 'edge', 'vertex', or 'face' (as returned by "
-                "list_view_entities), or 'dimension' -- a dimension is only "
-                "an attach point for add_datum_feature/add_gtol, and is not "
-                "something list_view_entities returns."
-            ),
-        },
-        "x": {"type": "number", "description": "Caller's default unit."},
-        "y": {"type": "number", "description": "Caller's default unit."},
-        "z": {"type": "number", "description": "Caller's default unit. Defaults to 0."},
-    },
-    "required": ["kind", "x", "y"],
-}
+_ENTITY_REF_SCHEMA = entity_ref_schema(
+    "Entity kind: 'edge', 'vertex', or 'face' (as returned by "
+    "list_view_entities), or 'dimension' -- a dimension is only "
+    "an attach point for add_datum_feature/add_gtol, and is not "
+    "something list_view_entities returns."
+)
 
 
 @tool(

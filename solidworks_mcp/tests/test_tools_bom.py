@@ -62,11 +62,6 @@ def _table(fake_sw, obj_id, name="BomTable1", type_code=SwTableAnnotationType.sw
     return table, ann
 
 
-def _chain_tables(*tables):
-    for (table, _ann), (nxt, _nxt_ann) in zip(tables, tables[1:]):
-        table.set_return(f"{table._path}.GetNext", nxt)
-
-
 class TestInsertBomTable:
     def test_xy_mode_positional_tuple_matches_dossier_order(self, tool_sw):
         """Default (x/y placement, top_level, no configuration): the exact

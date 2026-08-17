@@ -14,48 +14,28 @@ docs/api/04-tables.md.
 from typing import Dict
 
 from ._automation import sw_automation
+from .drawing_annotations import entity_ref_schema
 from .registry import tool
 
-# `add_balloon`'s `entity` shape -- the same `list_view_entities` shape every
-# other entity-taking tool advertises (see drawing_annotations.py's
-# `_ENTITY_REF_SCHEMA`), plus `"component"` for the normal "balloon an
+# `add_balloon`'s `entity` shape -- the same coordinate contract every other
+# entity-taking tool advertises, but with its own `kind` list: the
+# `list_view_entities` kinds plus `"component"` for the normal "balloon an
 # assembly component instance" case, which `list_view_entities` never emits
-# itself. Declared locally rather than imported from drawing_annotations.py:
-# that module's shared schema is deliberately scoped to what
-# `list_view_entities` returns plus `"dimension"` (its own docstring explains
-# why), and `"component"` doesn't belong on that shared copy.
-_BALLOON_ENTITY_REF_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "kind": {
-            "type": "string",
-            "description": (
-                "Entity kind: 'edge', 'vertex', or 'face' (as returned by "
-                "list_view_entities), or 'component' -- the normal case for "
-                "ballooning an assembly component instance, which "
-                "list_view_entities does not itself emit."
-            ),
-        },
-        "x": {"type": "number", "description": "Caller's default unit."},
-        "y": {"type": "number", "description": "Caller's default unit."},
-        "z": {"type": "number", "description": "Caller's default unit. Defaults to 0."},
-    },
-    "required": ["kind", "x", "y"],
-}
+# itself. Built from `entity_ref_schema` rather than reusing
+# drawing_annotations.py's `_ENTITY_REF_SCHEMA` directly: that constant is
+# deliberately scoped to what `list_view_entities` returns plus `"dimension"`
+# (its own comment explains why), and `"component"` doesn't belong on it.
+_BALLOON_ENTITY_REF_SCHEMA = entity_ref_schema(
+    "Entity kind: 'edge', 'vertex', or 'face' (as returned by "
+    "list_view_entities), or 'component' -- the normal case for "
+    "ballooning an assembly component instance, which "
+    "list_view_entities does not itself emit."
+)
 
-_DATUM_ENTITY_REF_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "kind": {
-            "type": "string",
-            "description": "Entity kind: 'vertex' or 'edge' (as returned by list_view_entities). No other kind is a valid hole-table datum origin.",
-        },
-        "x": {"type": "number", "description": "Caller's default unit."},
-        "y": {"type": "number", "description": "Caller's default unit."},
-        "z": {"type": "number", "description": "Caller's default unit. Defaults to 0."},
-    },
-    "required": ["kind", "x", "y"],
-}
+_DATUM_ENTITY_REF_SCHEMA = entity_ref_schema(
+    "Entity kind: 'vertex' or 'edge' (as returned by list_view_entities). "
+    "No other kind is a valid hole-table datum origin."
+)
 
 _HIDDEN_COLUMNS_SCHEMA = {
     "type": "array",

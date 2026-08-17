@@ -68,11 +68,6 @@ def _table(fake_sw, obj_id, name="Table1", type_code=SwTableAnnotationType.swTab
     return table, ann
 
 
-def _chain_tables(*tables):
-    for (table, _ann), (nxt, _nxt_ann) in zip(tables, tables[1:]):
-        table.set_return(f"{table._path}.GetNext", nxt)
-
-
 class TestUpdateTable:
     def test_neither_table_name_nor_all_tables_is_rejected(self, tool_sw):
         fake_sw = tool_sw("drawing")

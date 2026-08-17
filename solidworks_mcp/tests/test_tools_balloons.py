@@ -34,11 +34,6 @@ def _view(fake_sw, obj_id, name, type_code=None, first_table=None, first_note=No
     return view
 
 
-def _chain_views(*views):
-    for a, b in zip(views, views[1:]):
-        a.set_return(f"{a._path}.GetNextView", b)
-
-
 def _table(fake_sw, obj_id, name="BomTable1",
            type_code=SwTableAnnotationType.swTableAnnotation_BillOfMaterials):
     """A fake `IBomTableAnnotation` -> `GetAnnotation` -> `IAnnotation` chain,

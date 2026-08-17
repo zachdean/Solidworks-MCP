@@ -1307,9 +1307,10 @@ _BALLOON_TEXT_CONTENT = {
     "view_letter": int(SwBalloonTextContent.swBalloonTextViewViewLetter),
 }
 
-# `add_balloon`'s `leader_attachment` -> `IAutoBalloonOptions::LeaderAttachmentToFaces`-
-# style bool ("edge" attaches to edges, "face" to faces) -- reused for
-# `auto_balloon_view`'s own `leader_attachment` parameter (same underlying property).
+# `auto_balloon_view`'s `leader_attachment` -> `IAutoBalloonOptions::
+# LeaderAttachmentToFaces` bool ("edge" attaches to edges, "face" to faces).
+# `auto_balloon_view` is the only consumer; `add_balloon` takes no
+# `leader_attachment` parameter of its own.
 _LEADER_ATTACHMENT_TO_FACES = {"edge": False, "face": True}
 
 # `IModelDocExtension::InsertBOMBalloon`'s positional signature, in the exact order
@@ -4219,6 +4220,35 @@ class DrawingOperations:
             except Exception:
                 return None
         return value
+
+    def _enum_key(self, value: Any, mapping: Dict[str, Any],
+                   param: str) -> Tuple[Optional[str], Any, Optional[Dict]]:
+        """Resolve a caller-supplied choice string to its entry in `mapping`,
+        or return the house "unknown `param`" result -- the one place the
+        shape of a bad-choice failure is defined, in the same spirit as
+        `_require_view`.
+
+        Every choice-taking tool validates the same way (case-fold and strip,
+        look the key up, else `swInvalidInput` listing the accepted keys), so
+        the message and payload live here rather than being restated at each
+        tool. A non-string `value` folds to `""`, which no mapping contains.
+
+        Membership is tested with `in` rather than a truthiness check on the
+        looked-up value, so maps whose values are legitimately falsy (e.g.
+        `_LEADER_ATTACHMENT_TO_FACES`, which maps to `bool`) need no special
+        casing.
+
+        Returns:
+            `(key, mapping[key], None)` on a hit; `(None, None, error_dict)`
+            otherwise.
+        """
+        key = value.strip().lower() if isinstance(value, str) else ""
+        if key not in mapping:
+            return None, None, self._result(
+                False, f"Unknown {param} {value!r}; expected one of {sorted(mapping)!r}",
+                SwErrors.swInvalidInput, {param: value},
+            )
+        return key, mapping[key], None
 
     def _sheet_name(self, sheet: Any) -> Optional[str]:
         """An `ISheet`'s own name -- `ISheet::GetName` first, falling back to
@@ -10493,6 +10523,28 @@ class DrawingOperations:
         return self._iter_com_chain(view, "GetFirstTableAnnotation", "GetNext",
                                     "_iter_view_tables")
 
+    def _record_table(self, table: Any, data: Dict, x: Optional[float] = 0,
+                       y: Optional[float] = 0) -> Optional[str]:
+        """Fill `data` with a freshly-inserted table's read-back identity --
+        the shared tail of `insert_bom_table`/`insert_hole_table`/
+        `insert_revision_table`/`insert_weldment_cutlist`, in the same spirit
+        as `_place_annotation`/`_note_data` on the annotation side.
+
+        Sets `name` (`IAnnotation::GetName`), `x`/`y` (the annotation's own
+        read-back position, falling back to the requested placement when the
+        read fails), and `row_count`/`column_count`.
+
+        Returns the name, which every caller also puts in its success message.
+        """
+        annotation = self._table_annotation(table)
+        name, tx, ty = self._annotation_name_position(annotation)
+        data["name"] = name
+        data["x"] = tx if tx is not None else (x if x is not None else 0)
+        data["y"] = ty if ty is not None else (y if y is not None else 0)
+        data["row_count"] = _com_int(self._read_prop(table, "RowCount"))
+        data["column_count"] = _com_int(self._read_prop(table, "ColumnCount"))
+        return name
+
     def _describe_table(self, table: Any, view_name: Optional[str]) -> Dict:
         """`list_tables`'s per-table record: type, name, position, and size
         (row/column counts -- tables have no documented overall width/height
@@ -10548,36 +10600,87 @@ class DrawingOperations:
             SwErrors.swSuccess, {"sheet_name": sheet_name, "tables": tables},
         )
 
-    def _find_table_by_name(self, doc, table_name: str, op: str = "get_bom_contents",
-                             label: str = "Get BOM contents") -> Tuple[Any, Optional[str], Optional[Dict]]:
-        """Find the table annotation named `table_name` anywhere in the
-        document -- `get_bom_contents`'s lookup (and, since sw-mio.4, every
-        other by-name table tool's), walking every view the same way
-        `list_tables` does with no `sheet_name` scope.
+    def _find_table(self, doc, predicate, op: str, label: str,
+                     sheet_name: Optional[str] = None) -> Tuple[Any, Optional[str], Optional[Dict]]:
+        """Find the first table annotation satisfying `predicate`, walking
+        `_scoped_views` the same way `list_tables` does -- the one table
+        traversal every by-name/by-type lookup in this module is built on.
+
+        Every such lookup differs only in what counts as a match, so the walk
+        and its error passthrough live here and the callers supply a
+        predicate: `_find_table_by_name` matches on `IAnnotation::GetName`,
+        `_find_revision_table` on `ITableAnnotation::Type`, and
+        `_sheet_has_bom_table` on either or both. Returning on the first hit
+        also means none of them reads a COM property whose answer can no
+        longer change the result.
 
         Args:
+            predicate: Called with each `ITableAnnotation`; truthy stops the
+                walk.
             op, label: Forwarded to `_scoped_views` so a walk failure's log
-                line/error message names the actual calling tool instead of
-                always saying "get_bom_contents" -- `op`/`label` default to
-                this method's original caller so that one call site needs no
-                change.
+                line/error message names the actual calling tool.
+            sheet_name: Restrict to one sheet's views. Omitted: every view in
+                the document.
 
         Returns:
             `(table, view_name, None)` on a hit; `(None, None, None)` on a
-            clean miss (no table has that name); `(None, None, error_dict)`
-            if the walk itself failed.
+            clean miss; `(None, None, error_dict)` if the walk itself failed.
         """
-        scoped, err = self._scoped_views(doc, None, op, label)
+        scoped, err = self._scoped_views(doc, sheet_name, op, label)
         if err:
             return None, None, err
 
         for view, v_name in scoped:
             for table in self._iter_view_tables(view):
-                annotation = self._table_annotation(table)
-                if self._read_prop(annotation, "GetName") == table_name:
+                if predicate(table):
                     return table, v_name, None
 
         return None, None, None
+
+    def _table_named(self, table: Any, table_name: str) -> bool:
+        """Whether `table`'s `IAnnotation::GetName` is `table_name`."""
+        return self._read_prop(self._table_annotation(table), "GetName") == table_name
+
+    def _table_is_type(self, table: Any, type_code: Any) -> bool:
+        """Whether `table`'s `ITableAnnotation::Type` is `type_code`."""
+        return _com_int(self._read_prop(table, "Type")) == int(type_code)
+
+    def _find_table_by_name(self, doc, table_name: str, op: str,
+                             label: str) -> Tuple[Any, Optional[str], Optional[Dict]]:
+        """Find the table annotation named `table_name` anywhere in the
+        document -- the by-name lookup behind every table tool that takes a
+        `table_name`. See `_find_table` for the walk and the return shape;
+        `_require_table` is the variant that turns a clean miss into the
+        house "unknown table" failure.
+        """
+        return self._find_table(
+            doc, lambda table: self._table_named(table, table_name), op, label)
+
+    def _require_table(self, doc, table_name: str, op: str,
+                        label: str) -> Tuple[Any, Optional[str], Optional[Dict]]:
+        """Resolve `table_name` to its `ITableAnnotation`, or return the house
+        "unknown table" result -- the table-side mirror of `_require_view`,
+        and the one place the shape of that failure is defined.
+
+        Every by-name table tool (`get_bom_contents`, `update_table`,
+        `get_table_contents`, `set_table_cell`, `set_table_position`,
+        `set_table_anchor`, `delete_table`) validates its caller-supplied
+        table name the same way, so the message and payload live here rather
+        than being restated at each tool.
+
+        Returns:
+            `(table, view_name, None)` on a hit; `(None, None, error_dict)`
+            if the walk failed or no table has that name.
+        """
+        table, view_name, err = self._find_table_by_name(doc, table_name, op, label)
+        if err:
+            return None, None, err
+        if table is None:
+            return None, None, self._result(
+                False, f"Unknown table {table_name!r}", SwErrors.swInvalidInput,
+                {"table_name": table_name},
+            )
+        return table, view_name, None
 
     def insert_bom_table(
         self, view_name: Optional[str] = None, template_path: Optional[str] = None,
@@ -10638,13 +10741,9 @@ class DrawingOperations:
             via `ITableAnnotation::RowCount`/`ColumnCount`, for balloon/update
             tools elsewhere in this epic to address the table by.
         """
-        bom_key = (bom_type or "").strip().lower() if isinstance(bom_type, str) else ""
-        bom_type_enum = _BOM_TYPES.get(bom_key)
-        if bom_type_enum is None:
-            return self._result(
-                False, f"Unknown bom_type {bom_type!r}; expected one of {sorted(_BOM_TYPES)!r}",
-                SwErrors.swInvalidInput, {"bom_type": bom_type},
-            )
+        bom_key, bom_type_enum, err = self._enum_key(bom_type, _BOM_TYPES, "bom_type")
+        if err:
+            return err
 
         if bom_key == "top_level":
             if configuration:
@@ -10670,7 +10769,9 @@ class DrawingOperations:
                     False, "anchor is required when attach_to_anchor=True",
                     SwErrors.swInvalidInput, {"attach_to_anchor": attach_to_anchor},
                 )
-            anchor_key = anchor.strip().lower() if isinstance(anchor, str) else ""
+            anchor_key, anchor_enum, err = self._enum_key(anchor, _TABLE_ANCHOR_TYPES, "anchor")
+            if err:
+                return err
         else:
             if anchor:
                 return self._result(
@@ -10680,14 +10781,9 @@ class DrawingOperations:
                     SwErrors.swInvalidInput,
                     {"anchor": anchor, "attach_to_anchor": attach_to_anchor},
                 )
-            anchor_key = "top_left"
-
-        anchor_enum = _TABLE_ANCHOR_TYPES.get(anchor_key)
-        if anchor_enum is None:
-            return self._result(
-                False, f"Unknown anchor {anchor!r}; expected one of {sorted(_TABLE_ANCHOR_TYPES)!r}",
-                SwErrors.swInvalidInput, {"anchor": anchor},
-            )
+            # Unused by InsertBomTable6 when UseAnchorPoint is False, but the
+            # signature still needs an AnchorType to pass.
+            anchor_key, anchor_enum = "top_left", _TABLE_ANCHOR_TYPES["top_left"]
 
         if hidden_columns is not None and (
             not isinstance(hidden_columns, (list, tuple))
@@ -10784,13 +10880,7 @@ class DrawingOperations:
                     )
             data["hidden_columns"] = list(hidden_columns)
 
-        annotation = self._table_annotation(table)
-        name, tx, ty = self._annotation_name_position(annotation)
-        data["name"] = name
-        data["x"] = tx if tx is not None else x
-        data["y"] = ty if ty is not None else y
-        data["row_count"] = _com_int(self._read_prop(table, "RowCount"))
-        data["column_count"] = _com_int(self._read_prop(table, "ColumnCount"))
+        name = self._record_table(table, data, x, y)
 
         return self._result(
             True,
@@ -10823,14 +10913,10 @@ class DrawingOperations:
         if err:
             return err
 
-        table, view_name, err = self._find_table_by_name(doc, table_name)
+        table, view_name, err = self._require_table(
+            doc, table_name, "get_bom_contents", "Get BOM contents")
         if err:
             return err
-        if table is None:
-            return self._result(
-                False, f"Unknown table {table_name!r}", SwErrors.swInvalidInput,
-                {"table_name": table_name},
-            )
 
         type_code = _com_int(self._read_prop(table, "Type"))
         if type_code != int(SwTableAnnotationType.swTableAnnotation_BillOfMaterials):
@@ -10858,6 +10944,32 @@ class DrawingOperations:
             },
         )
 
+    def _table_dimensions(self, table: Any,
+                           table_name: str) -> Tuple[Optional[int], Optional[int], Optional[Dict]]:
+        """A table's full row/column extent, bounded by `ITableAnnotation::
+        TotalRowCount`/`TotalColumnCount` (visible + hidden -- see
+        `ColumnCount`'s dossier Gotcha) with a fallback to the visible-only
+        `ColumnCount` if `TotalColumnCount` itself is unreadable.
+
+        The one place that fallback rule and its failure result are defined,
+        so `_read_table_grid`'s read bounds and `set_table_cell`'s write
+        bounds can never disagree about how big a table is.
+
+        Returns:
+            `(row_count, column_count, None)`, or `(None, None, error_dict)`
+            if the counts could not be read at all.
+        """
+        row_count = _com_int(self._read_prop(table, "TotalRowCount"))
+        column_count = _com_int(self._read_prop(table, "TotalColumnCount"))
+        if column_count is None:
+            column_count = _com_int(self._read_prop(table, "ColumnCount"))
+        if row_count is None or column_count is None:
+            return None, None, self._result(
+                False, f"Could not read row/column count for table {table_name!r}",
+                SwErrors.swFeatureError, {"table_name": table_name},
+            )
+        return row_count, column_count, None
+
     def _read_table_grid(
         self, table: Any, table_name: str, context: str,
     ) -> Tuple[Optional[List[List[Optional[str]]]], Optional[int], Optional[int], Optional[Dict]]:
@@ -10880,15 +10992,9 @@ class DrawingOperations:
             read. A per-cell `Text2` failure is never fatal: that cell reads
             back `None` and the walk continues.
         """
-        row_count = _com_int(self._read_prop(table, "TotalRowCount"))
-        column_count = _com_int(self._read_prop(table, "TotalColumnCount"))
-        if column_count is None:
-            column_count = _com_int(self._read_prop(table, "ColumnCount"))
-        if row_count is None or column_count is None:
-            return None, None, None, self._result(
-                False, f"Could not read row/column count for table {table_name!r}",
-                SwErrors.swFeatureError, {"table_name": table_name},
-            )
+        row_count, column_count, dim_err = self._table_dimensions(table, table_name)
+        if dim_err:
+            return None, None, None, dim_err
 
         rows: List[List[Optional[str]]] = []
         for row_index in range(row_count):
@@ -10908,12 +11014,44 @@ class DrawingOperations:
     # Balloon tools
     # ========================================================================
 
+    def _iter_view_balloons(self, view: Any, context: str):
+        """Walk `view`'s BOM balloons -- `_iter_view_notes` filtered to
+        `INote::IsBomBalloon`, the per-annotation-family iterator this module
+        already provides for notes (`_iter_view_notes`), datum tags
+        (`_iter_view_datum_tags`), and center marks (`_view_center_marks`).
+
+        Both `remove_balloons` and `renumber_balloons` consume this rather
+        than open-coding the filter, so they can never disagree about which
+        balloons exist on a view. An unreadable `IsBomBalloon` counts as
+        "not a balloon"; an unreadable `GetAnnotation` still yields the note,
+        with `None` for its annotation.
+
+        Args:
+            context: Caller identification for the per-note error log lines.
+
+        Yields:
+            `(note, annotation)` pairs.
+        """
+        for note in self._iter_view_notes(view):
+            try:
+                is_balloon = bool(note.IsBomBalloon())
+            except Exception as e:
+                logger.warning(f"{context} IsBomBalloon error: {e}")
+                is_balloon = False
+            if not is_balloon:
+                continue
+            try:
+                annotation = note.GetAnnotation()
+            except Exception as e:
+                logger.warning(f"{context} GetAnnotation error: {e}")
+                annotation = None
+            yield note, annotation
+
     def _sheet_has_bom_table(self, doc, sheet_name: Optional[str],
                               table_name: Optional[str]) -> Tuple[bool, Optional[Dict]]:
         """Whether `sheet_name`'s own tables include a BOM
         (`swTableAnnotation_BillOfMaterials`) -- `auto_balloon_view`'s
-        missing-BOM detection, sharing `_scoped_views`' walk with
-        `list_tables`.
+        missing-BOM detection, over `_find_table`'s shared walk.
 
         Args:
             table_name: If given, require a table with exactly this name
@@ -10928,32 +11066,33 @@ class DrawingOperations:
             resolve to a real BOM table on this sheet, or the sheet's views
             couldn't be walked at all.
         """
-        scoped, err = self._scoped_views(doc, sheet_name, "auto_balloon_view", "Auto balloon")
+        bom_type = SwTableAnnotationType.swTableAnnotation_BillOfMaterials
+
+        def _is_bom(table: Any) -> bool:
+            return self._table_is_type(table, bom_type)
+
+        if table_name:
+            table, _v_name, err = self._find_table(
+                doc, lambda table: _is_bom(table) and self._table_named(table, table_name),
+                "auto_balloon_view", "Auto balloon", sheet_name,
+            )
+            if err:
+                return False, err
+            if table is None:
+                return False, self._result(
+                    False,
+                    f"bom_table_name {table_name!r} is not a BOM table on sheet "
+                    f"{sheet_name!r} (or does not exist)",
+                    SwErrors.swInvalidInput,
+                    {"bom_table_name": table_name, "sheet_name": sheet_name},
+                )
+            return True, None
+
+        table, _v_name, err = self._find_table(
+            doc, _is_bom, "auto_balloon_view", "Auto balloon", sheet_name)
         if err:
             return False, err
-
-        bom_type = int(SwTableAnnotationType.swTableAnnotation_BillOfMaterials)
-        found_any = False
-        found_named = False
-        for view, _v_name in scoped:
-            for table in self._iter_view_tables(view):
-                type_code = _com_int(self._read_prop(table, "Type"))
-                if type_code != bom_type:
-                    continue
-                found_any = True
-                if table_name:
-                    annotation = self._table_annotation(table)
-                    if self._read_prop(annotation, "GetName") == table_name:
-                        found_named = True
-
-        if table_name and not found_named:
-            return False, self._result(
-                False,
-                f"bom_table_name {table_name!r} is not a BOM table on sheet "
-                f"{sheet_name!r} (or does not exist)",
-                SwErrors.swInvalidInput, {"bom_table_name": table_name, "sheet_name": sheet_name},
-            )
-        return found_any, None
+        return table is not None, None
 
     def auto_balloon_view(
         self, view_name: str, layout: str = "square", style: str = "circular",
@@ -11019,49 +11158,27 @@ class DrawingOperations:
             returns nothing, or if setting a property on the options object
             raises.
         """
-        layout_key = layout.strip().lower() if isinstance(layout, str) else ""
-        layout_enum = _BALLOON_LAYOUTS.get(layout_key)
-        if layout_enum is None:
-            return self._result(
-                False, f"Unknown layout {layout!r}; expected one of {sorted(_BALLOON_LAYOUTS)!r}",
-                SwErrors.swInvalidInput, {"layout": layout},
-            )
+        layout_key, layout_enum, err = self._enum_key(layout, _BALLOON_LAYOUTS, "layout")
+        if err:
+            return err
 
-        style_key = style.strip().lower() if isinstance(style, str) else ""
-        style_enum = _BALLOON_STYLES.get(style_key)
-        if style_enum is None:
-            return self._result(
-                False, f"Unknown style {style!r}; expected one of {sorted(_BALLOON_STYLES)!r}",
-                SwErrors.swInvalidInput, {"style": style},
-            )
+        style_key, style_enum, err = self._enum_key(style, _BALLOON_STYLES, "style")
+        if err:
+            return err
 
-        size_key = size.strip().lower() if isinstance(size, str) else ""
-        size_enum = _BALLOON_SIZES.get(size_key)
-        if size_enum is None:
-            return self._result(
-                False, f"Unknown size {size!r}; expected one of {sorted(_BALLOON_SIZES)!r}",
-                SwErrors.swInvalidInput, {"size": size},
-            )
+        size_key, size_enum, err = self._enum_key(size, _BALLOON_SIZES, "size")
+        if err:
+            return err
 
-        text_key = text_content.strip().lower() if isinstance(text_content, str) else ""
-        text_enum = _BALLOON_TEXT_CONTENT.get(text_key)
-        if text_enum is None:
-            return self._result(
-                False,
-                f"Unknown text_content {text_content!r}; expected one of "
-                f"{sorted(_BALLOON_TEXT_CONTENT)!r}",
-                SwErrors.swInvalidInput, {"text_content": text_content},
-            )
+        text_key, text_enum, err = self._enum_key(
+            text_content, _BALLOON_TEXT_CONTENT, "text_content")
+        if err:
+            return err
 
-        attach_key = leader_attachment.strip().lower() if isinstance(leader_attachment, str) else ""
-        if attach_key not in _LEADER_ATTACHMENT_TO_FACES:
-            return self._result(
-                False,
-                f"Unknown leader_attachment {leader_attachment!r}; expected one of "
-                f"{sorted(_LEADER_ATTACHMENT_TO_FACES)!r}",
-                SwErrors.swInvalidInput, {"leader_attachment": leader_attachment},
-            )
-        leader_to_faces = _LEADER_ATTACHMENT_TO_FACES[attach_key]
+        attach_key, leader_to_faces, err = self._enum_key(
+            leader_attachment, _LEADER_ATTACHMENT_TO_FACES, "leader_attachment")
+        if err:
+            return err
 
         doc, err = self.get_drawing_doc()
         if err:
@@ -11217,31 +11334,18 @@ class DrawingOperations:
             entity reference didn't actually select anything
             ballooned-eligible).
         """
-        style_key = style.strip().lower() if isinstance(style, str) else ""
-        style_enum = _BALLOON_STYLES.get(style_key)
-        if style_enum is None:
-            return self._result(
-                False, f"Unknown style {style!r}; expected one of {sorted(_BALLOON_STYLES)!r}",
-                SwErrors.swInvalidInput, {"style": style},
-            )
+        style_key, style_enum, err = self._enum_key(style, _BALLOON_STYLES, "style")
+        if err:
+            return err
 
-        size_key = size.strip().lower() if isinstance(size, str) else ""
-        size_enum = _BALLOON_SIZES.get(size_key)
-        if size_enum is None:
-            return self._result(
-                False, f"Unknown size {size!r}; expected one of {sorted(_BALLOON_SIZES)!r}",
-                SwErrors.swInvalidInput, {"size": size},
-            )
+        size_key, size_enum, err = self._enum_key(size, _BALLOON_SIZES, "size")
+        if err:
+            return err
 
-        text_key = text_content.strip().lower() if isinstance(text_content, str) else ""
-        text_enum = _BALLOON_TEXT_CONTENT.get(text_key)
-        if text_enum is None:
-            return self._result(
-                False,
-                f"Unknown text_content {text_content!r}; expected one of "
-                f"{sorted(_BALLOON_TEXT_CONTENT)!r}",
-                SwErrors.swInvalidInput, {"text_content": text_content},
-            )
+        text_key, text_enum, err = self._enum_key(
+            text_content, _BALLOON_TEXT_CONTENT, "text_content")
+        if err:
+            return err
 
         if lower_text and style_key != "split_circle":
             return self._result(
@@ -11274,7 +11378,6 @@ class DrawingOperations:
         }
 
         lower_style_enum = int(SwBalloonTextContent.swBalloonTextCustom) if lower_text else 0
-        annotation = None
 
         with self.selected("", type_str, ex, ey, ez, doc=doc) as sel:
             if not sel["success"]:
@@ -11367,19 +11470,7 @@ class DrawingOperations:
         # -- before the first delete, since a deleted COM object's own
         # `GetNext` is not guaranteed to still answer.
         names: List[str] = []
-        for note in self._iter_view_notes(view):
-            try:
-                is_balloon = bool(note.IsBomBalloon())
-            except Exception as e:
-                logger.warning(f"remove_balloons({view_name!r}) IsBomBalloon error: {e}")
-                is_balloon = False
-            if not is_balloon:
-                continue
-            try:
-                annotation = note.GetAnnotation()
-            except Exception as e:
-                logger.warning(f"remove_balloons({view_name!r}) GetAnnotation error: {e}")
-                annotation = None
+        for _note, annotation in self._iter_view_balloons(view, f"remove_balloons({view_name!r})"):
             name = self._read_prop(annotation, "GetName") if annotation is not None else None
             names.append(name or "")
 
@@ -11487,19 +11578,7 @@ class DrawingOperations:
 
         balloons: List[Dict[str, Any]] = []
         for view, v_name in views:
-            for note in self._iter_view_notes(view):
-                try:
-                    is_balloon = bool(note.IsBomBalloon())
-                except Exception as e:
-                    logger.warning(f"renumber_balloons: IsBomBalloon error: {e}")
-                    is_balloon = False
-                if not is_balloon:
-                    continue
-                try:
-                    annotation = note.GetAnnotation()
-                except Exception as e:
-                    logger.warning(f"renumber_balloons: GetAnnotation error: {e}")
-                    annotation = None
+            for note, annotation in self._iter_view_balloons(view, "renumber_balloons:"):
                 name, x, y = self._annotation_name_position(annotation)
                 balloons.append({"note": note, "name": name, "x": x, "y": y, "view_name": v_name})
 
@@ -11645,16 +11724,12 @@ class DrawingOperations:
         selected `append=True` with `mark=2`) is the natural follow-up if
         that turns out to matter in practice.
         """
-        tag_key = (tag_style if tag_style is not None else "alphanumeric")
-        tag_key = tag_key.strip().lower() if isinstance(tag_key, str) else ""
-        tag_enum = _HOLE_TABLE_TAG_STYLES.get(tag_key)
-        if tag_enum is None:
-            return self._result(
-                False,
-                f"Unknown tag_style {tag_style!r}; expected one of "
-                f"{sorted(_HOLE_TABLE_TAG_STYLES)!r}",
-                SwErrors.swInvalidInput, {"tag_style": tag_style},
-            )
+        tag_key, tag_enum, err = self._enum_key(
+            tag_style if tag_style is not None else "alphanumeric",
+            _HOLE_TABLE_TAG_STYLES, "tag_style",
+        )
+        if err:
+            return err
 
         parsed_entity, entity_err = _parse_entity_ref(datum_entity)
         if entity_err:
@@ -11736,13 +11811,7 @@ class DrawingOperations:
                 False, f"Set CombineSameSize error: {e}", SwErrors.swFeatureError, data,
             )
 
-        annotation = self._table_annotation(table)
-        name, tx, ty = self._annotation_name_position(annotation)
-        data["name"] = name
-        data["x"] = tx if tx is not None else x
-        data["y"] = ty if ty is not None else y
-        data["row_count"] = _com_int(self._read_prop(table, "RowCount"))
-        data["column_count"] = _com_int(self._read_prop(table, "ColumnCount"))
+        name = self._record_table(table, data, x, y)
 
         return self._result(
             True,
@@ -11802,15 +11871,10 @@ class DrawingOperations:
             revision table (only one is allowed per sheet, per
             docs/api/04-tables.md's Gotchas).
         """
-        shape_key = symbol_shape.strip().lower() if isinstance(symbol_shape, str) else ""
-        shape_enum = _REVISION_SYMBOL_SHAPES.get(shape_key)
-        if shape_enum is None:
-            return self._result(
-                False,
-                f"Unknown symbol_shape {symbol_shape!r}; expected one of "
-                f"{sorted(_REVISION_SYMBOL_SHAPES)!r}",
-                SwErrors.swInvalidInput, {"symbol_shape": symbol_shape},
-            )
+        shape_key, shape_enum, err = self._enum_key(
+            symbol_shape, _REVISION_SYMBOL_SHAPES, "symbol_shape")
+        if err:
+            return err
 
         if not isinstance(alpha_numeric, bool):
             return self._result(
@@ -11888,13 +11952,7 @@ class DrawingOperations:
                 SwErrors.swFeatureError, data,
             )
 
-        annotation = self._table_annotation(table)
-        name, tx, ty = self._annotation_name_position(annotation)
-        data["name"] = name
-        data["x"] = tx if tx is not None else (x if x is not None else 0)
-        data["y"] = ty if ty is not None else (y if y is not None else 0)
-        data["row_count"] = _com_int(self._read_prop(table, "RowCount"))
-        data["column_count"] = _com_int(self._read_prop(table, "ColumnCount"))
+        name = self._record_table(table, data, x, y)
 
         return self._result(
             True, "Inserted revision table" + (f" {name!r}" if name else ""),
@@ -11944,18 +12002,11 @@ class DrawingOperations:
             clean miss (no revision table anywhere in the document);
             `(None, None, error_dict)` if the walk itself failed.
         """
-        scoped, err = self._scoped_views(doc, None, "add_revision", "Add revision")
-        if err:
-            return None, None, err
-
-        revision_type = int(SwTableAnnotationType.swTableAnnotation_RevisionBlock)
-        for view, v_name in scoped:
-            for table in self._iter_view_tables(view):
-                type_code = _com_int(self._read_prop(table, "Type"))
-                if type_code == revision_type:
-                    return table, v_name, None
-
-        return None, None, None
+        revision_type = SwTableAnnotationType.swTableAnnotation_RevisionBlock
+        return self._find_table(
+            doc, lambda table: self._table_is_type(table, revision_type),
+            "add_revision", "Add revision",
+        )
 
     def add_revision(
         self, description: str, revision: Optional[str] = None,
@@ -12105,9 +12156,9 @@ class DrawingOperations:
             if isinstance(title, str) and title.strip():
                 columns[title.strip().upper()] = i
 
-        def _find_column(*keywords: str) -> Optional[int]:
+        def _find_column(keyword: str) -> Optional[int]:
             for title_upper, idx in columns.items():
-                if any(k in title_upper for k in keywords):
+                if keyword in title_upper:
                     return idx
             return None
 
@@ -12250,13 +12301,7 @@ class DrawingOperations:
                 SwErrors.swFeatureError, data,
             )
 
-        annotation = self._table_annotation(table)
-        name, tx, ty = self._annotation_name_position(annotation)
-        data["name"] = name
-        data["x"] = tx if tx is not None else x
-        data["y"] = ty if ty is not None else y
-        data["row_count"] = _com_int(self._read_prop(table, "RowCount"))
-        data["column_count"] = _com_int(self._read_prop(table, "ColumnCount"))
+        name = self._record_table(table, data, x, y)
 
         return self._result(
             True,
@@ -12336,16 +12381,10 @@ class DrawingOperations:
         sheet_name: Optional[str] = None
 
         if table_name:
-            table, view_name, find_err = self._find_table_by_name(
-                doc, table_name, op="update_table", label="Update table",
-            )
+            table, view_name, find_err = self._require_table(
+                doc, table_name, "update_table", "Update table")
             if find_err:
                 return find_err
-            if table is None:
-                return self._result(
-                    False, f"Unknown table {table_name!r}", SwErrors.swInvalidInput,
-                    {"table_name": table_name},
-                )
             targets = [(table, view_name)]
         else:
             sheet, sheet_err = self._resolve_sheet(doc, None)
@@ -12455,16 +12494,10 @@ class DrawingOperations:
         if err:
             return err
 
-        table, view_name, err = self._find_table_by_name(
-            doc, table_name, op="get_table_contents", label="Get table contents",
-        )
+        table, view_name, err = self._require_table(
+            doc, table_name, "get_table_contents", "Get table contents")
         if err:
             return err
-        if table is None:
-            return self._result(
-                False, f"Unknown table {table_name!r}", SwErrors.swInvalidInput,
-                {"table_name": table_name},
-            )
 
         type_code = _com_int(self._read_prop(table, "Type"))
         type_name = _enum_name(SwTableAnnotationType, type_code) if type_code is not None else None
@@ -12540,26 +12573,14 @@ class DrawingOperations:
         if err:
             return err
 
-        table, view_name, err = self._find_table_by_name(
-            doc, table_name, op="set_table_cell", label="Set table cell",
-        )
+        table, view_name, err = self._require_table(
+            doc, table_name, "set_table_cell", "Set table cell")
         if err:
             return err
-        if table is None:
-            return self._result(
-                False, f"Unknown table {table_name!r}", SwErrors.swInvalidInput,
-                {"table_name": table_name},
-            )
 
-        row_count = _com_int(self._read_prop(table, "TotalRowCount"))
-        column_count = _com_int(self._read_prop(table, "TotalColumnCount"))
-        if column_count is None:
-            column_count = _com_int(self._read_prop(table, "ColumnCount"))
-        if row_count is None or column_count is None:
-            return self._result(
-                False, f"Could not read row/column count for table {table_name!r}",
-                SwErrors.swFeatureError, {"table_name": table_name},
-            )
+        row_count, column_count, dim_err = self._table_dimensions(table, table_name)
+        if dim_err:
+            return dim_err
         if row >= row_count or column >= column_count:
             return self._result(
                 False,
@@ -12657,16 +12678,10 @@ class DrawingOperations:
         if err:
             return err
 
-        table, view_name, err = self._find_table_by_name(
-            doc, table_name, op="set_table_position", label="Set table position",
-        )
+        table, view_name, err = self._require_table(
+            doc, table_name, "set_table_position", "Set table position")
         if err:
             return err
-        if table is None:
-            return self._result(
-                False, f"Unknown table {table_name!r}", SwErrors.swInvalidInput,
-                {"table_name": table_name},
-            )
 
         data = {"table_name": table_name, "view_name": view_name, "x": x, "y": y}
 
@@ -12732,16 +12747,10 @@ class DrawingOperations:
         if err:
             return err
 
-        table, view_name, err = self._find_table_by_name(
-            doc, table_name, op="set_table_anchor", label="Set table anchor",
-        )
+        table, view_name, err = self._require_table(
+            doc, table_name, "set_table_anchor", "Set table anchor")
         if err:
             return err
-        if table is None:
-            return self._result(
-                False, f"Unknown table {table_name!r}", SwErrors.swInvalidInput,
-                {"table_name": table_name},
-            )
 
         data = {"table_name": table_name, "view_name": view_name, "anchored": anchored}
 
@@ -12789,16 +12798,10 @@ class DrawingOperations:
         if err:
             return err
 
-        table, view_name, err = self._find_table_by_name(
-            doc, table_name, op="delete_table", label="Delete table",
-        )
+        table, view_name, err = self._require_table(
+            doc, table_name, "delete_table", "Delete table")
         if err:
             return err
-        if table is None:
-            return self._result(
-                False, f"Unknown table {table_name!r}", SwErrors.swInvalidInput,
-                {"table_name": table_name},
-            )
 
         data = {"table_name": table_name, "view_name": view_name}
 
