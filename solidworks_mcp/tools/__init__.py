@@ -2,23 +2,17 @@
 SolidWorks MCP Tools
 ---------------------
 Declarative tool registry (`registry.py`) plus one module per tool area:
-`connection.py`, `documents.py`, `sketches.py`, `features.py`, `utility.py`.
-Importing this package registers every tool as a side effect of importing
-its submodules.
+`connection.py`, `documents.py`, `drawing_documents.py`, `sketches.py`,
+`features.py`, `utility.py`. Importing this package registers every tool as a
+side effect of importing its submodules.
 
-`sw_automation` lives here (rather than in `server.py`) so both `server.py`
-and every tools submodule can import the *same* instance without a
-package-crossing circular import: this module builds it before importing
-the submodules below, so by the time e.g. `connection.py` does
-`from . import sw_automation`, the attribute already exists on this
-(mid-initialization) package.
+The shared `sw_automation` instance lives in `_automation.py` and is
+re-exported here for `server.py`'s convenience; submodules import it from
+there directly, so this package's own import order carries no meaning.
 """
 
-from ..automation import SolidWorksAutomation
-
-sw_automation = SolidWorksAutomation()
-
-from .registry import (  # noqa: E402
+from ._automation import sw_automation
+from .registry import (
     UnknownToolError,
     build_tool_list,
     dispatch,
@@ -27,12 +21,12 @@ from .registry import (  # noqa: E402
     tool,
 )
 
-from . import connection  # noqa: E402,F401
-from . import documents  # noqa: E402,F401
-from . import drawing_documents  # noqa: E402,F401
-from . import sketches  # noqa: E402,F401
-from . import features  # noqa: E402,F401
-from . import utility  # noqa: E402,F401
+from . import connection  # noqa: F401
+from . import documents  # noqa: F401
+from . import drawing_documents  # noqa: F401
+from . import sketches  # noqa: F401
+from . import features  # noqa: F401
+from . import utility  # noqa: F401
 
 __all__ = [
     "sw_automation",

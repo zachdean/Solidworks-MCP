@@ -7,7 +7,7 @@ close_document, get_document_info, list_open_documents.
 
 from typing import Dict
 
-from . import sw_automation
+from ._automation import sw_automation
 from .registry import tool
 
 

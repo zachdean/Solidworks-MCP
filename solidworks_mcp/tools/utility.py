@@ -13,7 +13,7 @@ from typing import Dict
 from .. import com_backend
 from ..constants import SwErrors
 from ..utils import set_default_unit
-from . import sw_automation
+from ._automation import sw_automation
 from .registry import tool
 
 

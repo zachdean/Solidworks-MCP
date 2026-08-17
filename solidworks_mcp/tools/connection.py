@@ -7,7 +7,7 @@ connect_solidworks, get_solidworks_info.
 from typing import Dict
 
 from ..utils import get_solidworks_info as _get_solidworks_info
-from . import sw_automation
+from ._automation import sw_automation
 from .registry import tool
 
 

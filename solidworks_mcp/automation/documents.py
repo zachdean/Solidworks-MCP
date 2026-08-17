@@ -114,40 +114,22 @@ class DocumentOperations:
     
     def create_new_drawing(self, paper_size: str = "A4") -> Dict:
         """
-        Create a new drawing document
-        
+        Create a new drawing document.
+
+        Delegates to `DrawingOperations.new_drawing_from_template`, which is
+        this method's superset: it actually resolves `paper_size` to a
+        `swDwgPaperSizes_e` value and passes it to `NewDocument`, where this
+        method used to accept the argument and then hardcode `0`.
+
         Args:
-            paper_size: Paper size (A4, A3, A2, A1, Letter)
-        
+            paper_size: Paper size ("A"-"E", "A0"-"A4")
+
         Returns:
             Result dictionary with document info
         """
-        try:
-            if not self.is_connected:
-                r = self.connect()
-                if not r["success"]:
-                    return r
-            
-            template = find_template("drawing")
-            if not template:
-                template = ""
-            
-            doc = self._sw_app.NewDocument(template, 0, 0, 0)
-            
-            if doc is None:
-                return self._result(False, "Failed to create drawing",
-                                  SwErrors.swFileLoadError)
-            
-            title = self._get_doc_title(doc)
-            
-            return self._result(True, f"Created drawing: {title}",
-                              SwErrors.swSuccess,
-                              {"name": title, "type": "Drawing", "paper_size": paper_size})
-            
-        except Exception as e:
-            logger.error(f"Create drawing error: {e}\n{traceback.format_exc()}")
-            return self._result(False, f"Error: {e}", SwErrors.swFileLoadError)
-    
+        return self.new_drawing_from_template(paper_size=paper_size)
+
+
     def open_document(self, filepath: str) -> Dict:
         """
         Open an existing document
@@ -169,13 +151,7 @@ class DocumentOperations:
                                   SwErrors.swFileNotFoundError)
             
             # Determine document type from extension
-            ext = os.path.splitext(filepath)[1].lower()
-            type_map = {
-                ".sldprt": SwDocumentTypes.swDocPART,
-                ".sldasm": SwDocumentTypes.swDocASSEMBLY,
-                ".slddrw": SwDocumentTypes.swDocDRAWING,
-            }
-            doc_type = type_map.get(ext, SwDocumentTypes.swDocPART)
+            doc_type = SwFileTypes.doc_type_for(os.path.splitext(filepath)[1])
 
             # Open document
             errors = com_backend.byref_int()
@@ -330,21 +306,14 @@ class DocumentOperations:
             if err:
                 return err
             
-            type_names = {
-                0: "None",
-                1: "Part",
-                2: "Assembly",
-                3: "Drawing"
-            }
-            
             doc_type = doc.GetType()
             title = self._get_doc_title(doc)
             path = self._get_doc_path(doc)
-            
+
             info = {
                 "title": title,
                 "path": path if path else "Not saved",
-                "type": type_names.get(doc_type, "Unknown"),
+                "type": SwDocumentTypes.name_of(doc_type),
                 "type_code": doc_type,
             }
             
@@ -373,16 +342,12 @@ class DocumentOperations:
             
             while doc:
                 try:
-                    title = doc.GetTitle
-                    if callable(title):
-                        title = title()
+                    title = self._get_doc_title(doc)
                     doc_type = doc.GetType()
-                    
-                    type_names = {1: "Part", 2: "Assembly", 3: "Drawing"}
-                    
+
                     docs.append({
                         "title": title,
-                        "type": type_names.get(doc_type, "Unknown")
+                        "type": SwDocumentTypes.name_of(doc_type)
                     })
                 except:
                     pass

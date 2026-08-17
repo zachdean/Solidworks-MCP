@@ -54,9 +54,9 @@ class _RegisteredTool:
 # Order matters for `build_tool_list()` -- tools are listed in the order
 # they were registered (i.e. import order of the `solidworks_mcp.tools`
 # submodules), matching the deterministic order the old hand-written list
-# had.
+# had. A dict preserves insertion order, so it is both the lookup index and
+# the ordering; no parallel list to keep in sync.
 _TOOLS: Dict[str, _RegisteredTool] = {}
-_ORDER: List[str] = []
 
 
 def tool(name: str, description: str, schema: Dict[str, Any]) -> Callable:
@@ -70,7 +70,6 @@ def tool(name: str, description: str, schema: Dict[str, Any]) -> Callable:
         if name in _TOOLS:
             raise ValueError(f"Tool '{name}' is already registered")
         _TOOLS[name] = _RegisteredTool(name, description, schema, handler)
-        _ORDER.append(name)
         return handler
     return decorator
 
@@ -103,7 +102,7 @@ def build_tool_list() -> List[Tool]:
             description=entry.description,
             inputSchema=entry.schema,
         )
-        for entry in (_TOOLS[name] for name in _ORDER)
+        for entry in _TOOLS.values()
     ]
 
 
@@ -111,7 +110,7 @@ def registered_names() -> List[str]:
     """Every registered tool name, in registration order. Lets callers check
     "is this name dispatchable" without actually invoking a handler (most
     handlers reach for a live SolidWorks connection)."""
-    return list(_ORDER)
+    return list(_TOOLS)
 
 
 def dispatch(name: str, arguments: dict) -> Dict[str, Any]:

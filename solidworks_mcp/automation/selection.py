@@ -96,7 +96,18 @@ class SelectionOperations:
         doc, err = self.get_active_doc()
         if err:
             return err
+        return self._select_by_id(doc, name, type_str, x, y, z,
+                                  append, mark, callout, sel_option)
 
+    def _select_by_id(self, doc, name: str, type_str: str, x: float, y: float, z: float,
+                       append: bool, mark: int, callout: Any, sel_option: int) -> Dict:
+        """`select_by_id` against an already-resolved document.
+
+        `get_active_doc()` is two COM round-trips (the `is_connected`
+        liveness probe plus `ActiveDoc`), so the select-then-act primitives
+        resolve the document once and drive it directly rather than each
+        composing the public, self-resolving methods.
+        """
         try:
             args = self.SELECT_BY_ID2.bind(
                 units=self._units,
@@ -133,7 +144,11 @@ class SelectionOperations:
         doc, err = self.get_active_doc()
         if err:
             return err
+        return self._clear_selection(doc)
 
+    def _clear_selection(self, doc) -> Dict:
+        """`clear_selection` against an already-resolved document -- see
+        `_select_by_id` for why the primitives take `doc` directly."""
         try:
             doc.ClearSelection2(True)
         except Exception as e:
@@ -192,12 +207,21 @@ class SelectionOperations:
         the downstream method separately, so a failure partway through can
         never leave stale selection state for the next tool call.
         """
-        self.clear_selection()
-        result = self.select_by_id(name, type_str, x, y, z, append, mark, callout, sel_option)
+        doc, err = self.get_active_doc()
+        if err:
+            yield err
+            return
+
+        # One document resolution for all three COM calls; composing the
+        # public `clear_selection`/`select_by_id` would re-resolve it three
+        # times, and this primitive fronts every annotation tool.
+        self._clear_selection(doc)
+        result = self._select_by_id(doc, name, type_str, x, y, z,
+                                    append, mark, callout, sel_option)
         try:
             yield result
         finally:
-            self.clear_selection()
+            self._clear_selection(doc)
 
     # ========================================================================
     # View selection / discovery
@@ -244,21 +268,16 @@ class SelectionOperations:
         vertex -> `IVertex::GetPoint`, edge -> `IEdge::GetStartPoint`,
         face -> the center of `IFace2::GetBox`'s bounding box.
         """
+        # Activate via `select_view_by_name` rather than repeating its
+        # `ActivateView` call, so the two tools report a missing view
+        # identically by construction.
+        activated = self.select_view_by_name(view_name)
+        if not activated["success"]:
+            return activated
+
         doc, err = self.get_drawing_doc()
         if err:
             return err
-
-        try:
-            activated = doc.ActivateView(view_name)
-        except Exception as e:
-            logger.error(f"list_view_entities error: {e}")
-            return self._result(False, f"List view entities error: {e}", SwErrors.swSelectionError)
-
-        if not activated:
-            return self._result(
-                False, f"View {view_name!r} not found in this drawing",
-                SwErrors.swSelectionError, {"view_name": view_name},
-            )
 
         try:
             view = doc.ActiveDrawingView

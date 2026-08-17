@@ -78,10 +78,10 @@ def listed_tools():
 
 
 class TestListToolsRegistry:
-    def test_list_tools_returns_the_same_32_tool_names(self, listed_tools):
+    def test_list_tools_returns_the_expected_tool_names(self, listed_tools):
         names = {tool.name for tool in listed_tools}
         assert names == EXPECTED_TOOL_NAMES
-        assert len(listed_tools) == 32
+        assert len(listed_tools) == len(EXPECTED_TOOL_NAMES)
 
     def test_list_tools_has_no_duplicate_names(self, listed_tools):
         names = [tool.name for tool in listed_tools]

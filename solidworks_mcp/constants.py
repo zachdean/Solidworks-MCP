@@ -49,6 +49,34 @@ class SwDocumentTypes(IntEnum):
     swDocIMPORTED_PART = 6
     swDocIMPORTED_ASSEMBLY = 7
 
+    @classmethod
+    def name_of(cls, code) -> str:
+        """Readable name for a `swDocumentTypes_e` code.
+
+        The single source of truth for turning `IModelDoc2::GetType` into
+        something worth showing a caller -- previously open-coded as three
+        partial `{0: "None", 1: "Part", ...}` literals that each covered a
+        different subset of the enum and drifted as members were added.
+        Unknown codes render as `unknown type <code>` rather than a bare
+        "Unknown", so a new swconst member is diagnosable from the message.
+        """
+        try:
+            return _DOC_TYPE_NAMES[cls(code)]
+        except (ValueError, KeyError):
+            return f"unknown type {code!r}"
+
+
+_DOC_TYPE_NAMES = {
+    SwDocumentTypes.swDocNONE: "no document",
+    SwDocumentTypes.swDocPART: "Part",
+    SwDocumentTypes.swDocASSEMBLY: "Assembly",
+    SwDocumentTypes.swDocDRAWING: "Drawing",
+    SwDocumentTypes.swDocSDM: "SDM",
+    SwDocumentTypes.swDocLAYOUT: "Layout",
+    SwDocumentTypes.swDocIMPORTED_PART: "Imported Part",
+    SwDocumentTypes.swDocIMPORTED_ASSEMBLY: "Imported Assembly",
+}
+
 
 # ============================================================================
 # Plane Names
@@ -168,11 +196,25 @@ class SwFileTypes:
     @classmethod
     def is_valid_part(cls, ext: str) -> bool:
         return ext.lower() == cls.PART
-    
+
+    @classmethod
+    def doc_type_for(cls, ext: str) -> "SwDocumentTypes":
+        """`swDocumentTypes_e` for a file extension -- `OpenDoc6`'s `Type`
+        argument. Defaults to `swDocPART` for an unrecognized extension, the
+        behaviour both former copies of this map already had."""
+        return _DOC_TYPE_BY_EXT.get(ext.lower(), SwDocumentTypes.swDocPART)
+
     @classmethod
     def is_valid_export(cls, ext: str) -> bool:
         valid = [cls.STEP, cls.STEP_ALT, cls.STL, cls.IGES, cls.PARASOLID, cls.DXF, cls.DWG, cls.PDF]
         return ext.lower() in valid
+
+
+_DOC_TYPE_BY_EXT = {
+    SwFileTypes.PART: SwDocumentTypes.swDocPART,
+    SwFileTypes.ASSEMBLY: SwDocumentTypes.swDocASSEMBLY,
+    SwFileTypes.DRAWING: SwDocumentTypes.swDocDRAWING,
+}
 
 
 # ============================================================================

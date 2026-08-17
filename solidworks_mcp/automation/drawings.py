@@ -9,7 +9,7 @@ import logging
 from typing import Any, Dict, Optional, Tuple
 
 from .. import com_backend
-from ..constants import SwErrors, SwDocumentTypes
+from ..constants import SwErrors, SwDocumentTypes, SwFileTypes
 from ..constants_drawing import (
     SwCustomInfoType,
     SwCustomPropertyAddOption,
@@ -21,17 +21,6 @@ from ..constants_drawing import (
 from ..utils import find_template
 
 logger = logging.getLogger(__name__)
-
-_DOC_TYPE_NAMES = {
-    SwDocumentTypes.swDocNONE: "no document",
-    SwDocumentTypes.swDocPART: "Part",
-    SwDocumentTypes.swDocASSEMBLY: "Assembly",
-    SwDocumentTypes.swDocDRAWING: "Drawing",
-    SwDocumentTypes.swDocSDM: "SDM",
-    SwDocumentTypes.swDocLAYOUT: "Layout",
-    SwDocumentTypes.swDocIMPORTED_PART: "Imported Part",
-    SwDocumentTypes.swDocIMPORTED_ASSEMBLY: "Imported Assembly",
-}
 
 # `IDrawingDoc::NewSheet4`/`SetupSheet5`'s PaperSize argument (swDwgPaperSizes_e),
 # keyed by the short paper-size names this tool layer accepts: (landscape, portrait).
@@ -62,13 +51,6 @@ _PAPER_SIZES = {
 # `_VIEW_ENTITY_TYPES`.
 _OPEN_DOC_OPTION_READ_ONLY = 2
 _OPEN_DOC_OPTION_LOAD_LIGHTWEIGHT = 128
-
-# Extension -> swDocumentTypes_e, for picking OpenDoc6's `Type` argument.
-_OPEN_DOC_TYPE_BY_EXT = {
-    ".sldprt": SwDocumentTypes.swDocPART,
-    ".sldasm": SwDocumentTypes.swDocASSEMBLY,
-    ".slddrw": SwDocumentTypes.swDocDRAWING,
-}
 
 
 class DrawingOperations:
@@ -105,7 +87,7 @@ class DrawingOperations:
 
         doc_type = self._get_doc_type(doc)
         if doc_type != int(SwDocumentTypes.swDocDRAWING):
-            type_name = _DOC_TYPE_NAMES.get(doc_type, f"unknown type {doc_type!r}")
+            type_name = SwDocumentTypes.name_of(doc_type)
             return None, self._result(
                 False,
                 f"Active document is a {type_name}, not a drawing. "
@@ -142,7 +124,7 @@ class DrawingOperations:
             return err
 
         doc_type = self._get_doc_type(doc)
-        type_name = _DOC_TYPE_NAMES.get(doc_type, f"unknown type {doc_type!r}")
+        type_name = SwDocumentTypes.name_of(doc_type)
 
         return self._result(
             True, f"Active document is a {type_name}", SwErrors.swSuccess,
@@ -275,8 +257,7 @@ class DrawingOperations:
                 {"name": existing_title, "path": filepath, "activated": True},
             )
 
-        ext = os.path.splitext(filepath)[1].lower()
-        doc_type = _OPEN_DOC_TYPE_BY_EXT.get(ext, SwDocumentTypes.swDocPART)
+        doc_type = SwFileTypes.doc_type_for(os.path.splitext(filepath)[1])
 
         options = 0
         if read_only:
@@ -323,13 +304,7 @@ class DrawingOperations:
             return None, None
 
         while doc:
-            try:
-                doc_title = doc.GetTitle
-                if callable(doc_title):
-                    doc_title = doc_title()
-            except Exception:
-                doc_title = None
-
+            doc_title = self._get_doc_title(doc)
             if doc_title and str(doc_title).lower() == target:
                 return doc, doc_title
 

@@ -878,3 +878,13 @@ def decode_save_error(code: int) -> str:
         parts.append(f"unknown bit(s) (0x{remaining:x})")
 
     return f"{code}: " + "; ".join(parts)
+
+
+# Derived rather than hand-listed: every public name *defined in this module*
+# (the `__module__` test excludes the imported `IntEnum`). `solidworks_mcp`'s
+# package `__init__` re-exports this wholesale, so adding an enum here needs no
+# edit anywhere else -- it previously took two more alphabetized lists.
+__all__ = sorted(
+    name for name, obj in list(globals().items())
+    if not name.startswith("_") and getattr(obj, "__module__", None) == __name__
+)

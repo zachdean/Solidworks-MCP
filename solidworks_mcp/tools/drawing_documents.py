@@ -10,7 +10,7 @@ docs/api/01-documents-and-sheets.md.
 
 from typing import Dict
 
-from . import sw_automation
+from ._automation import sw_automation
 from .registry import tool
 
 

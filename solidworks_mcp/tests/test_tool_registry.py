@@ -19,7 +19,6 @@ from solidworks_mcp.tools import registry as registry_module
 def empty_registry(monkeypatch):
     """Swap in a fresh, empty registry for the duration of the test."""
     monkeypatch.setattr(registry_module, "_TOOLS", {})
-    monkeypatch.setattr(registry_module, "_ORDER", [])
 
 
 def _dummy_schema():
