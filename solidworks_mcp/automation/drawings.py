@@ -432,6 +432,26 @@ def _com_bool(value: Any) -> Optional[bool]:
     return None
 
 
+def _com_int(value: Any) -> Optional[int]:
+    """Coerce a COM-returned numeric value to a real `int`, or `None` when it
+    carries no usable number -- the integer counterpart of `_com_bool`.
+
+    Every COM enum code this file reads back (`IView::Type`,
+    `IView::GetAlignment`, `swCropViewErrors_e`, ...) arrives as an `int`
+    through some interop layers and a `float` through others, and a failed
+    `_read_prop` yields `None`. A bare `isinstance(value, (int, float))`
+    test would also accept `True`/`False`, since `bool` subclasses `int` --
+    and an auto-vivified fake-COM member or a stray Boolean must not be
+    mistaken for enum code `1`. Rejecting `bool` explicitly is the guard
+    that was previously re-typed at every numeric COM read in this module.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    return None
+
+
 def _looks_like_missing_addin(message: str) -> bool:
     """Best-effort heuristic for `export_edrawings`: does a raised COM
     exception's message look like a missing/unavailable eDrawings add-in,
@@ -3927,16 +3947,10 @@ class DrawingOperations:
             )
 
         if sheet_name:
-            try:
-                activated = doc.ActivateSheet(sheet_name)
-            except Exception as e:
-                logger.error(f"insert_model_view activate sheet error: {e}")
-                return self._result(False, f"Activate sheet error: {e}", SwErrors.swInvalidInput)
-            if not activated:
-                return self._result(
-                    False, f"Sheet {sheet_name!r} not found", SwErrors.swInvalidInput,
-                    {"sheet_name": sheet_name},
-                )
+            activate_err = self._activate_sheet_or_error(
+                doc, sheet_name, "insert_model_view")
+            if activate_err:
+                return activate_err
 
         x_m = self._units.to_meters(x)
         y_m = self._units.to_meters(y)
@@ -4063,13 +4077,13 @@ class DrawingOperations:
         """
         name = self._read_prop(view, "GetName2")
 
-        type_code = self._read_prop(view, "Type")
+        type_code = self._read_view_type(view)
         type_name = None
-        if isinstance(type_code, (int, float)) and not isinstance(type_code, bool):
+        if type_code is not None:
             try:
-                type_name = SwDrawingViewTypes(int(type_code)).name
+                type_name = SwDrawingViewTypes(type_code).name
             except ValueError:
-                type_name = f"unknown type {int(type_code)}"
+                type_name = f"unknown type {type_code}"
 
         scale = self._read_prop(view, "ScaleDecimal")
         if not isinstance(scale, (int, float)) or isinstance(scale, bool):
@@ -4084,25 +4098,17 @@ class DrawingOperations:
             except (TypeError, ValueError):
                 x = y = None
 
-        base_view = None
-        try:
-            candidate = view.GetBaseView()
-        except Exception:
-            candidate = None
-        if candidate:
-            base_view = candidate
-        parent_view = self._read_prop(base_view, "GetName2") if base_view else None
+        base_view = self._base_view(view)
 
         return {
             "name": name,
             "type": type_name,
-            "type_code": int(type_code) if isinstance(type_code, (int, float))
-                and not isinstance(type_code, bool) else None,
+            "type_code": type_code,
             "scale": scale,
             "x": x,
             "y": y,
             "referenced_model": self._view_referenced_model(view, base_view),
-            "parent_view": parent_view,
+            "parent_view": self._read_prop(base_view, "GetName2") if base_view else None,
         }
 
     def list_views(self, sheet_name: Optional[str] = None) -> Dict:
@@ -4121,44 +4127,21 @@ class DrawingOperations:
         if err:
             return err
 
-        try:
-            if sheet_name:
-                sheet = doc.Sheet(sheet_name)
-                if not sheet:
-                    return self._result(
-                        False, f"Sheet {sheet_name!r} not found", SwErrors.swInvalidInput,
-                        {"sheet_name": sheet_name},
-                    )
-            else:
-                sheet = doc.GetCurrentSheet()
-                if not sheet:
-                    return self._result(False, "No active sheet", SwErrors.swFeatureError)
-                sheet_name = self._sheet_name(sheet)
+        sheet, sheet_err = self._resolve_sheet(doc, sheet_name)
+        if sheet_err:
+            return sheet_err
+        if not sheet_name:
+            sheet_name = self._sheet_name(sheet)
 
-            views_raw = sheet.GetViews()
-        except Exception as e:
-            logger.error(f"list_views error: {e}")
-            return self._result(False, f"List views error: {e}", SwErrors.swUnknownError)
+        views_raw, views_err = self._sheet_views_or_error(sheet, "list_views")
+        if views_err:
+            return views_err
 
-        if not isinstance(views_raw, (list, tuple)):
-            views_raw = []
-
-        # `ISheet::GetViews`'s own record documents it as *not* heading its
-        # array with the sheet's own pseudo-view entry, unlike
-        # `IDrawingDoc::GetViews` -- but that's an inference from one working
-        # macro's unconditional `For Each`, flagged unverified in the
-        # dossier. Filtering defensively here costs nothing on a harness
-        # that behaves as documented, and avoids surfacing a bogus
-        # "Sheet1"/`swDrawingSheet` entry as an addressable view if it
-        # doesn't. Only filter when `type_code` was actually readable --
-        # a real view with an unreadable `Type` must not silently vanish.
-        sheet_type_code = int(SwDrawingViewTypes.swDrawingSheet)
-        views = []
-        for view in views_raw:
-            described = self._describe_view(view)
-            if described["type_code"] == sheet_type_code:
-                continue
-            views.append(described)
+        # The sheet's own pseudo-view entry is filtered out before being
+        # described (`_is_sheet_pseudo_view`, via `_real_views`) rather than
+        # after -- `_describe_view` costs the better part of a dozen COM
+        # round trips per view, and every one of them would be thrown away.
+        views = [self._describe_view(view) for view in self._real_views(views_raw)]
 
         return self._result(
             True, f"{len(views)} view(s) on sheet {sheet_name!r}", SwErrors.swSuccess,
@@ -4167,9 +4150,16 @@ class DrawingOperations:
 
     def _resolve_sheet(self, doc, sheet_name: Optional[str]) -> Tuple[Any, Optional[Dict]]:
         """Resolve `sheet_name` (or the active sheet if omitted) to an
-        `ISheet` reference -- the shared entry point `insert_projected_view`/
-        `insert_auxiliary_view`/`insert_predefined_views` use to find the
-        views already on a sheet, mirroring `list_views`' own resolution.
+        `ISheet` reference -- the single entry point every view tool
+        (`list_views`, `insert_projected_view`, `insert_auxiliary_view`,
+        `insert_predefined_views`, `_find_view_by_name`, `delete_view`,
+        `auto_arrange_views`) uses to find the sheet it works on.
+
+        Distinct from `_resolve_named_sheet`, which the *sheet* tools use:
+        that one also returns the resolved name and reports a miss via
+        `_sheet_not_found`, listing the sheets that do exist. The two error
+        shapes are deliberately left as they are here -- unifying them would
+        change the failure payload of all 19 drawing-view tools.
         """
         try:
             if sheet_name:
@@ -4189,32 +4179,137 @@ class DrawingOperations:
 
         return sheet, None
 
+    def _activate_sheet_or_error(self, doc, sheet_name: str,
+                                   context: str) -> Optional[Dict]:
+        """Make `sheet_name` the active sheet via `IDrawingDoc::ActivateSheet`
+        -- what the view-creation tools that place a view on a named sheet do
+        first, since the create calls all target whatever sheet is active.
+
+        Returns `None` on success, or the failure result to propagate.
+
+        Unlike the public `activate_sheet`, this takes an already-resolved
+        `doc` and reports `swInvalidInput` (a bad `sheet_name` argument)
+        rather than that tool's own result shape -- the two callers here are
+        validating one of their own parameters, not performing an
+        activation the caller asked for.
+        """
+        try:
+            activated = doc.ActivateSheet(sheet_name)
+        except Exception as e:
+            logger.error(f"{context} activate sheet error: {e}")
+            return self._result(False, f"Activate sheet error: {e}", SwErrors.swInvalidInput)
+        if not activated:
+            return self._result(
+                False, f"Sheet {sheet_name!r} not found", SwErrors.swInvalidInput,
+                {"sheet_name": sheet_name},
+            )
+        return None
+
+    def _is_sheet_pseudo_view(self, view: Any) -> bool:
+        """Is `view` the sheet's own pseudo-view entry rather than a real
+        drawing view? -- the single definition of the filter every
+        sheet-walking helper in this file applies.
+
+        `ISheet::GetViews`'s own record documents it as *not* heading its
+        array with the sheet's own pseudo-view entry, unlike
+        `IDrawingDoc::GetViews` -- but that's an inference from one working
+        macro's unconditional `For Each`, flagged unverified in the dossier.
+        Filtering defensively costs nothing on a harness that behaves as
+        documented, and avoids surfacing a bogus "Sheet1"/`swDrawingSheet`
+        entry as an addressable view if it doesn't.
+
+        Only answers True when `Type` was actually readable *as a number*
+        (`_com_int`, which also rejects the `bool` that `isinstance(x, int)`
+        would let through) -- a real view with an unreadable `Type` must not
+        silently vanish from a caller's listing.
+        """
+        return self._read_view_type(view) == int(SwDrawingViewTypes.swDrawingSheet)
+
+    def _read_view_type(self, view: Any) -> Optional[int]:
+        """`IView::Type` as an `int`, or `None` if it wasn't readable as a
+        number -- the shared read behind `_is_sheet_pseudo_view` and
+        `_describe_view`'s `type`/`type_code` pair."""
+        return _com_int(self._read_prop(view, "Type"))
+
+    @staticmethod
+    def _base_view(view: Any) -> Any:
+        """`IView::GetBaseView` -- the view this one is derived from (its
+        alignment parent), or `None` if it has none or the read failed.
+        Never raises: a view with no parent is the normal case, not an
+        error."""
+        try:
+            return view.GetBaseView() or None
+        except Exception:
+            return None
+
+    def _base_view_name(self, view: Any) -> Optional[str]:
+        """The name of `view`'s `GetBaseView` parent, or `None` -- the
+        `GetBaseView` -> `GetName2` idiom shared by `_describe_view`,
+        `_view_children_map`, and `auto_arrange_views`."""
+        base = self._base_view(view)
+        return self._read_prop(base, "GetName2") if base else None
+
+    def _is_alignment_locked(self, view: Any) -> bool:
+        """Is `view` alignment-locked to a parent view (`IView::GetAlignment`
+        & `swViewAligned`)? -- such a view can only move along its alignment
+        vector, never to an arbitrary position, so `move_view` refuses it and
+        `auto_arrange_views` reports rather than places it.
+
+        Never raises; an unreadable/non-numeric `GetAlignment` reads as
+        "not locked", the permissive answer that leaves the caller's own
+        COM call to be the thing that fails if it really is locked."""
+        try:
+            alignment_code = view.GetAlignment()
+        except Exception:
+            return False
+        code = _com_int(alignment_code)
+        return code is not None and bool(code & int(SwViewAlignment.swViewAligned))
+
     def _iter_real_views(self, sheet: Any):
         """Yield every real (non-sheet-pseudo-view) view on `sheet` via
         `ISheet::GetViews` -- the one place the pseudo-view filter
         (docs/api/02-views.md's Gotchas on that entry) is enforced for the
         helpers that walk a sheet's views: `list_sheets`' view count,
-        `_sheet_view_names`, and `_sheet_view_fill_state`.
+        `_sheet_view_names`, `_sheet_view_fill_state`, `_find_view_by_name`,
+        `_view_children_map`, and `auto_arrange_views`.
 
-        Only filters when `Type` was actually readable, matching
-        `list_views`' own rule -- a real view with an unreadable `Type` must
-        not silently vanish. Yields nothing (never raises) if `GetViews`
-        fails or answers something other than a sequence.
+        Yields nothing (never raises) if `GetViews` fails or answers
+        something other than a sequence. Callers that must *report* a
+        `GetViews` failure rather than silently see an empty sheet call
+        `_sheet_views_or_error` first and pass the list to `_real_views`.
         """
+        yield from self._real_views(self._sheet_views_raw(sheet))
+
+    @staticmethod
+    def _sheet_views_raw(sheet: Any) -> List[Any]:
+        """`ISheet::GetViews` as a list, or `[]` if it failed or answered a
+        non-sequence -- never raises."""
         try:
             views_raw = sheet.GetViews() or []
         except Exception:
-            return
+            return []
+        return list(views_raw) if isinstance(views_raw, (list, tuple)) else []
+
+    def _real_views(self, views_raw: Any):
+        """Filter an already-fetched `GetViews` array down to real views."""
         if not isinstance(views_raw, (list, tuple)):
             return
-
-        sheet_type_code = int(SwDrawingViewTypes.swDrawingSheet)
         for view in views_raw:
-            type_code = self._read_prop(view, "Type")
-            if (isinstance(type_code, (int, float)) and not isinstance(type_code, bool)
-                    and int(type_code) == sheet_type_code):
-                continue
-            yield view
+            if not self._is_sheet_pseudo_view(view):
+                yield view
+
+    def _sheet_views_or_error(self, sheet: Any, context: str) -> Tuple[List[Any], Optional[Dict]]:
+        """`ISheet::GetViews` as a list, or `([], error_dict)` if the call
+        itself raised -- for the callers that must surface a `GetViews`
+        failure as a result dict instead of silently reading an empty sheet
+        the way `_iter_real_views` does. A non-sequence answer is still
+        treated as "no views", matching `_sheet_views_raw`."""
+        try:
+            views_raw = sheet.GetViews() or []
+        except Exception as e:
+            logger.error(f"{context} error: {e}")
+            return [], self._result(False, f"List views error: {e}", SwErrors.swUnknownError)
+        return (list(views_raw) if isinstance(views_raw, (list, tuple)) else []), None
 
     def _sheet_view_fill_state(self, sheet: Any) -> Dict[str, bool]:
         """`{view_name: has_referenced_model}` for every real
@@ -4242,7 +4337,8 @@ class DrawingOperations:
         return state
 
     def _find_view_by_name(self, doc, view_name: str,
-                            sheet_name: Optional[str] = None) -> Tuple[Any, List[str], Optional[Dict]]:
+                            sheet_name: Optional[str] = None,
+                            sheet: Any = None) -> Tuple[Any, List[str], Optional[Dict]]:
         """Resolve `view_name` to its raw `IView` object on `sheet_name` (or
         the active sheet), via `ISheet::GetViews` -- what `insert_projected_view`
         and `insert_auxiliary_view` use to validate a caller-supplied parent
@@ -4250,32 +4346,30 @@ class DrawingOperations:
         names on a miss rather than passing an unrecognized string straight
         through to a COM call whose only failure signal is a bare `Nothing`.
 
+        Args:
+            sheet: an already-resolved `ISheet` to search, for callers that
+                needed the sheet for something else anyway -- skips the
+                redundant `Sheet()`/`GetCurrentSheet()` round trip.
+                `sheet_name` is then only used to describe the sheet.
+
         Returns:
             `(view, names, None)` on a sheet-resolution success -- `view` is
             `None` (with `names` populated) if no view on the sheet has that
             name. `(None, [], error_dict)` if the sheet itself couldn't be
             resolved.
         """
-        sheet, err = self._resolve_sheet(doc, sheet_name)
-        if err:
-            return None, [], err
+        if sheet is None:
+            sheet, err = self._resolve_sheet(doc, sheet_name)
+            if err:
+                return None, [], err
 
-        try:
-            views_raw = sheet.GetViews() or []
-        except Exception as e:
-            logger.error(f"_find_view_by_name error: {e}")
-            return None, [], self._result(False, f"List views error: {e}", SwErrors.swUnknownError)
-        if not isinstance(views_raw, (list, tuple)):
-            views_raw = []
+        views_raw, views_err = self._sheet_views_or_error(sheet, "_find_view_by_name")
+        if views_err:
+            return None, [], views_err
 
-        sheet_type_code = int(SwDrawingViewTypes.swDrawingSheet)
         names = []
         match = None
-        for view in views_raw:
-            type_code = self._read_prop(view, "Type")
-            if (isinstance(type_code, (int, float)) and not isinstance(type_code, bool)
-                    and int(type_code) == sheet_type_code):
-                continue
+        for view in self._real_views(views_raw):
             name = self._read_prop(view, "GetName2")
             if name:
                 names.append(name)
@@ -4283,6 +4377,76 @@ class DrawingOperations:
                 match = view
 
         return match, names, None
+
+    def _require_view(self, doc, view_name: str, sheet_name: Optional[str],
+                       data: Optional[Dict[str, Any]] = None,
+                       label: str = "view", sheet: Any = None) -> Tuple[Any, Optional[Dict]]:
+        """Resolve `view_name` to its `IView`, or return the house
+        "unknown view" result -- the view-side mirror of `_sheet_not_found`,
+        and the one place the shape of that failure is defined.
+
+        Every drawing-view tool validates its caller-supplied view name the
+        same way (`_find_view_by_name`, then `swInvalidInput` listing the
+        names that *do* exist), so the message and payload live here rather
+        than being restated at each tool.
+
+        Args:
+            data: the calling tool's own context dict, merged into the
+                failure payload alongside `available_views` so the error
+                carries the arguments the caller passed.
+            label: how the view is named in the message -- "view",
+                "parent view", or "reference view", matching the role the
+                name plays in that tool's signature.
+            sheet: an already-resolved `ISheet`, passed straight through to
+                `_find_view_by_name` to avoid re-resolving it.
+
+        Returns:
+            `(view, None)` on a hit; `(None, error_dict)` if the sheet
+            couldn't be resolved, `GetViews` failed, or no view on the sheet
+            has that name.
+        """
+        view, names, find_err = self._find_view_by_name(doc, view_name, sheet_name, sheet)
+        if find_err:
+            return None, find_err
+        if view is None:
+            return None, self._result(
+                False,
+                f"Unknown {label} {view_name!r}; available views: {names!r}",
+                SwErrors.swInvalidInput,
+                {**(data or {}), "available_views": names},
+            )
+        return view, None
+
+    def _activate_view(self, doc, view_name: str, context: str,
+                        data: Optional[Dict[str, Any]] = None,
+                        label: str = "view") -> Optional[Dict]:
+        """Make `view_name` the active drawing view via
+        `IDrawingDoc::ActivateView`, so the sketch/annotation calls that
+        follow land in that view's own coordinate space.
+
+        Returns `None` on success, or the failure result to propagate.
+
+        This is deliberately *not*
+        `SelectionOperations.select_view_by_name`, which does the same COM
+        call: that one re-fetches the document and reports
+        `swSelectionError`, while every view-creation tool here has already
+        resolved `doc` and reports the activation step as a
+        `swFeatureError` against its own `data` context. Keeping the two
+        distinct preserves each caller's established error contract; the
+        duplication being removed here is the five byte-identical copies of
+        this block, not the difference between the two contracts.
+        """
+        try:
+            activated = doc.ActivateView(view_name)
+        except Exception as e:
+            logger.error(f"{context} activate view error: {e}")
+            return self._result(False, f"Activate view error: {e}", SwErrors.swFeatureError, data)
+        if not activated:
+            return self._result(
+                False, f"Failed to activate {label} {view_name!r}",
+                SwErrors.swFeatureError, data,
+            )
+        return None
 
     def insert_projected_view(self, parent_view_name: str, direction: str,
                                offset: Optional[float] = None,
@@ -4350,18 +4514,11 @@ class DrawingOperations:
             )
         dx_sign, dy_sign, not_aligned = mapping
 
-        parent_view, available_views, find_err = self._find_view_by_name(
-            doc, parent_view_name, sheet_name)
+        parent_view, find_err = self._require_view(
+            doc, parent_view_name, sheet_name,
+            {"parent_view_name": parent_view_name}, label="parent view")
         if find_err:
             return find_err
-        if parent_view is None:
-            return self._result(
-                False,
-                f"Unknown parent view {parent_view_name!r}; available views: "
-                f"{available_views!r}",
-                SwErrors.swInvalidInput,
-                {"parent_view_name": parent_view_name, "available_views": available_views},
-            )
 
         parent_position = self._read_prop(parent_view, "Position")
         if isinstance(parent_position, (list, tuple)) and len(parent_position) >= 2:
@@ -4471,16 +4628,10 @@ class DrawingOperations:
             return err
 
         if sheet_name:
-            try:
-                activated = doc.ActivateSheet(sheet_name)
-            except Exception as e:
-                logger.error(f"insert_predefined_views activate sheet error: {e}")
-                return self._result(False, f"Activate sheet error: {e}", SwErrors.swInvalidInput)
-            if not activated:
-                return self._result(
-                    False, f"Sheet {sheet_name!r} not found", SwErrors.swInvalidInput,
-                    {"sheet_name": sheet_name},
-                )
+            activate_err = self._activate_sheet_or_error(
+                doc, sheet_name, "insert_predefined_views")
+            if activate_err:
+                return activate_err
 
         sheet, sheet_err = self._resolve_sheet(doc, None)
         if sheet_err:
@@ -4513,6 +4664,11 @@ class DrawingOperations:
                 SwErrors.swFeatureError, data,
             )
 
+        # The sheet is re-resolved rather than reusing the reference from
+        # before the call: `InsertModelInPredefinedView` rebuilds the view
+        # tree, and this project's convention is not to trust a COM pointer
+        # held across a mutating call. One extra `GetCurrentSheet` round trip
+        # is cheap next to re-reading every view's `ReferencedDocument`.
         sheet, sheet_err = self._resolve_sheet(doc, None)
         if sheet_err:
             return sheet_err
@@ -4582,18 +4738,11 @@ class DrawingOperations:
         if err:
             return err
 
-        parent_view, available_views, find_err = self._find_view_by_name(
-            doc, parent_view_name, sheet_name)
+        parent_view, find_err = self._require_view(
+            doc, parent_view_name, sheet_name,
+            {"parent_view_name": parent_view_name}, label="parent view")
         if find_err:
             return find_err
-        if parent_view is None:
-            return self._result(
-                False,
-                f"Unknown parent view {parent_view_name!r}; available views: "
-                f"{available_views!r}",
-                SwErrors.swInvalidInput,
-                {"parent_view_name": parent_view_name, "available_views": available_views},
-            )
 
         if not isinstance(edge_selection, dict) or "x" not in edge_selection or "y" not in edge_selection:
             return self._result(
@@ -4639,43 +4788,65 @@ class DrawingOperations:
         )
 
     @staticmethod
-    def _normalize_cut_points(cut_points: Any) -> Tuple[Optional[List[Tuple[float, float]]], Optional[str]]:
-        """Validate and normalize `insert_section_view`'s `cut_points` into a
-        list of `(x, y)` float tuples, in the caller's default unit (not yet
-        converted to meters -- that happens per-segment once a parent view
-        is confirmed to exist).
+    def _normalize_xy_points(
+        raw_points: Any, *, field: str, minimum: int, drop_closing_duplicate: bool = False,
+    ) -> Tuple[Optional[List[Tuple[float, float]]], Optional[str]]:
+        """Validate and normalize a caller-supplied point list into `(x, y)`
+        float tuples, in the caller's default unit (not yet converted to
+        meters -- that happens per-segment once a parent view is confirmed to
+        exist). The one parser behind `_normalize_cut_points` and
+        `_normalize_profile_points`, which differ only in `field`, `minimum`,
+        and whether a pre-closed polygon is accepted.
 
         Each point may be `[x, y]`/`(x, y)` or `{"x": ..., "y": ...}`.
         Returns `(points, None)` on success, or `(None, error_message)` for
-        anything that isn't a valid 2+-point, 2+-distinct-point list --
-        checked entirely in Python, before any COM call, per this issue's
-        Acceptance Criteria ("no COM call" for an invalid `cut_points`).
+        anything that isn't a valid `minimum`+-point, `minimum`+-distinct-point
+        list -- checked entirely in Python, before any COM call, per those
+        issues' shared Acceptance Criteria ("no COM call" for invalid input).
+
+        Args:
+            drop_closing_duplicate: True drops a trailing point that
+                duplicates the first (an already-closed input, e.g.
+                `[A, B, C, A]`) before the distinctness check, so an
+                explicitly pre-closed polygon isn't penalized for what the
+                caller's own auto-close step would otherwise turn into a
+                degenerate zero-length closing segment.
         """
-        if not isinstance(cut_points, (list, tuple)) or len(cut_points) < 2:
-            got = len(cut_points) if isinstance(cut_points, (list, tuple)) else cut_points
-            return None, f"cut_points must have at least 2 (x, y) pairs; got {got!r}"
+        if not isinstance(raw_points, (list, tuple)) or len(raw_points) < minimum:
+            got = len(raw_points) if isinstance(raw_points, (list, tuple)) else raw_points
+            return None, f"{field} must have at least {minimum} (x, y) pairs; got {got!r}"
 
         points: List[Tuple[float, float]] = []
-        for i, raw in enumerate(cut_points):
+        for i, raw in enumerate(raw_points):
             if isinstance(raw, dict):
                 if "x" not in raw or "y" not in raw:
-                    return None, f"cut_points[{i}] must have 'x' and 'y'; got {raw!r}"
+                    return None, f"{field}[{i}] must have 'x' and 'y'; got {raw!r}"
                 px, py = raw["x"], raw["y"]
             elif isinstance(raw, (list, tuple)) and len(raw) >= 2:
                 px, py = raw[0], raw[1]
             else:
                 return None, (
-                    f"cut_points[{i}] must be [x, y] or {{'x': ..., 'y': ...}}; got {raw!r}"
+                    f"{field}[{i}] must be [x, y] or {{'x': ..., 'y': ...}}; got {raw!r}"
                 )
             try:
                 points.append((float(px), float(py)))
             except (TypeError, ValueError):
-                return None, f"cut_points[{i}] has non-numeric coordinates: {raw!r}"
+                return None, f"{field}[{i}] has non-numeric coordinates: {raw!r}"
 
-        if len(set(points)) < 2:
-            return None, "cut_points must contain at least 2 distinct points"
+        if drop_closing_duplicate and len(points) >= 2 and points[-1] == points[0]:
+            points = points[:-1]
+
+        if len(set(points)) < minimum:
+            return None, f"{field} must contain at least {minimum} distinct points"
 
         return points, None
+
+    @classmethod
+    def _normalize_cut_points(cls, cut_points: Any) -> Tuple[Optional[List[Tuple[float, float]]], Optional[str]]:
+        """`insert_section_view`'s `cut_points`: at least 2 distinct points,
+        with no pre-close handling (a section cut line is an open polyline,
+        not a closed profile). See `_normalize_xy_points`."""
+        return cls._normalize_xy_points(cut_points, field="cut_points", minimum=2)
 
     def insert_section_view(
         self, parent_view_name: str, cut_points: List[Any], x: float, y: float,
@@ -4807,68 +4978,33 @@ class DrawingOperations:
         if flip_direction:
             options |= int(SwCreateSectionViewAtOptions.swCreateSectionView_ChangeDirection)
 
-        parent_view, available_views, find_err = self._find_view_by_name(doc, parent_view_name, None)
+        parent_view, find_err = self._require_view(
+            doc, parent_view_name, None, data, label="parent view")
         if find_err:
             return find_err
-        if parent_view is None:
-            return self._result(
-                False,
-                f"Unknown parent view {parent_view_name!r}; available views: "
-                f"{available_views!r}",
-                SwErrors.swInvalidInput,
-                {**data, "available_views": available_views},
-            )
 
-        try:
-            activated = doc.ActivateView(parent_view_name)
-        except Exception as e:
-            logger.error(f"insert_section_view activate view error: {e}")
-            return self._result(False, f"Activate view error: {e}", SwErrors.swFeatureError, data)
-        if not activated:
-            return self._result(
-                False, f"Failed to activate parent view {parent_view_name!r}",
-                SwErrors.swFeatureError, data,
-            )
+        activate_err = self._activate_view(
+            doc, parent_view_name, "insert_section_view", data, label="parent view")
+        if activate_err:
+            return activate_err
 
-        segment_midpoints: List[Tuple[float, float]] = []
-        try:
-            for (x1, y1), (x2, y2) in zip(points, points[1:]):
-                x1_m, y1_m = self._units.to_meters(x1), self._units.to_meters(y1)
-                x2_m, y2_m = self._units.to_meters(x2), self._units.to_meters(y2)
-                segment = doc.SketchManager.CreateLine(x1_m, y1_m, 0.0, x2_m, y2_m, 0.0)
-                if segment is None:
-                    return self._result(
-                        False,
-                        "Failed to sketch cut-line segment -- ensure the parent view "
-                        f"{parent_view_name!r} supports a section line",
-                        SwErrors.swSketchError, data,
-                    )
-                # Selected below by a representative point in the same
-                # view-local space CreateLine just used -- this wrapper's
-                # own convention (not sourced in the dossier, which doesn't
-                # cover SelectByID2's coordinate space for a freshly-created
-                # drawing-view sketch entity), same caveat
-                # `list_view_entities` flags for its own coordinate space.
-                segment_midpoints.append(((x1 + x2) / 2.0, (y1 + y2) / 2.0))
-        except Exception as e:
-            logger.error(f"insert_section_view sketch error: {e}")
-            return self._result(False, f"Sketch cut line error: {e}", SwErrors.swSketchError, data)
+        segment_midpoints, sketch_err = self._sketch_segment_loop(
+            doc, points, close=False, context="insert_section_view",
+            failure_message=(
+                "Failed to sketch cut-line segment -- ensure the parent view "
+                f"{parent_view_name!r} supports a section line"
+            ),
+            sketch_error_message="Sketch cut line error", data=data,
+        )
+        if sketch_err:
+            return sketch_err
 
         # Select every cut-line segment atomically before the call, per the
-        # dossier's "select the section line or lines" requirement -- the
-        # first `selected()` clears any stale selection (and clears again on
-        # its own exit); every subsequent one appends and skips clearing on
-        # both ends (see SelectionOperations.selected's docstring), so the
-        # ExitStack's LIFO unwind leaves the outermost/first block to do the
-        # one real clear, after everything inside it (including the create
-        # call) has run.
+        # dossier's "select the section line or lines" requirement.
         with ExitStack() as stack:
-            for i, (mx, my) in enumerate(segment_midpoints):
-                sel = stack.enter_context(
-                    self.selected("", "SKETCHSEGMENT", mx, my, 0, append=(i > 0), mark=i)
-                )
-                if not sel["success"]:
-                    return sel
+            sel_err = self._select_segments(stack, segment_midpoints)
+            if sel_err:
+                return sel_err
 
             try:
                 args = CREATE_SECTION_VIEW_AT5.bind(
@@ -4937,6 +5073,86 @@ class DrawingOperations:
             True, f"Inserted section view {created_name or ''!r} off {parent_view_name!r}",
             SwErrors.swSuccess, data,
         )
+
+    def _sketch_segment_loop(
+        self, doc, points: List[Tuple[float, float]], *, close: bool,
+        context: str, failure_message: str, sketch_error_message: str,
+        data: Dict[str, Any],
+    ) -> Tuple[List[Tuple[float, float]], Optional[Dict]]:
+        """Sketch `points` as a chain of `ISketchManager::CreateLine`
+        segments in the currently-active drawing view, returning one
+        representative midpoint per segment -- the shared body of
+        `insert_section_view`'s cut line and `insert_broken_out_section`/
+        `add_crop_view`'s closed profiles.
+
+        Coordinates arrive in the caller's default unit and are converted
+        per-endpoint here. Each segment's midpoint is what the caller later
+        hands `SelectByID2`, in the same view-local space `CreateLine` just
+        used -- this wrapper's own convention (not sourced in the dossier,
+        which doesn't cover `SelectByID2`'s coordinate space for a
+        freshly-created drawing-view sketch entity), the same caveat
+        `list_view_entities` flags for its own coordinate space.
+
+        `ISketchManager` is fetched once rather than per segment: it is a
+        COM property on `IModelDoc2`, so re-reading it inside the loop would
+        cost one cross-process round trip per segment for an object that
+        does not change.
+
+        Args:
+            close: True appends a final segment from the last point back to
+                the first, for callers that need a closed profile.
+
+        Returns:
+            `(midpoints, None)` on success. On failure, `(midpoints, error)`
+            where `midpoints` covers whatever segments were created before
+            the failure -- callers that clean up partial geometry pass it
+            straight to `_delete_sketch_geometry`.
+        """
+        loop_points = list(points) + [points[0]] if close else list(points)
+
+        midpoints: List[Tuple[float, float]] = []
+        try:
+            sketch_mgr = doc.SketchManager
+            for (x1, y1), (x2, y2) in zip(loop_points, loop_points[1:]):
+                x1_m, y1_m = self._units.to_meters(x1), self._units.to_meters(y1)
+                x2_m, y2_m = self._units.to_meters(x2), self._units.to_meters(y2)
+                segment = sketch_mgr.CreateLine(x1_m, y1_m, 0.0, x2_m, y2_m, 0.0)
+                if segment is None:
+                    return midpoints, self._result(
+                        False, failure_message, SwErrors.swSketchError, data,
+                    )
+                midpoints.append(((x1 + x2) / 2.0, (y1 + y2) / 2.0))
+        except Exception as e:
+            logger.error(f"{context} sketch error: {e}")
+            return midpoints, self._result(
+                False, f"{sketch_error_message}: {e}", SwErrors.swSketchError, data,
+            )
+
+        return midpoints, None
+
+    def _select_segments(self, stack: ExitStack,
+                          midpoints: List[Tuple[float, float]]) -> Optional[Dict]:
+        """Select every sketched segment atomically into `stack`, by the
+        representative midpoints `_sketch_segment_loop` returned.
+
+        The first `selected()` clears any stale selection (and clears again
+        on its own exit); every subsequent one appends and skips clearing on
+        both ends (see `SelectionOperations.selected`'s docstring), so the
+        `ExitStack`'s LIFO unwind leaves the outermost/first block to do the
+        one real clear, after everything inside it -- including the caller's
+        create call -- has run. That `append=(i > 0)` invariant is the
+        easiest thing here to get wrong, so it is stated once, here.
+
+        Returns `None` once everything is selected, or the failing
+        `selected()` result for the caller to propagate.
+        """
+        for i, (mx, my) in enumerate(midpoints):
+            sel = stack.enter_context(
+                self.selected("", "SKETCHSEGMENT", mx, my, 0, append=(i > 0), mark=i)
+            )
+            if not sel["success"]:
+                return sel
+        return None
 
     def _delete_sketch_geometry(self, doc, points: List[Tuple[float, float]]) -> None:
         """Best-effort cleanup of construction sketch geometry left behind by a
@@ -5074,28 +5290,15 @@ class DrawingOperations:
                 SwErrors.swInvalidInput, data,
             )
 
-        parent_view, available_views, find_err = self._find_view_by_name(doc, parent_view_name, None)
+        parent_view, find_err = self._require_view(
+            doc, parent_view_name, None, data, label="parent view")
         if find_err:
             return find_err
-        if parent_view is None:
-            return self._result(
-                False,
-                f"Unknown parent view {parent_view_name!r}; available views: "
-                f"{available_views!r}",
-                SwErrors.swInvalidInput,
-                {**data, "available_views": available_views},
-            )
 
-        try:
-            activated = doc.ActivateView(parent_view_name)
-        except Exception as e:
-            logger.error(f"insert_detail_view activate view error: {e}")
-            return self._result(False, f"Activate view error: {e}", SwErrors.swFeatureError, data)
-        if not activated:
-            return self._result(
-                False, f"Failed to activate parent view {parent_view_name!r}",
-                SwErrors.swFeatureError, data,
-            )
+        activate_err = self._activate_view(
+            doc, parent_view_name, "insert_detail_view", data, label="parent view")
+        if activate_err:
+            return activate_err
 
         if scale_num is not None:
             scale1, scale2 = scale_num, scale_denom
@@ -5166,56 +5369,18 @@ class DrawingOperations:
             SwErrors.swSuccess, data,
         )
 
-    @staticmethod
+    @classmethod
     def _normalize_profile_points(
-        profile_points: Any,
+        cls, profile_points: Any,
     ) -> Tuple[Optional[List[Tuple[float, float]]], Optional[str]]:
-        """Validate and normalize `insert_broken_out_section`'s and
-        `add_crop_view`'s `profile_points` into a list of `(x, y)` float tuples, in the
-        caller's default unit (not yet converted to meters -- that happens
-        per-segment once a parent view is confirmed to exist).
-
-        Each point may be `[x, y]`/`(x, y)` or `{"x": ..., "y": ...}`, the
-        same accepted shapes as `_normalize_cut_points`. Returns `(points,
-        None)` on success, or `(None, error_message)` for anything that isn't
-        a valid 3+-point, 3+-distinct-point profile -- checked entirely in
-        Python, before any COM call, per this issue's Acceptance Criteria
-        ("no COM call" for a profile with fewer than 3 points).
-
-        A trailing point that duplicates the first (an already-closed input,
-        e.g. `[A, B, C, A]`) is dropped before the distinctness check, so an
-        explicitly pre-closed polygon isn't penalized for what
-        `insert_broken_out_section`'s own auto-close step would otherwise
-        turn into a degenerate zero-length closing segment.
-        """
-        if not isinstance(profile_points, (list, tuple)) or len(profile_points) < 3:
-            got = len(profile_points) if isinstance(profile_points, (list, tuple)) else profile_points
-            return None, f"profile_points must have at least 3 (x, y) pairs; got {got!r}"
-
-        points: List[Tuple[float, float]] = []
-        for i, raw in enumerate(profile_points):
-            if isinstance(raw, dict):
-                if "x" not in raw or "y" not in raw:
-                    return None, f"profile_points[{i}] must have 'x' and 'y'; got {raw!r}"
-                px, py = raw["x"], raw["y"]
-            elif isinstance(raw, (list, tuple)) and len(raw) >= 2:
-                px, py = raw[0], raw[1]
-            else:
-                return None, (
-                    f"profile_points[{i}] must be [x, y] or {{'x': ..., 'y': ...}}; got {raw!r}"
-                )
-            try:
-                points.append((float(px), float(py)))
-            except (TypeError, ValueError):
-                return None, f"profile_points[{i}] has non-numeric coordinates: {raw!r}"
-
-        if len(points) >= 2 and points[-1] == points[0]:
-            points = points[:-1]
-
-        if len(set(points)) < 3:
-            return None, "profile_points must contain at least 3 distinct points"
-
-        return points, None
+        """`insert_broken_out_section`'s and `add_crop_view`'s
+        `profile_points`: at least 3 distinct points, with a trailing
+        duplicate of the first dropped so an explicitly pre-closed polygon is
+        accepted (both callers auto-close the loop themselves). See
+        `_normalize_xy_points`."""
+        return cls._normalize_xy_points(
+            profile_points, field="profile_points", minimum=3, drop_closing_duplicate=True,
+        )
 
     def insert_broken_out_section(
         self, parent_view_name: str, profile_points: List[Any],
@@ -5333,60 +5498,34 @@ class DrawingOperations:
                 SwErrors.swInvalidInput, data,
             )
 
-        parent_view, available_views, find_err = self._find_view_by_name(doc, parent_view_name, None)
+        parent_view, find_err = self._require_view(
+            doc, parent_view_name, None, data, label="parent view")
         if find_err:
             return find_err
-        if parent_view is None:
-            return self._result(
-                False,
-                f"Unknown parent view {parent_view_name!r}; available views: "
-                f"{available_views!r}",
-                SwErrors.swInvalidInput,
-                {**data, "available_views": available_views},
-            )
 
-        try:
-            activated = doc.ActivateView(parent_view_name)
-        except Exception as e:
-            logger.error(f"insert_broken_out_section activate view error: {e}")
-            return self._result(False, f"Activate view error: {e}", SwErrors.swFeatureError, data)
-        if not activated:
-            return self._result(
-                False, f"Failed to activate parent view {parent_view_name!r}",
-                SwErrors.swFeatureError, data,
-            )
+        activate_err = self._activate_view(
+            doc, parent_view_name, "insert_broken_out_section", data, label="parent view")
+        if activate_err:
+            return activate_err
 
         # Auto-close: an extra segment connects the last point back to the first.
-        loop_points = list(points) + [points[0]]
-
-        segment_midpoints: List[Tuple[float, float]] = []
-        try:
-            for (x1, y1), (x2, y2) in zip(loop_points, loop_points[1:]):
-                x1_m, y1_m = self._units.to_meters(x1), self._units.to_meters(y1)
-                x2_m, y2_m = self._units.to_meters(x2), self._units.to_meters(y2)
-                segment = doc.SketchManager.CreateLine(x1_m, y1_m, 0.0, x2_m, y2_m, 0.0)
-                if segment is None:
-                    self._delete_sketch_geometry(doc, segment_midpoints)
-                    return self._result(
-                        False,
-                        "Failed to sketch profile segment -- ensure the parent view "
-                        f"{parent_view_name!r} supports a broken-out section",
-                        SwErrors.swSketchError, data,
-                    )
-                segment_midpoints.append(((x1 + x2) / 2.0, (y1 + y2) / 2.0))
-        except Exception as e:
-            logger.error(f"insert_broken_out_section sketch error: {e}")
+        segment_midpoints, sketch_err = self._sketch_segment_loop(
+            doc, points, close=True, context="insert_broken_out_section",
+            failure_message=(
+                "Failed to sketch profile segment -- ensure the parent view "
+                f"{parent_view_name!r} supports a broken-out section"
+            ),
+            sketch_error_message="Sketch profile error", data=data,
+        )
+        if sketch_err:
             self._delete_sketch_geometry(doc, segment_midpoints)
-            return self._result(False, f"Sketch profile error: {e}", SwErrors.swSketchError, data)
+            return sketch_err
 
         with ExitStack() as stack:
-            for i, (mx, my) in enumerate(segment_midpoints):
-                sel = stack.enter_context(
-                    self.selected("", "SKETCHSEGMENT", mx, my, 0, append=(i > 0), mark=i)
-                )
-                if not sel["success"]:
-                    self._delete_sketch_geometry(doc, segment_midpoints)
-                    return sel
+            sel_err = self._select_segments(stack, segment_midpoints)
+            if sel_err:
+                self._delete_sketch_geometry(doc, segment_midpoints)
+                return sel_err
 
             if preview:
                 self._delete_sketch_geometry(doc, segment_midpoints)
@@ -5540,27 +5679,13 @@ class DrawingOperations:
                 SwErrors.swInvalidInput, data,
             )
 
-        view, available_views, find_err = self._find_view_by_name(doc, view_name, None)
+        view, find_err = self._require_view(doc, view_name, None, data)
         if find_err:
             return find_err
-        if view is None:
-            return self._result(
-                False,
-                f"Unknown view {view_name!r}; available views: {available_views!r}",
-                SwErrors.swInvalidInput,
-                {**data, "available_views": available_views},
-            )
 
-        try:
-            activated = doc.ActivateView(view_name)
-        except Exception as e:
-            logger.error(f"insert_break_view activate view error: {e}")
-            return self._result(False, f"Activate view error: {e}", SwErrors.swFeatureError, data)
-        if not activated:
-            return self._result(
-                False, f"Failed to activate view {view_name!r}",
-                SwErrors.swFeatureError, data,
-            )
+        activate_err = self._activate_view(doc, view_name, "insert_break_view", data)
+        if activate_err:
+            return activate_err
 
         pos1_m = self._units.to_meters(position1)
         pos2_m = self._units.to_meters(position2)
@@ -5642,16 +5767,9 @@ class DrawingOperations:
 
         data = {"view_name": view_name}
 
-        view, available_views, find_err = self._find_view_by_name(doc, view_name, None)
+        view, find_err = self._require_view(doc, view_name, None, data)
         if find_err:
             return find_err
-        if view is None:
-            return self._result(
-                False,
-                f"Unknown view {view_name!r}; available views: {available_views!r}",
-                SwErrors.swInvalidInput,
-                {**data, "available_views": available_views},
-            )
 
         with self.selected(view_name, "DRAWINGVIEW", 0, 0, 0) as sel:
             if not sel["success"]:
@@ -5721,16 +5839,9 @@ class DrawingOperations:
         if point_err:
             return self._result(False, point_err, SwErrors.swInvalidInput, data)
 
-        view, available_views, find_err = self._find_view_by_name(doc, view_name, None)
+        view, find_err = self._require_view(doc, view_name, None, data)
         if find_err:
             return find_err
-        if view is None:
-            return self._result(
-                False,
-                f"Unknown view {view_name!r}; available views: {available_views!r}",
-                SwErrors.swInvalidInput,
-                {**data, "available_views": available_views},
-            )
 
         if self._read_prop(view, "IsCropped"):
             return self._result(
@@ -5740,48 +5851,28 @@ class DrawingOperations:
                 SwErrors.swFeatureError, data,
             )
 
-        try:
-            activated = doc.ActivateView(view_name)
-        except Exception as e:
-            logger.error(f"add_crop_view activate view error: {e}")
-            return self._result(False, f"Activate view error: {e}", SwErrors.swFeatureError, data)
-        if not activated:
-            return self._result(
-                False, f"Failed to activate view {view_name!r}",
-                SwErrors.swFeatureError, data,
-            )
+        activate_err = self._activate_view(doc, view_name, "add_crop_view", data)
+        if activate_err:
+            return activate_err
 
         # Auto-close: an extra segment connects the last point back to the first.
-        loop_points = list(points) + [points[0]]
-
-        segment_midpoints: List[Tuple[float, float]] = []
-        try:
-            for (x1, y1), (x2, y2) in zip(loop_points, loop_points[1:]):
-                x1_m, y1_m = self._units.to_meters(x1), self._units.to_meters(y1)
-                x2_m, y2_m = self._units.to_meters(x2), self._units.to_meters(y2)
-                segment = doc.SketchManager.CreateLine(x1_m, y1_m, 0.0, x2_m, y2_m, 0.0)
-                if segment is None:
-                    self._delete_sketch_geometry(doc, segment_midpoints)
-                    return self._result(
-                        False,
-                        "Failed to sketch profile segment -- ensure the view "
-                        f"{view_name!r} supports a crop",
-                        SwErrors.swSketchError, data,
-                    )
-                segment_midpoints.append(((x1 + x2) / 2.0, (y1 + y2) / 2.0))
-        except Exception as e:
-            logger.error(f"add_crop_view sketch error: {e}")
+        segment_midpoints, sketch_err = self._sketch_segment_loop(
+            doc, points, close=True, context="add_crop_view",
+            failure_message=(
+                "Failed to sketch profile segment -- ensure the view "
+                f"{view_name!r} supports a crop"
+            ),
+            sketch_error_message="Sketch profile error", data=data,
+        )
+        if sketch_err:
             self._delete_sketch_geometry(doc, segment_midpoints)
-            return self._result(False, f"Sketch profile error: {e}", SwErrors.swSketchError, data)
+            return sketch_err
 
         with ExitStack() as stack:
-            for i, (mx, my) in enumerate(segment_midpoints):
-                sel = stack.enter_context(
-                    self.selected("", "SKETCHSEGMENT", mx, my, 0, append=(i > 0), mark=i)
-                )
-                if not sel["success"]:
-                    self._delete_sketch_geometry(doc, segment_midpoints)
-                    return sel
+            sel_err = self._select_segments(stack, segment_midpoints)
+            if sel_err:
+                self._delete_sketch_geometry(doc, segment_midpoints)
+                return sel_err
 
             try:
                 status = view.Crop2(False, False, 1)
@@ -5790,9 +5881,7 @@ class DrawingOperations:
                 self._delete_sketch_geometry(doc, segment_midpoints)
                 return self._result(False, f"Crop view error: {e}", SwErrors.swFeatureError, data)
 
-        status_int = (
-            int(status) if isinstance(status, (int, float)) and not isinstance(status, bool) else None
-        )
+        status_int = _com_int(status)
         if status_int != int(SwCropViewErrors.swCropViewErrors_NoError):
             self._delete_sketch_geometry(doc, segment_midpoints)
             try:
@@ -5839,16 +5928,9 @@ class DrawingOperations:
 
         data = {"view_name": view_name}
 
-        view, available_views, find_err = self._find_view_by_name(doc, view_name, None)
+        view, find_err = self._require_view(doc, view_name, None, data)
         if find_err:
             return find_err
-        if view is None:
-            return self._result(
-                False,
-                f"Unknown view {view_name!r}; available views: {available_views!r}",
-                SwErrors.swInvalidInput,
-                {**data, "available_views": available_views},
-            )
 
         if not self._read_prop(view, "IsCropped"):
             return self._result(
@@ -5912,25 +5994,14 @@ class DrawingOperations:
         if err:
             return err
 
-        view, names, find_err = self._find_view_by_name(doc, view_name, sheet_name)
+        view, find_err = self._require_view(
+            doc, view_name, sheet_name, {"view_name": view_name})
         if find_err:
             return find_err
-        if view is None:
-            return self._result(
-                False,
-                f"Unknown view {view_name!r}; available views: {names!r}",
-                SwErrors.swInvalidInput,
-                {"view_name": view_name, "available_views": names},
-            )
 
         data = {"view_name": view_name, "x": x, "y": y, "sheet_name": sheet_name}
 
-        try:
-            alignment_code = view.GetAlignment()
-        except Exception:
-            alignment_code = None
-        if (isinstance(alignment_code, (int, float)) and not isinstance(alignment_code, bool)
-                and int(alignment_code) & int(SwViewAlignment.swViewAligned)):
+        if self._is_alignment_locked(view):
             return self._result(
                 False,
                 f"View {view_name!r} is alignment-locked to a parent view "
@@ -6007,16 +6078,15 @@ class DrawingOperations:
             "alignment": alignment_key, "sheet_name": sheet_name,
         }
 
-        view, names, find_err = self._find_view_by_name(doc, view_name, sheet_name)
+        # Both views live on the same sheet, so it is resolved once here and
+        # reused for the reference-view lookup further down.
+        sheet, sheet_err = self._resolve_sheet(doc, sheet_name)
+        if sheet_err:
+            return sheet_err
+
+        view, find_err = self._require_view(doc, view_name, sheet_name, data, sheet=sheet)
         if find_err:
             return find_err
-        if view is None:
-            return self._result(
-                False,
-                f"Unknown view {view_name!r}; available views: {names!r}",
-                SwErrors.swInvalidInput,
-                {**data, "available_views": names},
-            )
 
         if alignment_key in ("none", "break"):
             try:
@@ -6056,18 +6126,11 @@ class DrawingOperations:
                 SwErrors.swInvalidInput, data,
             )
 
-        reference_view, ref_names, ref_find_err = self._find_view_by_name(
-            doc, reference_view_name, sheet_name)
+        reference_view, ref_find_err = self._require_view(
+            doc, reference_view_name, sheet_name, data,
+            label="reference view", sheet=sheet)
         if ref_find_err:
             return ref_find_err
-        if reference_view is None:
-            return self._result(
-                False,
-                f"Unknown reference view {reference_view_name!r}; available views: "
-                f"{ref_names!r}",
-                SwErrors.swInvalidInput,
-                {**data, "available_views": ref_names},
-            )
 
         try:
             aligned = view.AlignWithView(int(align_type), reference_view)
@@ -6142,16 +6205,9 @@ class DrawingOperations:
                     SwErrors.swInvalidInput, data,
                 )
 
-        view, names, find_err = self._find_view_by_name(doc, view_name, sheet_name)
+        view, find_err = self._require_view(doc, view_name, sheet_name, data)
         if find_err:
             return find_err
-        if view is None:
-            return self._result(
-                False,
-                f"Unknown view {view_name!r}; available views: {names!r}",
-                SwErrors.swInvalidInput,
-                {**data, "available_views": names},
-            )
 
         try:
             if use_sheet_scale:
@@ -6229,16 +6285,9 @@ class DrawingOperations:
                 SwErrors.swInvalidInput, data,
             )
 
-        view, names, find_err = self._find_view_by_name(doc, view_name, sheet_name)
+        view, find_err = self._require_view(doc, view_name, sheet_name, data)
         if find_err:
             return find_err
-        if view is None:
-            return self._result(
-                False,
-                f"Unknown view {view_name!r}; available views: {names!r}",
-                SwErrors.swInvalidInput,
-                {**data, "available_views": names},
-            )
 
         try:
             applied = view.SetDisplayMode3(
@@ -6263,28 +6312,12 @@ class DrawingOperations:
         """`{parent_name: [direct_child_name, ...]}` for every real view on
         `sheet`, via `IView::GetBaseView` -- what `delete_view` uses to find
         a view's dependents before deleting it."""
-        try:
-            views_raw = sheet.GetViews() or []
-        except Exception:
-            views_raw = []
-        if not isinstance(views_raw, (list, tuple)):
-            views_raw = []
-
-        sheet_type_code = int(SwDrawingViewTypes.swDrawingSheet)
         children: Dict[str, List[str]] = {}
-        for view in views_raw:
-            type_code = self._read_prop(view, "Type")
-            if (isinstance(type_code, (int, float)) and not isinstance(type_code, bool)
-                    and int(type_code) == sheet_type_code):
-                continue
+        for view in self._iter_real_views(sheet):
             name = self._read_prop(view, "GetName2")
             if not name:
                 continue
-            try:
-                base = view.GetBaseView()
-            except Exception:
-                base = None
-            parent_name = self._read_prop(base, "GetName2") if base else None
+            parent_name = self._base_view_name(view)
             if parent_name:
                 children.setdefault(parent_name, []).append(name)
         return children
@@ -6358,16 +6391,11 @@ class DrawingOperations:
         if sheet_err:
             return sheet_err
 
-        view, names, find_err = self._find_view_by_name(doc, view_name, sheet_name)
+        # `sheet` is reused for both the name check and the dependent-view
+        # walk below, rather than letting `_require_view` resolve it again.
+        _view, find_err = self._require_view(doc, view_name, sheet_name, data, sheet=sheet)
         if find_err:
             return find_err
-        if view is None:
-            return self._result(
-                False,
-                f"Unknown view {view_name!r}; available views: {names!r}",
-                SwErrors.swInvalidInput,
-                {**data, "available_views": names},
-            )
 
         children_map = self._view_children_map(sheet)
         descendants = self._descendant_views(children_map, view_name)
@@ -6485,23 +6513,13 @@ class DrawingOperations:
             )
         margin_m = self._units.to_meters(margin) if margin is not None else self._DEFAULT_ARRANGE_MARGIN_M
 
-        try:
-            views_raw = sheet.GetViews() or []
-        except Exception as e:
-            logger.error(f"auto_arrange_views error: {e}")
-            return self._result(False, f"List views error: {e}", SwErrors.swUnknownError)
-        if not isinstance(views_raw, (list, tuple)):
-            views_raw = []
+        views_raw, views_err = self._sheet_views_or_error(sheet, "auto_arrange_views")
+        if views_err:
+            return views_err
 
-        sheet_type_code = int(SwDrawingViewTypes.swDrawingSheet)
         by_name: Dict[str, Dict[str, Any]] = {}
-        order: List[str] = []
         skipped: List[str] = []
-        for view in views_raw:
-            type_code = self._read_prop(view, "Type")
-            if (isinstance(type_code, (int, float)) and not isinstance(type_code, bool)
-                    and int(type_code) == sheet_type_code):
-                continue
+        for view in self._real_views(views_raw):
             name = self._read_prop(view, "GetName2")
             if not name:
                 continue
@@ -6509,27 +6527,14 @@ class DrawingOperations:
             if not isinstance(outline, (list, tuple)) or len(outline) < 4:
                 skipped.append(name)
                 continue
-            try:
-                base = view.GetBaseView()
-            except Exception:
-                base = None
-            parent_name = self._read_prop(base, "GetName2") if base else None
-
-            try:
-                alignment_code = view.GetAlignment()
-            except Exception:
-                alignment_code = None
-            locked = (
-                isinstance(alignment_code, (int, float)) and not isinstance(alignment_code, bool)
-                and bool(int(alignment_code) & int(SwViewAlignment.swViewAligned))
-            )
+            parent_name = self._base_view_name(view)
+            locked = self._is_alignment_locked(view)
 
             by_name[name] = {
                 "name": name, "view": view, "parent_name": parent_name, "locked": locked,
                 "xmin": float(outline[0]), "ymin": float(outline[1]),
                 "xmax": float(outline[2]), "ymax": float(outline[3]),
             }
-            order.append(name)
 
         data = {"sheet_name": sheet_name, "margin": margin, "skipped": skipped}
 
@@ -6550,7 +6555,7 @@ class DrawingOperations:
                 name = parent_name
 
         groups: Dict[str, List[str]] = {}
-        for name in order:
+        for name in by_name:
             root_name = root_of(name)
             groups.setdefault(root_name, []).append(name)
 
@@ -6817,16 +6822,10 @@ class DrawingOperations:
                     SwErrors.swFeatureError,
                 )
         else:
-            target_view, available_views, find_err = self._find_view_by_name(doc, view_name, None)
+            _target_view, find_err = self._require_view(
+                doc, view_name, None, {"view_name": view_name})
             if find_err:
                 return find_err
-            if target_view is None:
-                return self._result(
-                    False,
-                    f"Unknown view {view_name!r}; available views: {available_views!r}",
-                    SwErrors.swInvalidInput,
-                    {"view_name": view_name, "available_views": available_views},
-                )
             target_names = [view_name]
 
         per_view = [
@@ -8012,14 +8011,9 @@ class DrawingOperations:
                 if self._read_prop(v, "GetName2")
             }
 
-        sheet_type_code = int(SwDrawingViewTypes.swDrawingSheet)
         for view in self._iter_document_views(doc):
             v_name = self._read_prop(view, "GetName2")
-            type_code = self._read_prop(view, "Type")
-            is_sheet_pseudo = (
-                isinstance(type_code, (int, float)) and not isinstance(type_code, bool)
-                and int(type_code) == sheet_type_code
-            )
+            is_sheet_pseudo = self._is_sheet_pseudo_view(view)
             include = True
             if allowed_view_names is not None:
                 include = (v_name in allowed_view_names) or (is_sheet_pseudo and v_name == sheet_name)
@@ -8400,15 +8394,10 @@ class DrawingOperations:
                 if self._read_prop(v, "GetName2")
             }
 
-        sheet_type_code = int(SwDrawingViewTypes.swDrawingSheet)
         datums: List[Dict] = []
         for view in self._iter_document_views(doc):
             v_name = self._read_prop(view, "GetName2")
-            type_code = self._read_prop(view, "Type")
-            is_sheet_pseudo = (
-                isinstance(type_code, (int, float)) and not isinstance(type_code, bool)
-                and int(type_code) == sheet_type_code
-            )
+            is_sheet_pseudo = self._is_sheet_pseudo_view(view)
             include = True
             if allowed_view_names is not None:
                 include = (v_name in allowed_view_names) or (is_sheet_pseudo and v_name == sheet_name)
