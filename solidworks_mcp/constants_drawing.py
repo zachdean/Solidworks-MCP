@@ -534,6 +534,62 @@ class SwAutodimEntities(IntEnum):
     swAutodimEntitiesSelected = 2
 
 
+class SwAutodimHorizontalPlacement(IntEnum):
+    """Placement of the horizontal dimensions IDrawingDoc::AutoDimension creates
+    (swAutodimHorizontalPlacement_e).
+
+    Fetched independently (sw-1xx.2) -- out of scope for the original research
+    pass, per that record's own Gotchas.
+
+    Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swAutodimHorizontalPlacement_e.html
+    """
+
+    swAutodimHorizontalPlacementBelow = -1
+    swAutodimHorizontalPlacementAbove = 1
+
+
+class SwAutodimVerticalPlacement(IntEnum):
+    """Placement of the vertical dimensions IDrawingDoc::AutoDimension creates
+    (swAutodimVerticalPlacement_e).
+
+    Fetched independently (sw-1xx.2) -- see SwAutodimHorizontalPlacement.
+
+    Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swAutodimVerticalPlacement_e.html
+    """
+
+    swAutodimVerticalPlacementLeft = -1
+    swAutodimVerticalPlacementRight = 1
+
+
+class SwAutodimStatus(IntEnum):
+    """Status returned by IDrawingDoc::AutoDimension (swAutodimStatus_e).
+
+    Fetched independently (sw-1xx.2) -- see SwAutodimHorizontalPlacement.
+
+    Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swAutodimStatus_e.html
+    """
+
+    swAutodimStatusSuccess = 0
+    swAutodimStatusBadOptionValue = 1
+    swAutodimStatusNoActiveDoc = 2
+    swAutodimStatusDocTypeNotSupported = 3
+    swAutodimStatusNoActiveSketch = 4
+    swAutodimStatus3DSketchNotSupported = 5
+    swAutodimStatusSketchIsEmpty = 6
+    swAutodimStatusSketchIsOverDefined = 7
+    swAutodimStatusNoEntities = 8
+    swAutodimStatusEntitiesNotValid = 9
+    swAutodimStatusCenterlineNotAllowed = 10
+    swAutodimStatusDatumNotSupplied = 11
+    swAutodimStatusDatumNotUnique = 12
+    swAutodimStatusDatumNotValidType = 13
+    swAutodimStatusDatumLineNotCenterline = 14
+    swAutodimStatusDatumLineNotVertical = 15
+    swAutodimStatusDatumLineNotHorizontal = 16
+    swAutodimStatusAlgorithmFailed = 17
+    swAutodimStatusSketchNoSolutionFound = 18
+
+
 class SwDimensionType(IntEnum):
     """Concrete dimension kind, around IDimension/IDisplayDimension (swDimensionType_e).
 
@@ -559,6 +615,63 @@ class SwDimensionType(IntEnum):
     swAngularOrdinateDimension = 16
 
 
+class SwSetValueInConfiguration(IntEnum):
+    """WhichConfigurations for IDimension::SetValue3/SetSystemValue3
+    (swSetValueInConfiguration_e).
+
+    Fetched independently (sw-1xx.2) -- out of scope for the original research
+    pass. ``swSetValue_NoConfiguration`` is `-1`, not a bit position -- this is a
+    flat selector enum, not a bitmask.
+
+    Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swSetValueInConfiguration_e.html
+    """
+
+    swSetValue_NoConfiguration = -1
+    swSetValue_UseCurrentSetting = 0
+    swSetValue_InThisConfiguration = 1
+    swSetValue_InAllConfigurations = 2
+    swSetValue_InSpecificConfigurations = 3
+
+
+class SwInConfigurationOpts(IntEnum):
+    """WhichConfigurations for IDimension::GetSystemValue3/GetValue3
+    (swInConfigurationOpts_e) -- a *different* enum than the SetValue3/
+    SetSystemValue3 setter side's ``swSetValueInConfiguration_e``, despite the
+    shared "this configuration"/"all configurations" concepts (values happen to
+    agree for ``swThisConfiguration`` == ``swSetValue_InThisConfiguration`` ==
+    `1`, but do not assume the rest line up).
+
+    Fetched independently (sw-1xx.2), while resolving IDimension::
+    GetSystemValue3's own `WhichConfigurations` enum ref.
+
+    Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swInConfigurationOpts_e.html
+    """
+
+    swConfigPropertySuppressFeatures = 0
+    swThisConfiguration = 1
+    swAllConfiguration = 2
+    swSpecifyConfiguration = 3
+    swLinkedToParent = 4
+    swSpeedpakConfiguration = 5
+
+
+class SwSetValueReturnStatus(IntEnum):
+    """Return status of IDimension::SetValue3/SetSystemValue3
+    (swSetValueReturnStatus_e).
+
+    Fetched independently (sw-1xx.2) -- see SwSetValueInConfiguration.
+
+    Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swSetValueReturnStatus_e.html
+    """
+
+    swSetValue_Successful = 0
+    swSetValue_Failure = 1
+    swSetValue_InvalidValue = 2
+    swSetValue_DrivenDimension = 3
+    swSetValue_ModelNotLoaded = 4
+    swSetValue_FrozenFeatureOwner = 5
+
+
 class SwAddOrdinateDims(IntEnum):
     """DimType for IModelDocExtension::AddOrdinateDimension (swAddOrdinateDims_e).
 
@@ -569,6 +682,29 @@ class SwAddOrdinateDims(IntEnum):
     swVerticalOrdinate = 2
     swHorizontalOrdinate = 3
     swAngularOrdinate = 4
+
+
+class SwCreateOrdDimError(IntEnum):
+    """Return code of IModelDocExtension::AddOrdinateDimension
+    (swCreateOrdDimError_e).
+
+    Fetched independently (sw-1xx.2) -- out of scope for the original research
+    pass. The page gives no description text per member beyond the name itself.
+
+    Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swCreateOrdDimError_e.html
+    """
+
+    swCreateOrdDimErr_Undefined = -1
+    swCreateOrdDimErr_Success = 0
+    swCreateOrdDimErr_OrdFailure = 1
+    swCreateOrdDimErr_GenNoInternalDims = 2
+    swCreateOrdDimErr_GenBadSel = 3
+    swCreateOrdDimErr_GenNeedModelLoaded = 4
+    swCreateOrdDimErr_GenSamePartOnly = 5
+    swCreateOrdDimErr_GenExtraSelection = 6
+    swCreateOrdDimErr_GenFailure = 7
+    swCreateOrdDimErr_OrdDupInGroup = 8
+    swCreateOrdDimErr_OrdBadDir = 9
 
 
 class SwTextJustification(IntEnum):
@@ -583,6 +719,27 @@ class SwTextJustification(IntEnum):
     swTextJustificationLeft = 1
     swTextJustificationCenter = 2
     swTextJustificationRight = 3
+
+
+class SwDimensionTextParts(IntEnum):
+    """WhichText for IDisplayDimension::SetText/GetText (swDimensionTextParts_e).
+
+    Fetched independently (sw-1xx.2) -- out of scope for the original research
+    pass. ``swDimensionTextAll`` is only valid for `SetText`, not `GetText` --
+    see that record's own Gotchas in docs/api/03-annotations.md.
+
+    Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swDimensionTextParts_e.html
+    """
+
+    swDimensionTextAll = 0
+    swDimensionTextPrefix = 1
+    swDimensionTextSuffix = 2
+    swDimensionTextCalloutAbove = 3
+    swDimensionTextCalloutBelow = 4
+    swDimensionTextPrefixDefinition = 5
+    swDimensionTextSuffixDefinition = 6
+    swDimensionTextCalloutAboveDefinition = 7
+    swDimensionTextCalloutBelowDefinition = 8
 
 
 class SwLeaderStyle(IntEnum):

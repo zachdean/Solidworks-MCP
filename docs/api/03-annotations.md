@@ -1010,6 +1010,109 @@ directly. For a chamfer dimension specifically, call this method **twice** (once
 
 ---
 
+### IDisplayDimension::Type2
+
+- **Interface:** IDisplayDimension
+- **Property:** Type2 (read-only)
+- **Minimum SW version:** SOLIDWORKS 2004 FCS, Revision Number 12.0
+
+Fetched independently (sw-1xx.2) while resolving whether `add_dimension`'s
+"smart"/"radial"/"diameter"/"angular" types (all routed through the single
+generic `IModelDoc2::AddDimension2` — see that record's own Gotchas) have any
+way to read back what dimension type SolidWorks actually produced. They do:
+this property.
+
+**Signature:**
+
+```vb
+ReadOnly Property Type2 As System.Integer
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| *(none — read-only property)* | | | | | |
+
+**Returns:** `Integer` — the type of this display dimension, per the page's own
+one-line description ("Gets the type of dimension").
+
+**Prior selection required:** None — a plain property read on an already-held
+`IDisplayDimension` reference.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IDisplayDimension~Type2.html
+
+**status:** verified (fetched sw-1xx.2)
+
+**Gotchas:**
+- Enum ref: `swDimensionType_e` (documented in this dossier's Enums section) —
+  the same enum `_DIMENSION_TYPES`' `dim_type_enum` values are drawn from, so a
+  caller can compare the two directly.
+- Not to be confused with `IDimension::GetType` (a *method*, not a property, on
+  the underlying model `IDimension` rather than the display dimension), whose
+  return value is `swDimensionParamType_e` — a different enum, not fetched in
+  this dossier (out of scope; flagged only so it isn't reached for by mistake
+  in place of `Type2`).
+- Per the page's own Remarks: call `IModelDoc2::GraphicsRedraw2` after anything
+  that might have changed the dimension's type-relevant display state (e.g.
+  `Diametric`, below) before relying on a freshly-read `Type2`.
+
+---
+
+### IDisplayDimension::Diametric
+
+- **Interface:** IDisplayDimension
+- **Property:** Diametric
+- **Minimum SW version:** SOLIDWORKS 99, datecode 1999207
+
+Fetched independently (sw-1xx.2), alongside `Type2` above — this is the
+documented mechanism for choosing radius vs. diameter display on a
+radial-capable dimension, resolving what an earlier draft of this dossier's
+`add_dimension` design had called an unavoidable ambiguity (`AddDimension2`
+alone cannot pick radial vs. diameter at creation time — this property corrects
+it afterward).
+
+**Signature:**
+
+```vb
+Property Diametric As System.Boolean
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| Value (setter) | Boolean | n/a | Yes | `True` to display as diameter/doubled-distance, `False` for radial/single-distance | |
+
+**Returns:** `Boolean` (getter) — the dimension's current radial/diameter display state.
+
+**Prior selection required:** None — read/write directly on an already-held
+`IDisplayDimension` reference (e.g. the object `AddDimension2` just returned).
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IDisplayDimension~Diametric.html
+
+**status:** verified (fetched sw-1xx.2)
+
+**Gotchas:**
+- Per the page's own Remarks: depending on this display dimension's underlying
+  type, this property toggles between *radial and diameter* display dimensions,
+  or between *radial linear and diametric linear* display dimensions — it "does
+  not affect other types of dimensions" (e.g. setting it on an angular or
+  linear dimension is a documented no-op, not an error — `add_dimension` relies
+  on this to make setting it best-effort/non-fatal for `"smart"`-routed results
+  that didn't come out radial-capable).
+- The page's own "See Also" names `IModelDocExtension::AddSpecificDimension`
+  ("Use ... to create single or doubled distance display dimensions") as an
+  alternative, more direct creation path — not fetched in this dossier (out of
+  scope for this issue; `add_dimension` uses the create-then-correct sequence
+  documented here instead).
+- Per the page's own Remarks: call `IModelDoc2::GraphicsRedraw2` after setting
+  this property to see the change reflected in the graphics window.
+
+---
+
 ### IDimension::SetValue3
 
 - **Interface:** IDimension
@@ -1051,17 +1154,168 @@ current `ISelectionMgr` selection.
 - **Explicit exception to this API's meters/radians convention:** the help page
   states `NewValue` is "in the units of the owning document" (i.e. the document's
   display units — mm/in/deg as configured in Document Properties), **not**
-  meters/radians. This is confirmed by the existence of a sibling method,
-  `IDimension::SetSystemValue3` (listed in this page's "See Also"), which is
-  presumably the meters/radians equivalent — the naming split (`Value` = document
-  units, `SystemValue` = database/meters-radians units) matches the same
+  meters/radians. `IDimension::SetSystemValue3` (below) is the confirmed
+  meters/radians equivalent — the naming split (`Value` = document units,
+  `SystemValue` = database/meters-radians units) matches the same
   `Value`/`SystemValue` naming pattern used elsewhere in the SolidWorks API.
-  `SetSystemValue3` itself was not fetched in this pass; treat that inference as
-  unverified until its own page is checked, but do not call `SetValue3` assuming
-  meters — the page's explicit statement overrides the global convention here.
+- **sw-1xx.2: prefer `SetSystemValue3` over this method in the tool layer.** This
+  project's public tool boundary converts the caller's unit to meters via
+  `self._units` (see `README.md`'s units convention) — `SetValue3`'s document-unit
+  target would require reading the *document's own* display unit (which may not
+  match `self._units.default_unit`) before conversion, an extra COM round trip
+  this dossier's other write paths don't need. `set_dimension_value` in the tool
+  layer therefore calls `SetSystemValue3`, not this method.
 - Angular dimensions: it's unclear from this page alone whether "document units" for
-  an angular `IDimension` means degrees or radians — unverified, confirm empirically
-  or via `SetSystemValue3`'s page before using on an angular dimension.
+  an angular `IDimension` means degrees or radians — unverified. Moot for this
+  dossier's tool layer per the previous Gotcha (`SetSystemValue3` is used instead,
+  confirmed in meters for linear values; its own page does not separately clarify
+  the angular case either, so treat an angular dimension's `SetSystemValue3` unit
+  as unverified-but-assumed-radians pending empirical confirmation).
+
+---
+
+### IDimension::SetSystemValue3
+
+- **Interface:** IDimension
+- **Method:** SetSystemValue3
+- **Minimum SW version:** SOLIDWORKS 2004 FCS, Revision Number 12.0
+
+**Signature:**
+
+```vb
+Function SetSystemValue3( _
+   ByVal NewValue As System.Double, _
+   ByVal WhichConfigurations As System.Integer, _
+   ByVal Config_names As System.Object _
+) As System.Integer
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| NewValue | Double | **meters** | Yes | Dimension value in system units, per the page's own one-line description | |
+| WhichConfigurations | Integer | n/a | Yes | Configuration(s) to set the value in — same enum as `SetValue3` | `swSetValueInConfiguration_e` |
+| Config_names | Object | n/a | Only if `WhichConfigurations = swSetValue_InSpecificConfigurations` | A single `BSTR` or `BSTR` array of configuration names | |
+
+**Returns:** `Integer` status code.
+
+**Prior selection required:** None — operates directly on the `IDimension` object
+reference, same as `SetValue3`.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IDimension~SetSystemValue3.html
+
+**status:** verified (fetched sw-1xx.2)
+
+**Gotchas:**
+- **Confirmed meters, unlike `SetValue3`:** the page's own one-line description
+  reads "Sets the value of this dimension in **system units (meters)** in the
+  specified configuration" — this dossier's `SetValue3` Gotcha's inference is now
+  confirmed, not just presumed.
+- `WhichConfigurations` reuses `swSetValueInConfiguration_e`, the same enum as
+  `SetValue3` (not a separate `SystemValue`-specific enum).
+- Per the page's Remarks: `WhichConfigurations` is ignored entirely if the part has
+  only one configuration; `Config_names` is only consulted when
+  `WhichConfigurations = swSetValue_InSpecificConfigurations`.
+- This method can set a **read-only** dimension's value (per the page's Remarks) —
+  check `IDimension::ReadOnly` first if that distinction matters to a caller
+  (not itself documented in this dossier).
+- Return status is `swSetValueReturnStatus_e` (documented in the Enums section) —
+  `0` (`swSetValue_Successful`) is the only success value; every other member is a
+  specific, named failure reason worth surfacing verbatim rather than collapsing to
+  a generic error.
+
+---
+
+### IDimension::GetSystemValue3
+
+- **Interface:** IDimension
+- **Method:** GetSystemValue3
+- **Minimum SW version:** SOLIDWORKS 2004 FCS, Revision Number 12.0
+
+**Signature:**
+
+```vb
+Function GetSystemValue3( _
+   ByVal WhichConfigurations As System.Integer, _
+   ByVal Config_names As System.Object _
+) As System.Object
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| WhichConfigurations | Integer | n/a | Yes | Configuration to read the value from | `swInConfigurationOpts_e` |
+| Config_names | Object | n/a | Only if `WhichConfigurations = swSpecifyConfiguration` | Name(s) of the configuration | |
+
+**Returns:** `Object`, actually a `Double` — the dimension's value in system units
+(meters), per the page's own one-line description ("Gets the value of the current
+dimension in system units in the named configuration").
+
+**Prior selection required:** None — operates directly on the `IDimension` object
+reference.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IDimension~GetSystemValue3.html
+
+**status:** verified (fetched sw-1xx.2)
+
+**Gotchas:**
+- **`WhichConfigurations` here is a *different* enum than `SetSystemValue3`'s
+  parameter of the same name** — the setter takes `swSetValueInConfiguration_e`,
+  this getter takes `swInConfigurationOpts_e` (also documented in the Enums
+  section). The two enums happen to agree on `1` meaning "this configuration only"
+  (`swSetValue_InThisConfiguration` / `swThisConfiguration`), which is what this
+  dossier's tool layer standardizes on for both directions, but do not assume the
+  rest of the members line up positionally.
+- No documented failure value distinct from a real `0.0` reading — a caller cannot
+  tell "value is zero" from "read failed" off the return alone.
+
+---
+
+### IDimension::FullName
+
+- **Interface:** IDimension
+- **Property:** FullName (read-only)
+- **Minimum SW version:** unverified — no explicit Availability line was present on
+  the fetched page content for this property.
+
+**Signature:**
+
+```vb
+ReadOnly Property FullName As System.String
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| *(none — read-only property)* | | | | | |
+
+**Returns:** `String` — `<Dimension Name>@<Feature Name>@<Model>`, e.g.
+`"D1@Sketch1@Part4.Part"`. `<Dimension Name>` alone is `IDimension::Name` (the bare,
+not-necessarily-unique-across-the-document name); `FullName` is the fully-qualified
+form this dossier's `SelectByID2` record documents as the expected `Name` argument
+format for re-selecting a dimension by name (e.g. `"D1@Sketch2@Part1.SLDPRT"` in that
+record's own parameter table).
+
+**Prior selection required:** None — a plain property read on an already-held
+`IDimension` reference.
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IDimension~FullName.html
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IDimension~Name.html (the bare, non-qualified name `FullName` is built from)
+
+**status:** verified (fetched sw-1xx.2)
+
+**Gotchas:**
+- This dossier's tool layer uses `FullName` (not the bare `Name`) as the identifier
+  it returns from a dimension-creating call and accepts as `dimension_name` into
+  `set_dimension_value`/`set_dimension_text` — it round-trips cleanly through
+  `SelectByID2`'s `Name` argument for a drawing dimension, while the bare `Name`
+  alone is ambiguous across features/models sharing a dimension label like `"D1"`.
 
 ---
 
@@ -1212,6 +1466,46 @@ mode. To add dimensions to a group created in an earlier call, use
 - Distinct from `IDrawingDoc::CreateOrdinateDim4` (below), which creates a **single,
   non-associative** ordinate dimension from explicit point/vector arrays instead of a
   selection-built, geometry-associative group.
+
+---
+
+### IModelDoc2::SetPickMode
+
+- **Interface:** IModelDoc2
+- **Method:** SetPickMode
+- **Minimum SW version:** SOLIDWORKS 2001Plus FCS, Revision Number 10.0
+
+Fetched independently (sw-1xx.2) — the `AddOrdinateDimension` record above (and the
+working agreement's "signatures come from the dossier, fetched when missing rather
+than guessed") requires this method's actual signature before a tool layer can call
+it, not just its existence.
+
+**Signature:**
+
+```vb
+Sub SetPickMode()
+```
+
+**Parameters:**
+
+| Name | Type | Units | Required | Meaning | Enum ref |
+| --- | --- | --- | --- | --- | --- |
+| *(none — zero-argument `Sub`)* | | | | | |
+
+**Returns:** None (`Sub`).
+
+**Prior selection required:** None documented — the page's only description is
+"Returns the user to the default selection mode."
+
+**Source URL(s):**
+- https://help.solidworks.com/2025/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IModelDoc2~SetPickMode.html
+
+**status:** verified (fetched sw-1xx.2)
+
+**Gotchas:**
+- Confirmed zero-argument — the page's own VB/C#/C++ syntax blocks all show no
+  parameters. A tool layer calling it with any argument would be guessing past what's
+  documented.
 
 ---
 
@@ -2519,6 +2813,77 @@ sketch entities, center lines, and center marks.
 
 Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swAutodimEntities_e.html
 
+#### swAutodimHorizontalPlacement_e (sw-1xx.2)
+
+`IDrawingDoc::AutoDimension`'s `HorizontalPlacement` parameter — out of scope for
+the original research pass (flagged unfetched in that record's own Gotchas);
+fetched independently for sw-1xx.2 via the same curl+UA technique.
+
+| Value | Number | Meaning |
+| --- | --- | --- |
+| swAutodimHorizontalPlacementBelow | -1 | Place the horizontal dimensions below the sketch/view |
+| swAutodimHorizontalPlacementAbove | 1 | Place the horizontal dimensions above the sketch/view |
+
+Note: no `0` member — this is a 2-way flat selector, not a bitmask, and its two
+values are `-1`/`1`, not `0`/`1`.
+
+Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swAutodimHorizontalPlacement_e.html
+
+#### swAutodimVerticalPlacement_e (sw-1xx.2)
+
+`IDrawingDoc::AutoDimension`'s `VerticalPlacement` parameter — same fetch note as
+`swAutodimHorizontalPlacement_e` above.
+
+| Value | Number | Meaning |
+| --- | --- | --- |
+| swAutodimVerticalPlacementLeft | -1 | Place the vertical dimensions left of the sketch/view |
+| swAutodimVerticalPlacementRight | 1 | Place the vertical dimensions right of the sketch/view |
+
+Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swAutodimVerticalPlacement_e.html
+
+#### swAutodimStatus_e (sw-1xx.2)
+
+`IDrawingDoc::AutoDimension`'s (and `ISketch::AutoDimension2`'s) return value — the
+original research pass explicitly flagged this enum as "not itself fetched in this
+pass" in the `AutoDimension` record's own Returns line; fetched independently for
+sw-1xx.2.
+
+| Value | Number | Meaning |
+| --- | --- | --- |
+| swAutodimStatusSuccess | 0 | Sketch/view successfully dimensioned |
+| swAutodimStatusBadOptionValue | 1 | An option value for an argument is out of range |
+| swAutodimStatusNoActiveDoc | 2 | No active document |
+| swAutodimStatusDocTypeNotSupported | 3 | Only part and assembly documents are supported (per the page's own text — see Gotchas) |
+| swAutodimStatusNoActiveSketch | 4 | Can only autodimension an active sketch |
+| swAutodimStatus3DSketchNotSupported | 5 | Cannot autodimension a 3D sketch |
+| swAutodimStatusSketchIsEmpty | 6 | Cannot autodimension an empty sketch |
+| swAutodimStatusSketchIsOverDefined | 7 | Cannot autodimension an over-defined sketch |
+| swAutodimStatusNoEntities | 8 | `EntitiesToDimension` is `swAutodimEntitiesSelected`, but nothing was selected+marked `swAutodimMarkEntities` |
+| swAutodimStatusEntitiesNotValid | 9 | `EntitiesToDimension` is `swAutodimEntitiesSelected`, but the marked entities are not valid |
+| swAutodimStatusCenterlineNotAllowed | 10 | The centerline scheme is not valid for sketches that cannot be revolved to create valid features |
+| swAutodimStatusDatumNotSupplied | 11 | No datum was selected for either the horizontal or vertical dimensioning scheme |
+| swAutodimStatusDatumNotUnique | 12 | More than one datum was selected for either dimensioning scheme |
+| swAutodimStatusDatumNotValidType | 13 | A selected datum is not a sketch point or sketch line |
+| swAutodimStatusDatumLineNotCenterline | 14 | The datum must be a centerline for the centerline scheme |
+| swAutodimStatusDatumLineNotVertical | 15 | A sketch-line datum must be vertical for the vertical dimensioning scheme |
+| swAutodimStatusDatumLineNotHorizontal | 16 | A sketch-line datum must be horizontal for the horizontal dimensioning scheme |
+| swAutodimStatusAlgorithmFailed | 17 | Unspecified algorithm failure |
+| swAutodimStatusSketchNoSolutionFound | 18 | Cannot autodimension a sketch for which there is no solution |
+
+Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swAutodimStatus_e.html
+
+**Gotcha:** several member descriptions on the page itself are sketch/`ISketch::
+AutoDimension2`-flavored ("active sketch", "3D sketch", "over defined sketch") since
+this enum is shared with that sibling method — a drawing-view call through
+`IDrawingDoc::AutoDimension` realistically only returns a subset of these (success,
+bad-option, no-active-doc, no-entities/entities-not-valid, datum-related, and
+algorithm-failed/no-solution-found are the plausible ones; the sketch-specific codes
+are not reachable from a drawing view). `swAutodimStatusDocTypeNotSupported`'s "only
+part and assembly documents" description is itself `ISketch::AutoDimension2`-scoped
+wording carried over from the shared enum page — it does not mean
+`IDrawingDoc::AutoDimension` rejects drawings; that would contradict the whole
+premise of the method.
+
 #### swDimensionType_e
 
 Identifies the concrete kind of a dimension; consumed/returned around
@@ -2546,6 +2911,66 @@ Identifies the concrete kind of a dimension; consumed/returned around
 
 Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swDimensionType_e.html
 
+#### swSetValueInConfiguration_e (sw-1xx.2)
+
+`WhichConfigurations` for `IDimension::SetValue3`/`SetSystemValue3` — out of scope
+for the original research pass; fetched independently for sw-1xx.2.
+
+| Value | Number | Meaning |
+| --- | --- | --- |
+| swSetValue_NoConfiguration | -1 | Ignore configurations in drawing sketches |
+| swSetValue_UseCurrentSetting | 0 | Use whatever setting this parameter currently has |
+| swSetValue_InThisConfiguration | 1 | Set the value in the current configuration only |
+| swSetValue_InAllConfigurations | 2 | Set the value in all configurations |
+| swSetValue_InSpecificConfigurations | 3 | Set the value in the configuration(s) named by `Config_names` |
+
+Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swSetValueInConfiguration_e.html
+
+#### swInConfigurationOpts_e (sw-1xx.2)
+
+`WhichConfigurations` for `IDimension::GetSystemValue3`/`GetValue3` — a **different**
+enum than `swSetValueInConfiguration_e` above despite the shared "this
+configuration"/"all configurations" concepts on the getter vs. setter sides of the
+same value. Fetched independently for sw-1xx.2 while resolving `GetSystemValue3`'s
+own enum ref (its page names this enum, not `swSetValueInConfiguration_e`).
+
+| Value | Number | Meaning |
+| --- | --- | --- |
+| swConfigPropertySuppressFeatures | 0 | (page gives no description beyond the name) |
+| swThisConfiguration | 1 | Current configuration only |
+| swAllConfiguration | 2 | All configurations |
+| swSpecifyConfiguration | 3 | The configuration(s) named by `Config_names` |
+| swLinkedToParent | 4 | Derived configurations only; non-derived configurations fall back to the active configuration |
+| swSpeedpakConfiguration | 5 | (page gives no description beyond the name) |
+
+Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swInConfigurationOpts_e.html
+
+**Gotcha:** `swThisConfiguration` (`1`) and `swSetValue_InThisConfiguration` (`1`)
+agree numerically — this dossier's tool layer relies on that agreement to use the
+literal `1` for "current configuration only" on both the read and write side of a
+dimension value round-trip — but the two enums are not the same declaration and the
+rest of their members do not correspond position-for-position (e.g. `2` is
+"all configurations" on both, but `swSetValue_InSpecificConfigurations` = `3` on the
+setter side vs. `swSpecifyConfiguration` = `3` on the getter side happen to also
+agree — verify numerically before assuming, do not assume by name alone).
+
+#### swSetValueReturnStatus_e (sw-1xx.2)
+
+Return status of `IDimension::SetValue3`/`SetSystemValue3` — the original research
+pass explicitly flagged this enum as "not fetched in this pass" in both methods'
+own Returns lines; fetched independently for sw-1xx.2.
+
+| Value | Number | Meaning |
+| --- | --- | --- |
+| swSetValue_Successful | 0 | Successful |
+| swSetValue_Failure | 1 | Failed for an unknown reason |
+| swSetValue_InvalidValue | 2 | Not a valid value for the change parameter |
+| swSetValue_DrivenDimension | 3 | Cannot be done on a dimension driven by geometry |
+| swSetValue_ModelNotLoaded | 4 | Model must be loaded in order to set this value |
+| swSetValue_FrozenFeatureOwner | 5 | Owner of the dimension is frozen |
+
+Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swSetValueReturnStatus_e.html
+
 #### swAddOrdinateDims_e
 
 The `DimType` enum ref for `IModelDocExtension::AddOrdinateDimension` (and the
@@ -2559,6 +2984,29 @@ obsolete `IDrawingDoc::AddOrdinateDimension2`).
 | swAngularOrdinate | 4 | Angular ordinate dimension |
 
 Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swAddOrdinateDims_e.html
+
+#### swCreateOrdDimError_e (sw-1xx.2)
+
+Return code of `IModelDocExtension::AddOrdinateDimension` — the original research
+pass explicitly flagged this enum as "not fetched in this pass" in that method's own
+Returns line; fetched independently for sw-1xx.2. The page gives no per-member
+description text beyond the member name itself for any member.
+
+| Value | Number |
+| --- | --- |
+| swCreateOrdDimErr_Undefined | -1 |
+| swCreateOrdDimErr_Success | 0 |
+| swCreateOrdDimErr_OrdFailure | 1 |
+| swCreateOrdDimErr_GenNoInternalDims | 2 |
+| swCreateOrdDimErr_GenBadSel | 3 |
+| swCreateOrdDimErr_GenNeedModelLoaded | 4 |
+| swCreateOrdDimErr_GenSamePartOnly | 5 |
+| swCreateOrdDimErr_GenExtraSelection | 6 |
+| swCreateOrdDimErr_GenFailure | 7 |
+| swCreateOrdDimErr_OrdDupInGroup | 8 |
+| swCreateOrdDimErr_OrdBadDir | 9 |
+
+Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swCreateOrdDimError_e.html
 
 #### swTextJustification_e
 
@@ -2580,6 +3028,25 @@ via `INote::SetTextVerticalJustification` — not independently fetched here, fl
 only so it isn't reached for by mistake.
 
 Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swTextJustification_e.html
+
+#### swDimensionTextParts_e (sw-1xx.2)
+
+`WhichText` for `IDisplayDimension::SetText`/`GetText` — out of scope for the
+original research pass; fetched independently for sw-1xx.2.
+
+| Value | Number | Meaning |
+| --- | --- | --- |
+| swDimensionTextAll | 0 | Entire dimension text string (`SetText` only — invalid for `GetText`, per that record's own Gotchas) |
+| swDimensionTextPrefix | 1 | Prefix portion of the text |
+| swDimensionTextSuffix | 2 | Suffix portion of the text |
+| swDimensionTextCalloutAbove | 3 | Callout-above portion of the text |
+| swDimensionTextCalloutBelow | 4 | Callout-below portion of the text |
+| swDimensionTextPrefixDefinition | 5 | Definition of the prefix portion of the text |
+| swDimensionTextSuffixDefinition | 6 | Definition of the suffix portion of the text |
+| swDimensionTextCalloutAboveDefinition | 7 | Definition of the callout portion of the text above the dimension |
+| swDimensionTextCalloutBelowDefinition | 8 | Definition of the callout portion of the text below the dimension |
+
+Source: https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swDimensionTextParts_e.html
 
 #### swLeaderStyle_e
 

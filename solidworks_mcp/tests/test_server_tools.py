@@ -68,6 +68,11 @@ EXPECTED_TOOL_NAMES = {
     "auto_arrange_views",
     # Drawing Annotation Tools
     "insert_model_items",
+    "add_dimension",
+    "add_ordinate_dimensions",
+    "set_dimension_value",
+    "set_dimension_text",
+    "autodimension_view",
     # Sketch Tools
     "create_sketch",
     "create_sketch_on_face",

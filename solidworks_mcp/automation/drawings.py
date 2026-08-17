@@ -16,19 +16,31 @@ from .com_params import (
 )
 from ..constants import SwErrors, SwDocumentTypes, SwFileTypes
 from ..constants_drawing import (
+    SwAddOrdinateDims,
     SwAlignViewTypes,
+    SwAutodimEntities,
+    SwAutodimHorizontalPlacement,
+    SwAutodimScheme,
+    SwAutodimStatus,
+    SwAutodimVerticalPlacement,
+    SwCreateOrdDimError,
     SwCreateSectionViewAtOptions,
     SwCustomInfoType,
     SwCustomPropertyAddOption,
     SwDetCircleShowType,
     SwDetViewStyle,
+    SwDimensionTextParts,
+    SwDimensionType,
     SwDisplayMode,
     SwDrawingViewTypes,
     SwDwgPaperSizes,
     SwImportModelItemsSource,
+    SwInConfigurationOpts,
     SwInsertAnnotation,
     SwSaveAsOptions,
     SwSaveAsVersion,
+    SwSetValueInConfiguration,
+    SwSetValueReturnStatus,
     SwUserPreferenceToggle,
     SwViewAlignment,
     decode_save_error,
@@ -288,6 +300,143 @@ INSERT_MODEL_ANNOTATIONS4 = ComSignature("InsertModelAnnotations4", [
     Param("insert_all_annotations", False, to_bool),
     Param("insert_all_reference_geometry", False, to_bool),
 ])
+
+# `list_view_entities`' entity-reference shape (`{"kind": "edge"/"vertex"/"face",
+# "x", "y", "z"}`) -> `SelectByID2`'s uppercase `Type` string, per
+# docs/api/03-annotations.md's `SelectByID2` Type-string table. `add_dimension`/
+# `add_ordinate_dimensions` accept entity references in exactly this shape (per
+# their own Requirements: "entities is a list of entity references (as returned
+# by list_view_entities)").
+_ENTITY_KIND_TYPE_STR = {"edge": "EDGE", "vertex": "VERTEX", "face": "FACE"}
+
+# `add_dimension`'s `dimension_type` -> which COM creation call to use, the
+# minimum entity count SolidWorks needs to unambiguously produce that dimension
+# (per the dossier's AddDimension/AddDimension2/AddHorizontalDimension2/
+# AddVerticalDimension2 records: "the selected entities must unambiguously
+# define what's being dimensioned"), and the `swDimensionType_e` value that
+# dimension type documents as its outcome.
+#
+# Only "horizontal" and "vertical" have a dedicated creation method
+# (AddHorizontalDimension2/AddVerticalDimension2). SolidWorks has no dedicated
+# creation call for a radial, diameter, or angular dimension -- confirmed by
+# this dossier's own "Dimensions" section: `IModelDoc2::AddDimension2` is the
+# *only* generic ("smart") creation call documented, and what dimension type it
+# actually produces is inferred by SolidWorks from what's selected (a
+# circle/arc -> radial or diameter; two non-parallel lines -> angular; two
+# points -> linear), not chosen by any parameter at creation time.
+# "smart"/"radial"/"diameter"/"angular" therefore all route through the same
+# `AddDimension2` call -- `dim_type_enum` records what each string *documents*
+# as the expected result (returned in `data["dim_type_enum"]`). For
+# "radial"/"diameter" specifically, `add_dimension` corrects the outcome
+# post-creation via `IDisplayDimension::Diametric` (fetched sw-1xx.2, a real,
+# documented radius<->diameter toggle for a radial-capable dimension) and
+# reports the dimension's actual resulting type via `IDisplayDimension::Type2`
+# (also fetched sw-1xx.2) in `data["type_code"]`, so a caller isn't left
+# trusting `dim_type_enum` alone.
+_DIMENSION_TYPES = {
+    "smart": {
+        "method": "smart", "min_entities": 1,
+        "dim_type_enum": int(SwDimensionType.swDimensionTypeUnknown),
+    },
+    "horizontal": {
+        "method": "horizontal", "min_entities": 2,
+        "dim_type_enum": int(SwDimensionType.swHorLinearDimension),
+    },
+    "vertical": {
+        "method": "vertical", "min_entities": 2,
+        "dim_type_enum": int(SwDimensionType.swVertLinearDimension),
+    },
+    "radial": {
+        "method": "smart", "min_entities": 1,
+        "dim_type_enum": int(SwDimensionType.swRadialDimension),
+    },
+    "diameter": {
+        "method": "smart", "min_entities": 1,
+        "dim_type_enum": int(SwDimensionType.swDiameterDimension),
+    },
+    "angular": {
+        "method": "smart", "min_entities": 2,
+        "dim_type_enum": int(SwDimensionType.swAngularDimension),
+    },
+}
+
+# `add_ordinate_dimensions`'s `direction` -> `IModelDocExtension::
+# AddOrdinateDimension`'s `DimType` (swAddOrdinateDims_e).
+_ORDINATE_DIRECTIONS = {
+    "auto": int(SwAddOrdinateDims.swOrdinate),
+    "horizontal": int(SwAddOrdinateDims.swHorizontalOrdinate),
+    "vertical": int(SwAddOrdinateDims.swVerticalOrdinate),
+    "angular": int(SwAddOrdinateDims.swAngularOrdinate),
+}
+
+# `autodimension_view`'s string params -> their `swAutodim*_e` values.
+# `swAutodimSchemeCenterline` is deliberately excluded from `_AUTODIM_SCHEMES`
+# -- the dossier's own `AutoDimension` Gotchas quote it as "Not supported in
+# sketches or drawings; do not use".
+_AUTODIM_SCHEMES = {
+    "baseline": int(SwAutodimScheme.swAutodimSchemeBaseline),
+    "ordinate": int(SwAutodimScheme.swAutodimSchemeOrdinate),
+    "chain": int(SwAutodimScheme.swAutodimSchemeChain),
+}
+_AUTODIM_ENTITIES = {
+    "all": int(SwAutodimEntities.swAutodimEntitiesAll),
+    "based_on_preselect": int(SwAutodimEntities.swAutodimEntitiesBasedOnPreselect),
+    "selected": int(SwAutodimEntities.swAutodimEntitiesSelected),
+}
+_AUTODIM_HORIZONTAL_PLACEMENTS = {
+    "above": int(SwAutodimHorizontalPlacement.swAutodimHorizontalPlacementAbove),
+    "below": int(SwAutodimHorizontalPlacement.swAutodimHorizontalPlacementBelow),
+}
+_AUTODIM_VERTICAL_PLACEMENTS = {
+    "left": int(SwAutodimVerticalPlacement.swAutodimVerticalPlacementLeft),
+    "right": int(SwAutodimVerticalPlacement.swAutodimVerticalPlacementRight),
+}
+
+
+def _parse_entity_ref(entity: Any) -> Tuple[Optional[Tuple[str, float, float, float]], Optional[str]]:
+    """One `add_dimension`/`add_ordinate_dimensions` entity reference ->
+    `(type_str, x, y, z)` (caller's default unit, unconverted) or an error
+    message -- exactly one of the two return slots is populated.
+
+    Accepts the shape `list_view_entities` returns (`kind`/`x`/`y`/`z`), plus
+    `type` as an alias for `kind` for a caller that already has a raw
+    `SelectByID2` type string handy. `z` defaults to `0` -- `list_view_entities`
+    always supplies one, but a caller building a reference by hand for a 2D
+    drawing view often won't.
+    """
+    if not isinstance(entity, dict):
+        return None, f"entity reference must be an object, got {type(entity).__name__}"
+
+    kind_raw = entity.get("kind", entity.get("type"))
+    kind = (kind_raw or "").strip().lower() if isinstance(kind_raw, str) else ""
+    type_str = _ENTITY_KIND_TYPE_STR.get(kind)
+    if type_str is None:
+        return None, (
+            f"unknown entity kind {kind_raw!r}; expected one of "
+            f"{sorted(_ENTITY_KIND_TYPE_STR)!r}"
+        )
+
+    x, y = entity.get("x"), entity.get("y")
+    if isinstance(x, bool) or isinstance(y, bool) or not isinstance(x, (int, float)) \
+            or not isinstance(y, (int, float)):
+        return None, f"entity reference needs numeric x/y, got {entity!r}"
+
+    z = entity.get("z", 0)
+    if isinstance(z, bool) or not isinstance(z, (int, float)):
+        z = 0
+
+    return (type_str, float(x), float(y), float(z)), None
+
+
+def _enum_name(enum_cls, code: Any) -> str:
+    """Readable member name for a `swconst` return/status code, or a
+    `f"unknown status {code!r}"` fallback for a code the enum doesn't declare
+    -- so an unrecognized status is diagnosable from the message rather than
+    silently rendered as a bare number."""
+    try:
+        return enum_cls(code).name
+    except (ValueError, TypeError):
+        return f"unknown status {code!r}"
 
 
 class DrawingOperations:
@@ -3375,5 +3524,619 @@ class DrawingOperations:
         return self._result(
             True,
             f"Imported {total_imported} annotation(s) across {len(per_view)} view(s)",
+            SwErrors.swSuccess, data,
+        )
+
+    # ========================================================================
+    # Dimension tools
+    # ========================================================================
+
+    def add_dimension(self, view_name: str, entities: List[Dict[str, Any]], x: float, y: float,
+                       dimension_type: str = "smart") -> Dict:
+        """
+        Add a drawing-only reference dimension between picked entities in a
+        view -- the fallback for anything DimXpert/`insert_model_items` didn't
+        already carry over from the model.
+
+        `dimension_type` picks the creation call per this module's
+        `_DIMENSION_TYPES` table: `"horizontal"`/`"vertical"` go through
+        `IModelDoc2::AddHorizontalDimension2`/`AddVerticalDimension2`;
+        `"smart"`/`"radial"`/`"diameter"`/`"angular"` all go through the one
+        generic `IModelDoc2::AddDimension2` -- SolidWorks has no dedicated
+        creation call for those three, per the dossier's own "Dimensions"
+        section intro (see `_DIMENSION_TYPES`'s own comment). What dimension
+        actually comes out is inferred by SolidWorks from what's selected,
+        not chosen by a parameter -- for `"radial"`/`"diameter"` specifically,
+        this is then corrected post-creation via `IDisplayDimension::
+        Diametric` (fetched sw-1xx.2; see that dossier record), which toggles
+        a radial-capable dimension between radius and diameter display.
+
+        Args:
+            view_name: Drawing view the entities live in. Activated via
+                `IDrawingDoc::ActivateView` before selection (same as
+                `insert_section_view`/`insert_detail_view`'s parent-view
+                pattern) -- entity coordinates are resolved in this view's
+                active sheet-local space.
+            entities: Entity references in the shape `list_view_entities`
+                returns -- `{"kind": "edge"/"vertex"/"face", "x", "y", "z"}`
+                (caller's default unit). Selected atomically via `selected(...)`,
+                the first non-appending, the rest appending (clear-select-act-
+                clear ordering, per the working agreement). Per the dossier's
+                own `AddDimension2`/`AddHorizontalDimension2` records,
+                selection is by location (X/Y/Z), never by name.
+            x, y: Placement location for the dimension text/line, caller's
+                default unit -- converted to meters at the COM boundary.
+            dimension_type: One of `"smart"` (default), `"horizontal"`,
+                `"vertical"`, `"radial"`, `"diameter"`, `"angular"`. An
+                unrecognized value, or fewer entities than the type's
+                documented minimum (2 for horizontal/vertical/angular, 1 for
+                everything else), fails with `swInvalidInput` before any COM
+                call is made.
+
+        Returns:
+            Result dict. `data["name"]` is the created dimension's
+            `IDimension::FullName` (e.g. `"D1@Sketch1@Part1.SLDPRT"` -- also
+            what `set_dimension_value`/`set_dimension_text` expect as
+            `dimension_name`); `data["value"]` is its value converted back to
+            the caller's default unit via `IDimension::GetSystemValue3`
+            (confirmed meters, sw-1xx.2 dossier addendum).
+            `data["dim_type_enum"]` is `dimension_type`'s documented
+            `swDimensionType_e` value; `data["type_code"]` is the created
+            dimension's *actual* type, read back via `IDisplayDimension::
+            Type2` (fetched sw-1xx.2), so a caller can verify SolidWorks
+            agreed rather than trusting `dim_type_enum` alone.
+        """
+        type_key = (dimension_type or "").strip().lower()
+        type_config = _DIMENSION_TYPES.get(type_key)
+        if type_config is None:
+            return self._result(
+                False,
+                f"Unknown dimension_type {dimension_type!r}; expected one of "
+                f"{sorted(_DIMENSION_TYPES)!r}",
+                SwErrors.swInvalidInput, {"dimension_type": dimension_type},
+            )
+
+        if not isinstance(entities, (list, tuple)) or not entities:
+            return self._result(
+                False,
+                f"entities must be a non-empty list of entity references, got {entities!r}",
+                SwErrors.swInvalidInput, {"dimension_type": type_key, "entities": entities},
+            )
+
+        min_entities = type_config["min_entities"]
+        if len(entities) < min_entities:
+            return self._result(
+                False,
+                f"dimension_type={type_key!r} needs at least {min_entities} "
+                f"entit{'y' if min_entities == 1 else 'ies'} to unambiguously define "
+                f"it, got {len(entities)}",
+                SwErrors.swInvalidInput,
+                {"dimension_type": type_key, "entities": entities, "min_entities": min_entities},
+            )
+
+        parsed_entities = []
+        for i, entity in enumerate(entities):
+            parsed, entity_err = _parse_entity_ref(entity)
+            if entity_err:
+                return self._result(
+                    False, f"entities[{i}]: {entity_err}", SwErrors.swInvalidInput,
+                    {"dimension_type": type_key, "entities": entities},
+                )
+            parsed_entities.append(parsed)
+
+        if isinstance(x, bool) or isinstance(y, bool) \
+                or not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+            return self._result(
+                False, f"x/y must be numbers, got x={x!r}, y={y!r}",
+                SwErrors.swInvalidInput, {"dimension_type": type_key, "x": x, "y": y},
+            )
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        activated = self.select_view_by_name(view_name)
+        if not activated["success"]:
+            return activated
+
+        data = {
+            "view_name": view_name, "dimension_type": type_key, "x": x, "y": y,
+            "entity_count": len(parsed_entities), "dim_type_enum": type_config["dim_type_enum"],
+        }
+
+        with ExitStack() as stack:
+            for i, (type_str, ex, ey, ez) in enumerate(parsed_entities):
+                sel = stack.enter_context(
+                    self.selected("", type_str, ex, ey, ez, append=(i > 0), mark=i)
+                )
+                if not sel["success"]:
+                    return sel
+
+            try:
+                x_m, y_m = self._units.to_meters(x), self._units.to_meters(y)
+                if type_config["method"] == "horizontal":
+                    created = doc.AddHorizontalDimension2(x_m, y_m, 0.0)
+                elif type_config["method"] == "vertical":
+                    created = doc.AddVerticalDimension2(x_m, y_m, 0.0)
+                else:
+                    created = doc.AddDimension2(x_m, y_m, 0.0)
+            except Exception as e:
+                logger.error(f"add_dimension({view_name!r}) error: {e}")
+                return self._result(False, f"Add dimension error: {e}",
+                                     SwErrors.swFeatureError, data)
+
+        if created is None:
+            return self._result(
+                False,
+                f"Failed to create a {type_key} dimension in view {view_name!r} -- check "
+                "that the selected entities unambiguously define this dimension type",
+                SwErrors.swFeatureError, data,
+            )
+
+        if type_key in ("radial", "diameter"):
+            # `IDisplayDimension::Diametric` is the documented, real
+            # accessor this module's earlier docstring said didn't exist
+            # (fetched sw-1xx.2, see the dossier record) -- best-effort:
+            # it only applies to a radial-capable dimension, so a "smart"
+            # selection that produced something else (e.g. an angular
+            # dimension) is left alone rather than failing the whole call.
+            want_diameter = type_key == "diameter"
+            try:
+                created.Diametric = want_diameter
+                doc.GraphicsRedraw2()
+            except Exception as e:
+                logger.warning(
+                    f"add_dimension({view_name!r}): could not force "
+                    f"Diametric={want_diameter!r}: {e}"
+                )
+
+        try:
+            dimension = created.GetDimension2(0)
+            name = self._read_prop(dimension, "FullName")
+            type_code = self._read_prop(created, "Type2")
+            value_m = dimension.GetSystemValue3(
+                int(SwInConfigurationOpts.swThisConfiguration), com_backend.null_dispatch(),
+            )
+            value = self._units.from_meters(value_m)
+        except Exception as e:
+            logger.error(f"add_dimension({view_name!r}) read-back error: {e}")
+            return self._result(
+                False,
+                f"Created a {type_key} dimension in view {view_name!r} but could not read "
+                f"back its name/value: {e}",
+                SwErrors.swFeatureError, data,
+            )
+
+        data["name"] = name
+        data["value"] = value
+        data["type_code"] = type_code
+        return self._result(
+            True, f"Created {type_key} dimension {name!r} = {value}", SwErrors.swSuccess, data,
+        )
+
+    def add_ordinate_dimensions(self, view_name: str, origin_entity: Dict[str, Any],
+                                 entities: List[Dict[str, Any]], x: float, y: float,
+                                 direction: str = "horizontal") -> Dict:
+        """
+        Start a baseline/ordinate dimension group off a datum origin via
+        `IModelDocExtension::AddOrdinateDimension`.
+
+        Per the dossier's own record for this method, selection here is not a
+        clean one-shot select-then-act: the datum (`origin_entity`) and every
+        member entity are all selected first (the datum is what makes the
+        rest an *ordinate*, rather than independent, dimension group), then
+        one `AddOrdinateDimension` call both creates the group and starts it
+        accepting more members from any selection made after it returns (this
+        wrapper always ends the call with `IModelDoc2::SetPickMode` to leave
+        that mode, best-effort, so a later unrelated selection in this
+        drawing can't silently keep extending this group).
+
+        Args:
+            view_name: Drawing view the entities live in. Activated the same
+                way as `add_dimension`.
+            origin_entity: The datum/origin entity reference (same shape as
+                `add_dimension`'s `entities`), selected first and unmarked.
+            entities: One or more additional entity references to include in
+                the ordinate group, appended onto the same selection.
+            x, y: Placement location for the ordinate dimension, caller's
+                default unit.
+            direction: `"horizontal"` (default), `"vertical"`, `"angular"`, or
+                `"auto"` (orientation inferred from the selected points) --
+                `swAddOrdinateDims_e`'s `DimType`.
+
+        Returns:
+            Result dict. `data["status"]` is the `swCreateOrdDimError_e`
+            member name for `AddOrdinateDimension`'s own return code --
+            anything other than `"swCreateOrdDimErr_Success"` fails the
+            result with `swFeatureError`. `AddOrdinateDimension` returns a
+            bare status code, not the created annotation objects (unlike
+            `AddDimension2`/`AddHorizontalDimension2`/`AddVerticalDimension2`),
+            so unlike `add_dimension` there is no per-dimension name/value to
+            report here.
+        """
+        direction_key = (direction or "").strip().lower()
+        dim_type_value = _ORDINATE_DIRECTIONS.get(direction_key)
+        if dim_type_value is None:
+            return self._result(
+                False,
+                f"Unknown direction {direction!r}; expected one of "
+                f"{sorted(_ORDINATE_DIRECTIONS)!r}",
+                SwErrors.swInvalidInput, {"direction": direction},
+            )
+
+        origin_parsed, origin_err = _parse_entity_ref(origin_entity)
+        if origin_err:
+            return self._result(
+                False, f"origin_entity: {origin_err}", SwErrors.swInvalidInput,
+                {"origin_entity": origin_entity},
+            )
+
+        if not isinstance(entities, (list, tuple)) or not entities:
+            return self._result(
+                False,
+                f"entities must be a non-empty list of entity references, got {entities!r}",
+                SwErrors.swInvalidInput, {"entities": entities},
+            )
+
+        parsed_entities = []
+        for i, entity in enumerate(entities):
+            parsed, entity_err = _parse_entity_ref(entity)
+            if entity_err:
+                return self._result(
+                    False, f"entities[{i}]: {entity_err}", SwErrors.swInvalidInput,
+                    {"entities": entities},
+                )
+            parsed_entities.append(parsed)
+
+        if isinstance(x, bool) or isinstance(y, bool) \
+                or not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+            return self._result(
+                False, f"x/y must be numbers, got x={x!r}, y={y!r}",
+                SwErrors.swInvalidInput, {"x": x, "y": y},
+            )
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        activated = self.select_view_by_name(view_name)
+        if not activated["success"]:
+            return activated
+
+        data = {
+            "view_name": view_name, "direction": direction_key, "x": x, "y": y,
+            "entity_count": len(parsed_entities),
+        }
+
+        all_refs = [origin_parsed] + parsed_entities
+        with ExitStack() as stack:
+            for i, (type_str, ex, ey, ez) in enumerate(all_refs):
+                sel = stack.enter_context(
+                    self.selected("", type_str, ex, ey, ez, append=(i > 0), mark=i)
+                )
+                if not sel["success"]:
+                    return sel
+
+            x_m, y_m = self._units.to_meters(x), self._units.to_meters(y)
+            try:
+                status = doc.Extension.AddOrdinateDimension(dim_type_value, x_m, y_m, 0.0)
+            except Exception as e:
+                logger.error(f"add_ordinate_dimensions({view_name!r}) error: {e}")
+                return self._result(False, f"Add ordinate dimension error: {e}",
+                                     SwErrors.swFeatureError, data)
+            finally:
+                # Best-effort, and deliberately unconditional (runs whether
+                # AddOrdinateDimension succeeded or raised): per the dossier's
+                # own Gotcha, any call made without this leaves the document in
+                # ordinate-group-building mode, silently absorbing the *next*
+                # unrelated selection this drawing makes into this group.
+                try:
+                    doc.SetPickMode()
+                except Exception as e:
+                    logger.warning(f"add_ordinate_dimensions: SetPickMode cleanup failed: {e}")
+
+        status_code = int(status) if isinstance(status, (int, float)) else None
+        status_name = _enum_name(SwCreateOrdDimError, status_code)
+        data["status_code"] = status_code
+        data["status"] = status_name
+
+        if status_code != int(SwCreateOrdDimError.swCreateOrdDimErr_Success):
+            return self._result(
+                False, f"Add ordinate dimension failed in view {view_name!r}: {status_name}",
+                SwErrors.swFeatureError, data,
+            )
+
+        return self._result(
+            True,
+            f"Added ordinate dimension group ({len(parsed_entities)} member "
+            f"entit{'y' if len(parsed_entities) == 1 else 'ies'}) off datum in "
+            f"view {view_name!r}",
+            SwErrors.swSuccess, data,
+        )
+
+    def set_dimension_value(self, dimension_name: str, value: float) -> Dict:
+        """
+        Set a dimension's driving value via `IDimension::SetSystemValue3` --
+        the meters-based sibling of the document-unit-based `SetValue3` (see
+        that record's sw-1xx.2 Gotcha in the dossier for why this module
+        calls the `System` variant).
+
+        Args:
+            dimension_name: `IDimension::FullName` (e.g.
+                `"D1@Sketch1@Part1.SLDPRT"`), as returned by `add_dimension`'s
+                `data["name"]`. Selected via `SelectByID2(dimension_name,
+                "DIMENSION", ...)` -- a name-based, not location-based,
+                selection (valid for auto-named objects like dimensions per
+                the dossier's own `SelectByID2` record).
+            value: New value, caller's default unit -- converted to meters at
+                the COM boundary. Rejected with `swInvalidInput` before any
+                COM call if not numeric.
+
+        Returns:
+            Result dict. `data["status"]` is the `swSetValueReturnStatus_e`
+            member name for `SetSystemValue3`'s own return code -- anything
+            other than `"swSetValue_Successful"` (e.g. a dimension driven by
+            geometry, or a frozen feature owner) fails the result with
+            `swFeatureError` naming the specific reason rather than a generic
+            failure. `data["value"]` is read back via `GetSystemValue3` and
+            converted to the caller's default unit.
+        """
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return self._result(
+                False, f"value must be a number, got {type(value).__name__}",
+                SwErrors.swInvalidInput, {"dimension_name": dimension_name, "value": value},
+            )
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        data = {"dimension_name": dimension_name, "value": value}
+
+        dimension = None
+        with self.selected(dimension_name, "DIMENSION", 0, 0, 0) as sel:
+            if not sel["success"]:
+                return sel
+            try:
+                sel_mgr = doc.SelectionManager
+                display_dim = sel_mgr.GetSelectedObject6(1, -1)
+                if display_dim is None:
+                    return self._result(
+                        False,
+                        f"Selected {dimension_name!r} but could not read it back as a "
+                        "dimension (GetSelectedObject6 returned nothing)",
+                        SwErrors.swSelectionError, data,
+                    )
+                dimension = display_dim.GetDimension2(0)
+                value_m = self._units.to_meters(value)
+                status = dimension.SetSystemValue3(
+                    value_m, int(SwSetValueInConfiguration.swSetValue_InThisConfiguration),
+                    com_backend.null_dispatch(),
+                )
+            except Exception as e:
+                logger.error(f"set_dimension_value({dimension_name!r}) error: {e}")
+                return self._result(False, f"Set dimension value error: {e}",
+                                     SwErrors.swFeatureError, data)
+
+        status_code = int(status) if isinstance(status, (int, float)) else None
+        status_name = _enum_name(SwSetValueReturnStatus, status_code)
+        data["status_code"] = status_code
+        data["status"] = status_name
+
+        if status_code != int(SwSetValueReturnStatus.swSetValue_Successful):
+            return self._result(
+                False, f"Failed to set {dimension_name!r} to {value}: {status_name}",
+                SwErrors.swFeatureError, data,
+            )
+
+        try:
+            new_value_m = dimension.GetSystemValue3(
+                int(SwInConfigurationOpts.swThisConfiguration), com_backend.null_dispatch(),
+            )
+            data["value"] = self._units.from_meters(new_value_m)
+        except Exception as e:
+            logger.warning(f"set_dimension_value({dimension_name!r}): read-back failed: {e}")
+
+        return self._result(
+            True, f"Set {dimension_name!r} = {data['value']}", SwErrors.swSuccess, data,
+        )
+
+    def set_dimension_text(self, dimension_name: str, prefix: Optional[str] = None,
+                            suffix: Optional[str] = None, override: Optional[str] = None) -> Dict:
+        """
+        Set a dimension's prefix/suffix/full-override text via
+        `IDisplayDimension::SetText` -- for tolerance callouts and "TYP"/"REF"
+        annotations.
+
+        Args:
+            dimension_name: `IDimension::FullName`, same as `set_dimension_value`.
+            prefix: Text before the dimension value (`swDimensionTextPrefix`).
+            suffix: Text after the dimension value (`swDimensionTextSuffix`).
+            override: Full replacement text (`swDimensionTextAll`) -- per the
+                dossier's own Gotcha, this also clears the suffix and turns
+                off the live numeric value display, so combining it with
+                `suffix` in the same call fights itself (each is still applied
+                independently, in `override`, `prefix`, `suffix` order, if more
+                than one is given -- nothing stops a caller from doing that,
+                but it isn't a meaningful combination).
+                At least one of `prefix`/`suffix`/`override` is required --
+                rejected with `swInvalidInput` before any COM call otherwise.
+
+        Returns:
+            Result dict. `data["prefix"]`/`data["suffix"]` are read back via
+            `IDisplayDimension::GetText` after the update (`swDimensionTextAll`
+            is not valid for `GetText`, per the dossier, so `override` itself
+            is never read back -- only its effect on the prefix slot is
+            visible that way).
+        """
+        if prefix is None and suffix is None and override is None:
+            return self._result(
+                False, "Specify at least one of prefix/suffix/override",
+                SwErrors.swInvalidInput, {"dimension_name": dimension_name},
+            )
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        data = {
+            "dimension_name": dimension_name, "prefix": prefix, "suffix": suffix,
+            "override": override,
+        }
+
+        display_dim = None
+        with self.selected(dimension_name, "DIMENSION", 0, 0, 0) as sel:
+            if not sel["success"]:
+                return sel
+            try:
+                sel_mgr = doc.SelectionManager
+                display_dim = sel_mgr.GetSelectedObject6(1, -1)
+                if display_dim is None:
+                    return self._result(
+                        False,
+                        f"Selected {dimension_name!r} but could not read it back as a "
+                        "dimension (GetSelectedObject6 returned nothing)",
+                        SwErrors.swSelectionError, data,
+                    )
+                if override is not None:
+                    display_dim.SetText(int(SwDimensionTextParts.swDimensionTextAll), override)
+                if prefix is not None:
+                    display_dim.SetText(int(SwDimensionTextParts.swDimensionTextPrefix), prefix)
+                if suffix is not None:
+                    display_dim.SetText(int(SwDimensionTextParts.swDimensionTextSuffix), suffix)
+            except Exception as e:
+                logger.error(f"set_dimension_text({dimension_name!r}) error: {e}")
+                return self._result(False, f"Set dimension text error: {e}",
+                                     SwErrors.swFeatureError, data)
+
+        try:
+            doc.GraphicsRedraw2()
+        except Exception as e:
+            logger.warning(f"set_dimension_text({dimension_name!r}): GraphicsRedraw2 failed: {e}")
+
+        try:
+            data["prefix"] = display_dim.GetText(int(SwDimensionTextParts.swDimensionTextPrefix))
+            data["suffix"] = display_dim.GetText(int(SwDimensionTextParts.swDimensionTextSuffix))
+        except Exception as e:
+            logger.warning(f"set_dimension_text({dimension_name!r}): read-back failed: {e}")
+
+        return self._result(
+            True, f"Updated text for dimension {dimension_name!r}", SwErrors.swSuccess, data,
+        )
+
+    def autodimension_view(self, view_name: str, scheme: str = "baseline", entities: str = "all",
+                            horizontal_placement: str = "above",
+                            vertical_placement: str = "left") -> Dict:
+        """
+        Bulk-dimension a drawing view via `IDrawingDoc::AutoDimension` -- a
+        "just add reasonable baseline dimensions" fallback for a view with no
+        usable DimXpert data. This dossier confirmed `AutoDimension` is real,
+        current, and the sole member of the "autodimension family" (no
+        `AutoDimension2`/`3`) -- see docs/api/03-annotations.md's own record;
+        this is a genuine implementation, not an unsupported-API stub.
+
+        Args:
+            view_name: Drawing view to autodimension. Selected via
+                `selected(view_name, "DRAWINGVIEW", ...)` -- per the dossier,
+                `AutoDimension` also accepts no view selection at all
+                (defaulting to the drawing's first view), but this wrapper
+                always selects `view_name` explicitly so the caller's choice
+                is never ambiguous.
+            scheme: `"baseline"` (default), `"ordinate"`, or `"chain"` --
+                `swAutodimScheme_e`, applied to both `HorizontalScheme` and
+                `VerticalScheme` (the tool exposes one scheme, not separate
+                horizontal/vertical ones). `swAutodimSchemeCenterline` is
+                deliberately not offered -- documented as unsupported in
+                drawings.
+            entities: `"all"` (default, every supported entity in the view),
+                `"based_on_preselect"`, or `"selected"` -- `swAutodimEntities_e`.
+                This tool does not expose a way to mark individual entities
+                with `swAutodimMarkEntities` beforehand, so `"selected"`/
+                `"based_on_preselect"` only do something useful if a caller
+                left a marked selection some other way; with nothing marked,
+                SolidWorks falls back to `"all"` per the dossier.
+            horizontal_placement: `"above"` (default) or `"below"` --
+                `swAutodimHorizontalPlacement_e`.
+            vertical_placement: `"left"` (default) or `"right"` --
+                `swAutodimVerticalPlacement_e`.
+
+        Returns:
+            Result dict. `data["status"]` is the `swAutodimStatus_e` member
+            name for `AutoDimension`'s own return code -- anything other than
+            `"swAutodimStatusSuccess"` fails the result with `swFeatureError`
+            naming the specific reason (e.g. no entities, an over-defined
+            sketch, a missing datum).
+        """
+        scheme_key = (scheme or "").strip().lower()
+        scheme_value = _AUTODIM_SCHEMES.get(scheme_key)
+        if scheme_value is None:
+            return self._result(
+                False, f"Unknown scheme {scheme!r}; expected one of {sorted(_AUTODIM_SCHEMES)!r}",
+                SwErrors.swInvalidInput, {"scheme": scheme},
+            )
+
+        entities_key = (entities or "").strip().lower()
+        entities_value = _AUTODIM_ENTITIES.get(entities_key)
+        if entities_value is None:
+            return self._result(
+                False,
+                f"Unknown entities {entities!r}; expected one of {sorted(_AUTODIM_ENTITIES)!r}",
+                SwErrors.swInvalidInput, {"entities": entities},
+            )
+
+        h_placement_key = (horizontal_placement or "").strip().lower()
+        h_placement_value = _AUTODIM_HORIZONTAL_PLACEMENTS.get(h_placement_key)
+        if h_placement_value is None:
+            return self._result(
+                False,
+                f"Unknown horizontal_placement {horizontal_placement!r}; expected one of "
+                f"{sorted(_AUTODIM_HORIZONTAL_PLACEMENTS)!r}",
+                SwErrors.swInvalidInput, {"horizontal_placement": horizontal_placement},
+            )
+
+        v_placement_key = (vertical_placement or "").strip().lower()
+        v_placement_value = _AUTODIM_VERTICAL_PLACEMENTS.get(v_placement_key)
+        if v_placement_value is None:
+            return self._result(
+                False,
+                f"Unknown vertical_placement {vertical_placement!r}; expected one of "
+                f"{sorted(_AUTODIM_VERTICAL_PLACEMENTS)!r}",
+                SwErrors.swInvalidInput, {"vertical_placement": vertical_placement},
+            )
+
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        data = {
+            "view_name": view_name, "scheme": scheme_key, "entities": entities_key,
+            "horizontal_placement": h_placement_key, "vertical_placement": v_placement_key,
+        }
+
+        with self.selected(view_name, "DRAWINGVIEW", 0, 0, 0) as sel:
+            if not sel["success"]:
+                return sel
+            try:
+                status = doc.AutoDimension(
+                    entities_value, scheme_value, h_placement_value, scheme_value, v_placement_value,
+                )
+            except Exception as e:
+                logger.error(f"autodimension_view({view_name!r}) error: {e}")
+                return self._result(False, f"Autodimension error: {e}",
+                                     SwErrors.swFeatureError, data)
+
+        status_code = int(status) if isinstance(status, (int, float)) else None
+        status_name = _enum_name(SwAutodimStatus, status_code)
+        data["status_code"] = status_code
+        data["status"] = status_name
+
+        if status_code != int(SwAutodimStatus.swAutodimStatusSuccess):
+            return self._result(
+                False, f"Autodimension of view {view_name!r} failed: {status_name}",
+                SwErrors.swFeatureError, data,
+            )
+
+        return self._result(
+            True, f"Autodimensioned view {view_name!r} ({scheme_key})",
             SwErrors.swSuccess, data,
         )
