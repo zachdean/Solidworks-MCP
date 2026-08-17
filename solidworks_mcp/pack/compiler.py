@@ -28,7 +28,16 @@ for "the first sheet" and a separate literal-string path for the rest).
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from .spec import AnnotationSpec, PackSpec, SheetSpec, TableSpec, ViewSpec
+from .spec import (
+    AnnotationSpec,
+    PackSpec,
+    SheetSpec,
+    TableSpec,
+    ViewSpec,
+    VIEW_KINDS_CREATING,
+    VIEW_KINDS_WITH_PARENT,
+    VIEW_KINDS_WITH_TARGET,
+)
 
 __all__ = ["Ref", "Step", "compile"]
 
@@ -109,15 +118,11 @@ def _view_key(sheet_name: str, view_name: str) -> str:
 # changes.
 # ---------------------------------------------------------------------------
 
-_VIEW_KINDS_CREATING = frozenset({"model", "projected", "section", "detail", "broken_out"})
-_VIEW_KINDS_WITH_PARENT = frozenset({"projected", "section", "detail", "broken_out"})
-_VIEW_KINDS_WITH_TARGET = frozenset({"break", "crop"})
-
 
 def _view_dependency(view: ViewSpec) -> Optional[str]:
-    if view.kind in _VIEW_KINDS_WITH_PARENT:
+    if view.kind in VIEW_KINDS_WITH_PARENT:
         return view.parent
-    if view.kind in _VIEW_KINDS_WITH_TARGET:
+    if view.kind in VIEW_KINDS_WITH_TARGET:
         return view.target
     return None
 
@@ -135,7 +140,7 @@ def _order_views(views: List[ViewSpec]) -> List[ViewSpec]:
             dep = _view_dependency(view)
             if dep is None or dep in placed:
                 ordered.append(view)
-                if view.kind in _VIEW_KINDS_CREATING and view.name:
+                if view.kind in VIEW_KINDS_CREATING and view.name:
                     placed.add(view.name)
                 progressed = True
             else:
@@ -154,7 +159,7 @@ def _order_views(views: List[ViewSpec]) -> List[ViewSpec]:
 # ---------------------------------------------------------------------------
 
 
-def _compile_view(view: ViewSpec, sheet_key: str) -> Step:
+def _compile_view(view: ViewSpec, sheet_name: str) -> Step:
     label = f"view:{view.name}" if view.name else f"view:{view.target}"
 
     if view.kind == "model":
@@ -165,9 +170,9 @@ def _compile_view(view: ViewSpec, sheet_key: str) -> Step:
                 "view_name": view.orientation,
                 "x": view.x,
                 "y": view.y,
-                "sheet_name": Ref(sheet_key),
+                "sheet_name": Ref(_sheet_key(sheet_name)),
             },
-            binds=_view_key_from(sheet_key, view.name),
+            binds=_view_key(sheet_name, view.name or ""),
             bind_field="view_name",
             category="view",
             label=label,
@@ -177,12 +182,12 @@ def _compile_view(view: ViewSpec, sheet_key: str) -> Step:
         return Step(
             tool="insert_projected_view",
             args={
-                "parent_view_name": Ref(_view_key_from(sheet_key, view.parent)),
+                "parent_view_name": Ref(_view_key(sheet_name, view.parent or "")),
                 "direction": view.direction,
                 "offset": view.offset,
-                "sheet_name": Ref(sheet_key),
+                "sheet_name": Ref(_sheet_key(sheet_name)),
             },
-            binds=_view_key_from(sheet_key, view.name),
+            binds=_view_key(sheet_name, view.name or ""),
             bind_field="view_name",
             category="view",
             label=label,
@@ -192,7 +197,7 @@ def _compile_view(view: ViewSpec, sheet_key: str) -> Step:
         return Step(
             tool="insert_section_view",
             args={
-                "parent_view_name": Ref(_view_key_from(sheet_key, view.parent)),
+                "parent_view_name": Ref(_view_key(sheet_name, view.parent or "")),
                 "cut_points": view.cut_points,
                 "x": view.x,
                 "y": view.y,
@@ -203,7 +208,7 @@ def _compile_view(view: ViewSpec, sheet_key: str) -> Step:
                 "display_only": view.display_only,
                 "use_sheet_scale": view.use_sheet_scale,
             },
-            binds=_view_key_from(sheet_key, view.name),
+            binds=_view_key(sheet_name, view.name or ""),
             bind_field="view_name",
             category="view",
             label=label,
@@ -213,7 +218,7 @@ def _compile_view(view: ViewSpec, sheet_key: str) -> Step:
         return Step(
             tool="insert_detail_view",
             args={
-                "parent_view_name": Ref(_view_key_from(sheet_key, view.parent)),
+                "parent_view_name": Ref(_view_key(sheet_name, view.parent or "")),
                 "center_x": view.center_x,
                 "center_y": view.center_y,
                 "radius": view.radius,
@@ -225,7 +230,7 @@ def _compile_view(view: ViewSpec, sheet_key: str) -> Step:
                 "style": view.style,
                 "full_outline": view.full_outline,
             },
-            binds=_view_key_from(sheet_key, view.name),
+            binds=_view_key(sheet_name, view.name or ""),
             bind_field="view_name",
             category="view",
             label=label,
@@ -240,12 +245,12 @@ def _compile_view(view: ViewSpec, sheet_key: str) -> Step:
         return Step(
             tool="insert_broken_out_section",
             args={
-                "parent_view_name": Ref(_view_key_from(sheet_key, view.parent)),
+                "parent_view_name": Ref(_view_key(sheet_name, view.parent or "")),
                 "profile_points": view.profile_points,
                 "depth": view.depth,
                 "depth_reference": view.depth_reference,
             },
-            binds=_view_key_from(sheet_key, view.name),
+            binds=_view_key(sheet_name, view.name or ""),
             bind_field="view_name",
             category="view",
             label=label,
@@ -255,7 +260,7 @@ def _compile_view(view: ViewSpec, sheet_key: str) -> Step:
         return Step(
             tool="insert_break_view",
             args={
-                "view_name": Ref(_view_key_from(sheet_key, view.target)),
+                "view_name": Ref(_view_key(sheet_name, view.target or "")),
                 "position1": view.position1,
                 "position2": view.position2,
                 "orientation": view.break_orientation,
@@ -272,7 +277,7 @@ def _compile_view(view: ViewSpec, sheet_key: str) -> Step:
         return Step(
             tool="add_crop_view",
             args={
-                "view_name": Ref(_view_key_from(sheet_key, view.target)),
+                "view_name": Ref(_view_key(sheet_name, view.target or "")),
                 "profile_points": view.profile_points,
             },
             category="other",  # mutates an existing view; see "break" above.
@@ -282,20 +287,13 @@ def _compile_view(view: ViewSpec, sheet_key: str) -> Step:
     raise ValueError(f"compile(): unknown view kind {view.kind!r}")
 
 
-def _view_key_from(sheet_key: str, view_name: Optional[str]) -> str:
-    # `sheet_key` is `f"sheet::{sheet_name}"`; views are namespaced under the
-    # same sheet name so the compiler never needs the raw `SheetSpec` here.
-    sheet_name = sheet_key.split("::", 1)[1]
-    return _view_key(sheet_name, view_name or "")
-
-
 # ---------------------------------------------------------------------------
 # Per-annotation-kind compilation
 # ---------------------------------------------------------------------------
 
 
-def _compile_annotation(ann: AnnotationSpec, sheet_key: str) -> Step:
-    view_ref = Ref(_view_key_from(sheet_key, ann.view)) if ann.view else None
+def _compile_annotation(ann: AnnotationSpec, sheet_name: str) -> Step:
+    view_ref = Ref(_view_key(sheet_name, ann.view)) if ann.view else None
     label = f"annotation:{ann.kind}"
 
     if ann.kind == "note":
@@ -373,8 +371,8 @@ def _compile_annotation(ann: AnnotationSpec, sheet_key: str) -> Step:
 _DEFAULT_HOLE_TABLE_DATUM = {"kind": "vertex", "x": 0, "y": 0}
 
 
-def _compile_table(table: TableSpec, sheet_key: str) -> Step:
-    view_ref = Ref(_view_key_from(sheet_key, table.view)) if table.view else None
+def _compile_table(table: TableSpec, sheet_name: str) -> Step:
+    view_ref = Ref(_view_key(sheet_name, table.view)) if table.view else None
     label = f"table:{table.kind}"
 
     if table.kind == "bom":
@@ -481,7 +479,7 @@ def _compile_sheet(sheet: SheetSpec, index: int, drawing_template: str) -> List[
 
     # 3. insert views (parents before children)
     for view in _order_views(sheet.views):
-        steps.append(_compile_view(view, sheet_key))
+        steps.append(_compile_view(view, sheet.name))
 
     # 4. auto-arrange
     steps.append(Step(
@@ -502,11 +500,11 @@ def _compile_sheet(sheet: SheetSpec, index: int, drawing_template: str) -> List[
     # meaningful item number).
     for ann in sheet.annotations:
         if ann.kind != "balloon":
-            steps.append(_compile_annotation(ann, sheet_key))
+            steps.append(_compile_annotation(ann, sheet.name))
 
     # 7. insert tables
     for table in sheet.tables:
-        steps.append(_compile_table(table, sheet_key))
+        steps.append(_compile_table(table, sheet.name))
 
     # 8. REBUILD -- table contents (BOM quantities, balloon numbering) are
     # stale until this runs.
@@ -526,7 +524,7 @@ def _compile_sheet(sheet: SheetSpec, index: int, drawing_template: str) -> List[
     # 10. balloons
     for ann in sheet.annotations:
         if ann.kind == "balloon":
-            steps.append(_compile_annotation(ann, sheet_key))
+            steps.append(_compile_annotation(ann, sheet.name))
 
     # 11. set custom properties (only if the sheet actually declares any --
     # an empty call would be a pointless COM round trip every sheet)

@@ -14,6 +14,7 @@ from typing import Dict
 
 from .. import version_gate
 from ..config import get_config
+from ..constants import SwErrors
 from ._automation import sw_automation
 from .registry import describe_tools, tool
 
@@ -56,19 +57,15 @@ def get_capabilities(arguments: dict) -> Dict:
             "usable": usable,
         })
 
-    return {
-        "success": True,
-        "message": (
-            f"Connected to SOLIDWORKS {connected_release_year}" if connected
-            else "Not connected to SOLIDWORKS"
-        ) + f"; project minimum is SOLIDWORKS {min_required}.",
-        "error_code": 0,
-        "error_name": "swSuccess",
-        "data": {
-            "connected": connected,
-            "connected_release": connected_release_year,
-            "revision_number": revision_number,
-            "min_required_release": min_required,
-            "tools": tools,
-        },
-    }
+    message = (
+        f"Connected to SOLIDWORKS {connected_release_year}" if connected
+        else "Not connected to SOLIDWORKS"
+    ) + f"; project minimum is SOLIDWORKS {min_required}."
+
+    return sw_automation._result(True, message, SwErrors.swSuccess, {
+        "connected": connected,
+        "connected_release": connected_release_year,
+        "revision_number": revision_number,
+        "min_required_release": min_required,
+        "tools": tools,
+    })

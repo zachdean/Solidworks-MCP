@@ -17,6 +17,7 @@ actually requires.
 """
 
 import dataclasses
+import functools
 import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Union, get_args, get_origin, get_type_hints
@@ -33,15 +34,15 @@ VIEW_KINDS = frozenset(
 
 # View kinds that create a new, independently addressable view (i.e. they
 # populate ViewSpec.name and participate in the sheet's view-name namespace).
-_VIEW_KINDS_CREATING = frozenset({"model", "projected", "section", "detail", "broken_out"})
+VIEW_KINDS_CREATING = frozenset({"model", "projected", "section", "detail", "broken_out"})
 
 # View kinds that reference an existing view via ViewSpec.parent, which must
 # already be defined earlier in the same sheet.
-_VIEW_KINDS_WITH_PARENT = frozenset({"projected", "section", "detail", "broken_out"})
+VIEW_KINDS_WITH_PARENT = frozenset({"projected", "section", "detail", "broken_out"})
 
 # View kinds that mutate an existing view in place via ViewSpec.target,
 # rather than creating a new named view.
-_VIEW_KINDS_WITH_TARGET = frozenset({"break", "crop"})
+VIEW_KINDS_WITH_TARGET = frozenset({"break", "crop"})
 
 ANNOTATION_KINDS = frozenset(
     {"note", "gtol", "datum_feature", "datum_target", "surface_finish", "balloon"}
@@ -114,13 +115,21 @@ def _convert_value(tp, value):
     return value
 
 
+@functools.lru_cache(maxsize=None)
+def _hints(cls) -> Dict[str, Any]:
+    """`get_type_hints(cls)` memoized -- class annotations never change at
+    runtime, but resolving them is not cheap and both `from_dict` (once per
+    object parsed from JSON) and `_dataclass_json_schema` ask repeatedly."""
+    return get_type_hints(cls)
+
+
 class _DataclassJSON:
     """Mixin giving every pack dataclass generic, type-hint-driven
     `from_dict`/`to_dict` -- one implementation instead of one per class."""
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]):
-        hints = get_type_hints(cls)
+        hints = _hints(cls)
         kwargs = {}
         for f in dataclasses.fields(cls):
             if f.name not in data:
@@ -352,18 +361,18 @@ def _validate_sheet(sheet: SheetSpec, loc: str) -> List[str]:
         if view.kind == "broken_out" and view.depth is not None and view.depth_reference is not None:
             errors.append(f"{vloc}: broken_out view must give exactly one of 'depth'/'depth_reference', not both")
 
-        if view.kind in _VIEW_KINDS_WITH_TARGET:
+        if view.kind in VIEW_KINDS_WITH_TARGET:
             if view.target and view.target not in defined_views:
                 errors.append(f"{vloc}: target view '{view.target}' is not defined earlier in this sheet")
             continue
 
-        if view.kind in _VIEW_KINDS_WITH_PARENT:
+        if view.kind in VIEW_KINDS_WITH_PARENT:
             if view.parent and view.parent not in defined_views:
                 errors.append(
                     f"{vloc} (kind='{view.kind}'): parent view '{view.parent}' is not defined earlier in this sheet"
                 )
 
-        if view.kind in _VIEW_KINDS_CREATING and view.name:
+        if view.kind in VIEW_KINDS_CREATING and view.name:
             if view.name in defined_views:
                 errors.append(f"{vloc}: duplicate view name '{view.name}'")
             else:
@@ -418,8 +427,6 @@ def _validate_sheet(sheet: SheetSpec, loc: str) -> List[str]:
 # tool schema / docs built from it) in sync with the code by construction.
 # ---------------------------------------------------------------------------
 
-_PACK_DATACLASSES = (PackSpec, SheetSpec, ScaleSpec, ViewSpec, AnnotationSpec, TableSpec)
-
 _PRIMITIVE_JSON_TYPES = {str: "string", float: "number", int: "number", bool: "boolean"}
 
 
@@ -453,7 +460,7 @@ def _json_schema_for_type(tp, defs: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _dataclass_json_schema(cls, defs: Dict[str, Any]) -> Dict[str, Any]:
-    hints = get_type_hints(cls)
+    hints = _hints(cls)
     properties = {}
     required = []
     for f in dataclasses.fields(cls):
@@ -478,9 +485,10 @@ def generate_schema() -> Dict[str, Any]:
     dataclasses above. Regenerate `schema.json` with
     `scripts/generate_pack_schema.py` after changing any pack dataclass."""
 
+    # `_ensure_def` recurses through PackSpec's own field types, so every
+    # nested dataclass (SheetSpec -> ScaleSpec/ViewSpec/AnnotationSpec/
+    # TableSpec) lands in `$defs` without being listed here.
     defs: Dict[str, Any] = {}
-    for cls in _PACK_DATACLASSES[1:]:
-        _ensure_def(cls, defs)
     top = _dataclass_json_schema(PackSpec, defs)
 
     return {
