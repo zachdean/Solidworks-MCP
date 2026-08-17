@@ -445,6 +445,21 @@ dossier.
   but its full enum table (including numeric values) is unverified; fetch
   `swExportToDWG_e`'s own page before writing code against `Action` values.
 
+**Resolution (sw-jcq.2 -- `export_dxf_dwg` tool):** confirms and acts on the
+discrepancy flagged above. `export_dxf_dwg` does **not** call
+`IPartDoc::ExportToDWG2` -- it is the wrong interface (`IPartDoc`, not
+`IDrawingDoc`), requires a pre-selected multi-body sheet-metal feature (not
+generally true of an arbitrary drawing's model), and exports flat-pattern
+geometry rather than a drawing sheet. Instead it uses
+`IModelDocExtension::SaveAs3` (already this project's standard save/export
+entry point, per `save_drawing`/`export_pdf`) with a `.dxf`/`.dwg`
+`output_path`, driven by the `swDxfOutputFonts`/`swDxfMultiSheetOption`/
+`swDxfVersion` members of `swUserPreferenceIntegerValue_e` documented below --
+exactly the mechanism this dossier's intro and this record's Gotchas already
+identify as the real one. There is no `ExportToDWG2`-shaped positional tuple
+for a drawing-sheet export to match, because no such method exists on
+`IDrawingDoc`.
+
 ## Export settings via user preferences
 
 ### ISldWorks::SetUserPreferenceToggle
@@ -1287,6 +1302,25 @@ Sources:
   (both fully documented above), then restoring each layer's prior value afterward.
   This uses only numerically-unambiguous, already-verified API surface.
 
+**Numeric values for `export_dxf_dwg`'s layer-mapping toggles (sw-jcq.2):**
+`swDxfMapping = 8 (0x8)`, `swDXFDontShowMap = 21 (0x15)`, and
+`swDxfUseSolidworksLayers = 305 (0x131)` (name referenced but not currently
+consumed by any tool), sourced from the same third-party `SwConst_TLB.pas`
+transcription used above for `swPDFExportHighQuality`
+(https://github.com/pisfu/API/blob/master/LabRabKompas/Sample2/SwConst_TLB.pas).
+This pass's corroboration is stronger than that one's: the file reproduces
+*both* of this project's already-trusted values from the same enum block
+family -- `swAutomaticScaling3ViewDrawings = 86` and
+`swPDFExportHighQuality = 0x145` -- exactly, inside a contiguous, sequentially
+-numbered `swUserPreferenceToggle_e` block (`swDxfMapping` at `$00000008`
+sits between `swDisplayTemporaryAxes = $00000007` and
+`swSketchAutomaticRelations = $00000009`, consistent with a real ordered
+enum rather than a transcription error). Searched for in the same file but
+**not found** (absent, not guessed): `swDxfExportAllSheetsToPaperSpace` and
+`swDXFExportHiddenLayersOn` -- both likely added in a newer SOLIDWORKS
+version than this file's source. Neither is used by `export_dxf_dwg` for
+that reason.
+
 #### swUserPreferenceIntegerValue_e (export-relevant members)
 
 Same "no published numeric values on the enum's own page" situation as
@@ -1319,9 +1353,82 @@ same two dialog-options reference pages.
   file is added (a fresh/empty list apparently reports index `-1`) — this is not
   something `SetUserPreferenceStringListValue` handles automatically.
 
+**Numeric values for `export_dxf_dwg`'s font/multisheet/version/mapping preferences
+(sw-jcq.2):** same `SwConst_TLB.pas` source and corroboration argument as this
+dossier's `swUserPreferenceToggle_e` numeric-values note above (same file,
+same contiguous-ordered-block evidence, same already-trusted cross-check
+values). The `swUserPreferenceIntegerValue_e` block in that file is
+internally consistent with the two numeric sub-values this dossier already
+had independent, official confirmation for --
+`swDxfVersion = 0`/`swDxfOutputFonts = 1` sit at the very start of the block
+(`$00000000`/`$00000001`), and `swDxfOutputLineStyles = 0x87`/
+`swDxfOutputNoScale = 0x88` appear later in the same block -- both pairs
+adjacent, matching the DXF Options reference page's member ordering used
+elsewhere in this dossier.
+
+| Member | Value | Hex |
+| --- | --- | --- |
+| `swDxfVersion` | 0 | `0x0` |
+| `swDxfOutputFonts` | 1 | `0x1` |
+| `swDxfMappingFileIndex` | 2 | `0x2` |
+| `swDxfOutputLineStyles` | 135 | `0x87` |
+| `swDxfOutputNoScale` | 136 | `0x88` |
+| `swEdrawingsSaveAsSelectionOption` | 237 | `0xED` |
+| `swDxfMultiSheetOption` | 253 | `0xFD` |
+
 Sources:
 - https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swUserPreferenceIntegerValue_e.html (member name list; confirms no numeric values published)
 - https://help.solidworks.com/2025/English/api/swconst/FileSaveAsDXFOptions.htm (DXF/DWG members, dialog bindings, and the `swDxfOutputFonts`/`swDxfOutputLineStyles`/`swDxfOutputNoScale` numeric values)
 - https://help.solidworks.com/2025/english/api/swconst/FileSaveAseDrawingsOptions.htm (eDrawings members)
 - https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swDxfFormat_e.html (full `swDxfVersion` value table)
 - https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swDxfMultisheet_e.html
+- https://github.com/pisfu/API/blob/master/LabRabKompas/Sample2/SwConst_TLB.pas (third-party numeric-value transcription; see corroboration note above)
+
+#### swUserPreferenceStringListValue_e (export-relevant members)
+
+Not independently fetched from `help.solidworks.com` in this research pass
+(no dedicated enumeration page URL was located); the one member this dossier
+needs is referenced by name in the official `swDxfMappingFileIndex` worked
+example above (`SetUserPreferenceStringListValue
+swUserPreferenceStringListValue_e.swDxfMappingFiles, mapFilePath`). Its
+numeric value comes from the same `SwConst_TLB.pas` source as the tables
+above.
+
+| Member | Value | Meaning |
+| --- | --- | --- |
+| `swDxfMappingFiles` | 0 | List of known DXF/DWG layer-mapping file paths, selected by index via `swDxfMappingFileIndex` |
+
+**Gotcha:** the official worked example's call
+(`SetUserPreferenceStringListValue swDxfMappingFiles, mapFilePath`) passes
+what reads as a single `String` in VBA, but the method name and this
+dossier's own `swSaveFileProperties`-style naming convention both imply a
+`String()` array (`SAFEARRAY` of `BSTR`) is the real parameter shape --
+VBA's loose typing can make a scalar argument look interchangeable with a
+one-element array at a call site without actually being one. Not
+independently confirmed against a live session; `export_dxf_dwg` passes a
+one-element list (`[map_file]`), consistent with how every other
+array-shaped COM parameter in this codebase (e.g. `IExportPdfData::SetSheets`)
+is called, rather than a bare string.
+
+**status:** unverified (member name/value corroborated as above; the setter's
+exact parameter shape is not)
+
+#### swEdrawingSaveAsOption_e
+
+Consumed via `swUserPreferenceIntegerValue_e.swEdrawingsSaveAsSelectionOption`
+(above) -- which sheets/content an eDrawings export includes. Not
+independently fetched from `help.solidworks.com` in this research pass (no
+dedicated enumeration page URL was located); referenced by name in
+`SaveAs3`'s own Remarks worked example (`swEdrawingSaveAll`, quoted in this
+dossier's intro). Numeric values from the same `SwConst_TLB.pas` source as
+the tables above, in their own contiguous block (`swEdrawingSaveActive = 1`,
+`swEdrawingSaveAll = 2`, `swEdrawingSaveSelected = 3` -- sequential, again
+consistent with a real ordered enum).
+
+| Member | Value | Meaning |
+| --- | --- | --- |
+| `swEdrawingSaveActive` | 1 | Save only the active sheet/configuration |
+| `swEdrawingSaveAll` | 2 | Save all sheets/configurations (used by `SaveAs3`'s own official example) |
+| `swEdrawingSaveSelected` | 3 | Save only the currently selected entities (`ISelectionMgr`) -- **not** a "named sheet list" mode; `export_edrawings` therefore only exposes `"all"`/`"current"`, not an explicit sheet-name list |
+
+**status:** unverified (same caveat as `swUserPreferenceStringListValue_e` above)

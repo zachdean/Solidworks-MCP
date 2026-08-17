@@ -37,8 +37,12 @@ from ..constants_drawing import (
     SwDisplayMode,
     SwDrawingViewTypes,
     SwDwgPaperSizes,
+    SwDxfFormat,
+    SwDxfMultisheet,
+    SwEdrawingSaveAsOption,
     SwExportDataFileType,
     SwExportDataSheetsToExport,
+    SwFileSaveError,
     SwImportModelItemsSource,
     SwInConfigurationOpts,
     SwInsertAnnotation,
@@ -47,6 +51,8 @@ from ..constants_drawing import (
     SwSaveAsVersion,
     SwSetValueInConfiguration,
     SwSetValueReturnStatus,
+    SwUserPreferenceIntegerValue,
+    SwUserPreferenceStringListValue,
     SwUserPreferenceToggle,
     SwViewAlignment,
     decode_save_error,
@@ -106,6 +112,42 @@ _NOTE_LEADER_STYLES = {
     "bent": SwLeaderStyle.swBENT,
     "underline": SwLeaderStyle.swUNDERLINED,
 }
+
+# `export_dxf_dwg`'s `export_fonts_as` -> `swUserPreferenceIntegerValue_e.swDxfOutputFonts`
+# value, per docs/api/05-export-and-layers.md's Enums section (the only two
+# documented values for this member: AutoCAD STANDARD-font-only geometry, or
+# true TrueType fonts).
+_DXF_FONT_MODES = {"geometry": 0, "truetype": 1}
+
+# `export_dxf_dwg`'s `version` -> `SwDxfFormat` member, keyed by the release
+# name with the shared "swDxfFormat_" prefix stripped (e.g. "R2018").
+_DXF_VERSION_BY_NAME = {
+    member.name[len("swDxfFormat_"):]: member for member in SwDxfFormat
+}
+
+# `export_edrawings`'s "is this a missing-add-in failure" decoder: which
+# `swFileSaveError_e` bits, per docs/api/05-export-and-layers.md's Gotchas,
+# plausibly indicate the eDrawings add-in/format isn't available rather than
+# an ordinary save failure.
+_EDRAWINGS_ADDIN_ERROR_BITS = (
+    int(SwFileSaveError.swFileSaveFormatNotAvailable)
+    | int(SwFileSaveError.swFileSaveAsBadEDrawingsVersion)
+    | int(SwFileSaveError.swFileSaveAsNotSupported)
+)
+
+
+def _looks_like_missing_addin(message: str) -> bool:
+    """Best-effort heuristic for `export_edrawings`: does a raised COM
+    exception's message look like a missing/unavailable eDrawings add-in,
+    rather than some unrelated COM failure? No fetched page documents a
+    specific exception shape for this case (the dossier notes "no add-in
+    requirement is documented on any fetched page"), so this is a
+    string-matching convention, not a verified API contract -- callers
+    should treat a `False` result as "inconclusive", not "definitely not an
+    add-in problem".
+    """
+    lowered = message.lower()
+    return any(keyword in lowered for keyword in ("add-in", "addin", "edrawings"))
 
 # `IDrawingDoc::CreateDrawViewFromModelView3`'s `ViewName` argument accepts the
 # asterisk-prefixed standard-orientation names (docs/api/02-views.md's "Front"
@@ -1194,6 +1236,536 @@ class DrawingOperations:
 
         data["size_bytes"] = os.path.getsize(output_path)
         return self._result(True, f"Exported PDF: {output_path}", SwErrors.swSuccess, data)
+
+    def export_dxf_dwg(
+        self, output_path: str, format: str = "dxf", sheets: Any = "all",
+        version: Optional[str] = None, map_file: Optional[str] = None,
+        export_fonts_as: str = "geometry", multisheet: str = "single_file",
+    ) -> Dict:
+        """
+        Export the active drawing's sheet(s) to DXF/DWG.
+
+        **Not** `IPartDoc::ExportToDWG2` -- per docs/api/05-export-and-layers.md's
+        intro discrepancy list and this record's "Resolution (sw-jcq.2)" note,
+        that method lives on `IPartDoc` (not `IDrawingDoc`), requires a
+        pre-selected multi-body sheet-metal feature, and exports flat-pattern
+        geometry -- it is not a drawing-sheet export mechanism, so there is no
+        `ExportToDWG2` positional tuple to build here. Instead this uses the
+        same `IModelDocExtension::SaveAs3` entry point `save_drawing`/
+        `export_pdf` already use, with a `.dxf`/`.dwg` `output_path`, driven
+        entirely by `ISldWorks::SetUserPreferenceIntegerValue`/
+        `SetUserPreferenceToggle` -- non-native-format saves have no
+        `Options`-bitmask equivalent of PDF's `IExportPdfData` (dossier's
+        `swSaveAsOptions_e` Gotchas).
+
+        Every preference this call touches is snapshotted via the matching
+        `GetUserPreference*` getter first and restored in a `finally` --
+        success, a decoded `SaveAs3` failure, or a raised exception all take
+        the same restore path, so a batch run never leaves the operator's
+        SolidWorks install on different DXF/DWG settings than it found:
+
+        - `swDxfOutputFonts` (`export_fonts_as`) -- always set; there is no
+          "leave inherited" option, since an inherited font setting is
+          exactly the kind of silent output change this tool exists to rule
+          out.
+        - `swDxfMultiSheetOption` (`multisheet` / `sheets`, see below) --
+          always set.
+        - `swDxfVersion` (`version`) -- set only when `version` is given;
+          left untouched (and therefore not restored) when omitted.
+        - `swDxfMapping`, `swDXFDontShowMap`, `swDxfMappingFiles` (a
+          `SetUserPreferenceStringListValue` call, snapshotting and
+          restoring the *entire* prior list, not just appending),
+          `swDxfMappingFileIndex` -- set only when `map_file` is given, per
+          the dossier's `swDxfMappingFileIndex` Gotchas worked example
+          (`SetUserPreferenceStringListValue` then re-check/initialize the
+          index). `swDXFDontShowMap` is what keeps an unattended export from
+          hanging on the layer-mapping dialog once `swDxfMapping = True`.
+
+        Args:
+            output_path: Destination path. Its extension must match `format`
+                ("dxf"/"dwg") -- checked before any COM call, same
+                fail-fast-on-a-predictable-mistake convention `export_pdf`
+                uses for an unwritable path. Its parent directory is created
+                if missing. In per-sheet mode (see `sheets`/`multisheet`
+                below) this is a *base* path: each sheet's own file is named
+                `<output_path without extension>_<sheet name><extension>`
+                alongside it -- deterministic and collision-free across
+                sheets, unlike relying on whatever undocumented file-naming
+                SolidWorks' own `swDxfSeparateSheets` multi-file mode might
+                use internally (not stated on any fetched page).
+            format: `"dxf"` (default) or `"dwg"` -- both are driven by the
+                exact same `SaveAs3` + preference mechanism, differing only
+                in `output_path`'s extension (dossier: "the file extension
+                indicates the conversion to perform").
+            sheets: `"all"` (default), `"current"`, or an explicit list of
+                sheet names -- same three shapes `export_pdf` accepts, but
+                resolved differently, because DXF/DWG export has no
+                `IExportPdfData`/`SetSheets` equivalent (PDF-only per the
+                dossier):
+                - `"all"` + `multisheet="single_file"` (the default pair):
+                  one `SaveAs3` call at `output_path`, with
+                  `swDxfMultiSheetOption = swDxfMultiSheet` so SolidWorks
+                  combines every sheet into that one file.
+                - `"all"` + `multisheet="separate_files"`: loops every sheet
+                  (`IDrawingDoc::ActivateSheet` + a `SaveAs3` call per sheet,
+                  the same per-sheet loop shape as this dossier's own
+                  official "Save Drawing Sheets as DXF Example (VBA)", just
+                  with `SaveAs3` instead of the superseded `SaveAs4`), each
+                  written to its own per-sheet file (see `output_path`
+                  above), with `swDxfMultiSheetOption = swDxfActiveSheetOnly`
+                  set once before the loop (each call only wants its
+                  currently-activated sheet).
+                - `"current"`: a single `SaveAs3` call at `output_path` for
+                  whatever sheet `IDrawingDoc::GetCurrentSheet` reports,
+                  `swDxfMultiSheetOption = swDxfActiveSheetOnly`, `multisheet`
+                  ignored (there is only ever one sheet to place).
+                - An explicit list: always loops (same per-sheet mechanism as
+                  the `"all"`+`separate_files` case above), *regardless* of
+                  `multisheet` -- there is no documented "combine only these
+                  N named sheets into one file" mode, so honoring an explicit
+                  subset can only mean one file per requested sheet. Combining
+                  an explicit list would require silently ignoring the
+                  caller's `multisheet="single_file"` request or silently
+                  dropping sheets from a "combined" export; this tool does
+                  neither -- it always does exactly what a named-sheet list
+                  can actually mean. Validated against
+                  `IDrawingDoc::GetSheetNames` before any COM call, same as
+                  `export_pdf`.
+            version: DXF/DWG release, e.g. `"R2018"`, `"R12"` (matches
+                `SwDxfFormat`'s member suffixes, case-insensitive) -- sets
+                `swDxfVersion`. `None` (default) leaves the current session
+                setting untouched.
+            map_file: Path to a layer-mapping file. Checked with
+                `os.path.exists` *before* any COM call (including before any
+                preference is touched) -- a missing map file must fail fast,
+                not surface as a mid-export COM error. `None` (default): no
+                layer mapping is configured (the mapping-related preferences
+                above are left untouched).
+            export_fonts_as: `"geometry"` (default, `swDxfOutputFonts = 0` --
+                AutoCAD STANDARD font only) or `"truetype"`
+                (`swDxfOutputFonts = 1`) -- the only two documented values.
+            multisheet: `"single_file"` (default) or `"separate_files"` --
+                see `sheets` above for exactly how this combines with each
+                `sheets` shape.
+
+        Returns:
+            Result dict. On success, `data` has `format`, `sheets` (the sheet
+            names considered for export), `multisheet`, `export_mode`
+            (`"combined"`/`"current"`/`"per_sheet"`, whichever this call
+            actually resolved to), and `files` -- a list of
+            `{"path", "sheet", "size_bytes"}` entries, one per file actually
+            verified to exist on disk afterward (`"sheet"` is `None` for a
+            combined whole-drawing file). Fails if: the drawing can't be
+            read; `format`/`sheets`/`multisheet`/`export_fonts_as`/`version`
+            is invalid; `map_file` doesn't exist; `output_path`'s extension
+            doesn't match `format`; a requested sheet can't be found/
+            activated; any `SaveAs3` call reports a nonzero `Errors` bitmask
+            or a false return (same `decode_save_error` decoding `export_pdf`
+            uses); or any expected output file doesn't actually exist on disk
+            afterward (`export_pdf`'s "SaveAs3 said success but wrote
+            nothing" failure mode, checked per-file here).
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        fmt = str(format).lower()
+        if fmt not in ("dxf", "dwg"):
+            return self._result(
+                False, f"format must be 'dxf' or 'dwg', got {format!r}",
+                SwErrors.swInvalidInput)
+        ext = "." + fmt
+
+        if multisheet not in ("single_file", "separate_files"):
+            return self._result(
+                False,
+                f"multisheet must be 'single_file' or 'separate_files', got {multisheet!r}",
+                SwErrors.swInvalidInput)
+
+        fonts_value = _DXF_FONT_MODES.get(export_fonts_as)
+        if fonts_value is None:
+            return self._result(
+                False,
+                f"export_fonts_as must be one of {sorted(_DXF_FONT_MODES)!r}, "
+                f"got {export_fonts_as!r}",
+                SwErrors.swInvalidInput)
+
+        version_member = None
+        if version is not None:
+            version_member = _DXF_VERSION_BY_NAME.get(str(version).upper())
+            if version_member is None:
+                return self._result(
+                    False,
+                    f"version must be one of {sorted(_DXF_VERSION_BY_NAME)!r} "
+                    f"or omitted, got {version!r}",
+                    SwErrors.swInvalidInput)
+
+        if map_file is not None and not os.path.exists(map_file):
+            return self._result(
+                False, f"Map file not found: {map_file}", SwErrors.swFileNotFoundError)
+
+        output_path = os.path.abspath(output_path)
+        if os.path.splitext(output_path)[1].lower() != ext:
+            return self._result(
+                False,
+                f"output_path must end with {ext!r} for format={fmt!r}, "
+                f"got {output_path!r}",
+                SwErrors.swInvalidInput)
+
+        dir_path = os.path.dirname(output_path)
+        if dir_path and not os.path.exists(dir_path):
+            try:
+                os.makedirs(dir_path)
+            except OSError as e:
+                return self._result(
+                    False, f"Could not create output directory {dir_path!r}: {e}",
+                    SwErrors.swExportError)
+
+        try:
+            available_sheets = list(doc.GetSheetNames() or [])
+        except Exception as e:
+            logger.error(f"export_dxf_dwg GetSheetNames error: {e}")
+            return self._result(
+                False, f"Could not read sheet names: {e}", SwErrors.swUnknownError)
+
+        if isinstance(sheets, str) and sheets == "all":
+            if not available_sheets:
+                return self._result(
+                    False, "Drawing has no sheets to export", SwErrors.swFeatureError)
+            target_sheets = available_sheets
+            export_mode = "combined" if multisheet == "single_file" else "per_sheet"
+        elif isinstance(sheets, str) and sheets == "current":
+            try:
+                current_sheet = doc.GetCurrentSheet()
+            except Exception:
+                current_sheet = None
+            current_name = self._read_prop(current_sheet, "Name") if current_sheet else None
+            if not current_name:
+                return self._result(
+                    False, "Could not determine the active sheet's name",
+                    SwErrors.swFeatureError)
+            target_sheets = [current_name]
+            export_mode = "current"
+        elif isinstance(sheets, (list, tuple)):
+            requested = list(sheets)
+            unknown = [s for s in requested if s not in available_sheets]
+            if unknown:
+                return self._result(
+                    False,
+                    f"Unknown sheet(s) {unknown!r}; available sheets: "
+                    f"{available_sheets!r}",
+                    SwErrors.swInvalidInput,
+                    {"unknown_sheets": unknown, "available_sheets": available_sheets},
+                )
+            target_sheets = requested
+            export_mode = "per_sheet"
+        else:
+            return self._result(
+                False,
+                f"sheets must be 'all', 'current', or a list of sheet names, "
+                f"got {sheets!r}",
+                SwErrors.swInvalidInput,
+            )
+
+        restore_actions: List[Any] = []
+
+        def _track_toggle(pref_id: int, new_value: bool) -> None:
+            original = self._sw_app.GetUserPreferenceToggle(pref_id)
+            self._sw_app.SetUserPreferenceToggle(pref_id, bool(new_value))
+            restore_actions.append(
+                lambda: self._sw_app.SetUserPreferenceToggle(pref_id, bool(original)))
+
+        def _track_integer(pref_id: int, new_value: int) -> None:
+            original = self._sw_app.GetUserPreferenceIntegerValue(pref_id)
+            self._sw_app.SetUserPreferenceIntegerValue(pref_id, int(new_value))
+            # `original` is passed straight back, not re-wrapped with `int()`
+            # -- an unscripted preference read against the fake-COM harness
+            # hands back a wrapper object with no `__int__`, and a real COM
+            # read already hands back a genuine `int`.
+            restore_actions.append(
+                lambda: self._sw_app.SetUserPreferenceIntegerValue(pref_id, original))
+
+        def _track_string_list(pref_id: int, new_value: List[str]) -> None:
+            original = self._sw_app.GetUserPreferenceStringListValue(pref_id)
+            self._sw_app.SetUserPreferenceStringListValue(pref_id, list(new_value))
+            restore_actions.append(
+                lambda: self._sw_app.SetUserPreferenceStringListValue(pref_id, original))
+
+        written_files: List[Dict[str, Any]] = []
+        try:
+            _track_integer(int(SwUserPreferenceIntegerValue.swDxfOutputFonts), fonts_value)
+
+            multisheet_value = int(
+                SwDxfMultisheet.swDxfMultiSheet if export_mode == "combined"
+                else SwDxfMultisheet.swDxfActiveSheetOnly)
+            _track_integer(
+                int(SwUserPreferenceIntegerValue.swDxfMultiSheetOption), multisheet_value)
+
+            if version_member is not None:
+                _track_integer(int(SwUserPreferenceIntegerValue.swDxfVersion), int(version_member))
+
+            if map_file is not None:
+                _track_toggle(int(SwUserPreferenceToggle.swDxfMapping), True)
+                _track_toggle(int(SwUserPreferenceToggle.swDXFDontShowMap), True)
+                _track_string_list(
+                    int(SwUserPreferenceStringListValue.swDxfMappingFiles), [map_file])
+                _track_integer(int(SwUserPreferenceIntegerValue.swDxfMappingFileIndex), 0)
+
+            if export_mode in ("combined", "current"):
+                errors = com_backend.byref_int()
+                warnings = com_backend.byref_int()
+                export_data = com_backend.null_dispatch()
+                advanced_options = com_backend.null_dispatch()
+                saved = doc.Extension.SaveAs3(
+                    output_path, int(SwSaveAsVersion.swSaveAsCurrentVersion),
+                    int(SwSaveAsOptions.swSaveAsOptions_Silent),
+                    export_data, advanced_options, errors, warnings,
+                )
+                error_code = int(errors.value or 0)
+                warning_code = int(warnings.value or 0)
+                decoded = decode_save_error(error_code)
+                if not saved or error_code != 0:
+                    reason = decoded if error_code != 0 else "SaveAs3 returned false"
+                    return self._result(
+                        False, f"DXF/DWG export failed: {reason}", SwErrors.swFileSaveError,
+                        {
+                            "sheets": target_sheets, "errors": error_code,
+                            "warnings": warning_code, "decoded_errors": decoded,
+                        },
+                    )
+                written_files.append({
+                    "path": output_path,
+                    "sheet": None if export_mode == "combined" else target_sheets[0],
+                    # Stamped here, not in a later pass over `written_files`
+                    # -- a per-sheet failure below returns `written_files` for
+                    # already-succeeded sheets as-is, so every entry must be
+                    # complete (not missing `size_bytes`) the moment it's
+                    # appended, not only on the eventual success path.
+                    "size_bytes": (
+                        os.path.getsize(output_path) if os.path.exists(output_path) else None
+                    ),
+                })
+            else:  # per_sheet
+                for sheet_name in target_sheets:
+                    try:
+                        activated = doc.ActivateSheet(sheet_name)
+                    except Exception as e:
+                        logger.error(f"export_dxf_dwg activate sheet error: {e}")
+                        return self._result(
+                            False, f"Activate sheet error: {e}", SwErrors.swInvalidInput,
+                            {"sheet_name": sheet_name, "files": written_files})
+                    if not activated:
+                        return self._result(
+                            False, f"Sheet {sheet_name!r} not found", SwErrors.swInvalidInput,
+                            {"sheet_name": sheet_name, "files": written_files})
+
+                    base, _ = os.path.splitext(output_path)
+                    sheet_path = f"{base}_{sheet_name}{ext}"
+
+                    errors = com_backend.byref_int()
+                    warnings = com_backend.byref_int()
+                    export_data = com_backend.null_dispatch()
+                    advanced_options = com_backend.null_dispatch()
+                    saved = doc.Extension.SaveAs3(
+                        sheet_path, int(SwSaveAsVersion.swSaveAsCurrentVersion),
+                        int(SwSaveAsOptions.swSaveAsOptions_Silent),
+                        export_data, advanced_options, errors, warnings,
+                    )
+                    error_code = int(errors.value or 0)
+                    warning_code = int(warnings.value or 0)
+                    decoded = decode_save_error(error_code)
+                    if not saved or error_code != 0:
+                        reason = decoded if error_code != 0 else "SaveAs3 returned false"
+                        return self._result(
+                            False,
+                            f"DXF/DWG export failed for sheet {sheet_name!r}: {reason}",
+                            SwErrors.swFileSaveError,
+                            {
+                                "sheet": sheet_name, "path": sheet_path, "errors": error_code,
+                                "warnings": warning_code, "decoded_errors": decoded,
+                                "files": written_files,
+                            },
+                        )
+                    written_files.append({
+                        "path": sheet_path, "sheet": sheet_name,
+                        "size_bytes": (
+                            os.path.getsize(sheet_path) if os.path.exists(sheet_path) else None
+                        ),
+                    })
+        except Exception as e:
+            logger.error(f"export_dxf_dwg error: {e}")
+            return self._result(
+                False, f"DXF/DWG export error: {e}", SwErrors.swFileSaveError,
+                {"files": written_files})
+        finally:
+            for restore in reversed(restore_actions):
+                try:
+                    restore()
+                except Exception as e:
+                    logger.error(f"export_dxf_dwg restore preference error: {e}")
+
+        missing = [f["path"] for f in written_files if f["size_bytes"] is None]
+        if missing:
+            return self._result(
+                False,
+                f"SaveAs3 reported success but file(s) missing: {missing!r}",
+                SwErrors.swExportError,
+                {"files": written_files, "missing": missing},
+            )
+
+        return self._result(
+            True, f"Exported {len(written_files)} {fmt.upper()} file(s)", SwErrors.swSuccess,
+            {
+                "format": fmt, "sheets": target_sheets, "multisheet": multisheet,
+                "export_mode": export_mode, "files": written_files,
+            },
+        )
+
+    def export_edrawings(self, output_path: str, sheets: Any = "all") -> Dict:
+        """
+        Export the active drawing to eDrawings (`.edrw`) via
+        `IModelDocExtension::SaveAs3`, for review-only stakeholders who don't
+        have SolidWorks itself. Per `SaveAs3`'s own Remarks (dossier's
+        worked example), eDrawings export is driven purely by the `.edrw`
+        file extension plus `swEdrawingsSaveAsSelectionOption` -- there is no
+        eDrawings-specific `ExportData` object (that parameter is PDF-only).
+
+        Args:
+            output_path: Destination path; must end with `.edrw` (the
+                drawing-document eDrawings extension -- `.eprt`/`.easm` are
+                part/assembly-only and out of scope for a tool gated behind
+                `get_drawing_doc`). Its parent directory is created if
+                missing.
+            sheets: `"all"` (default) or `"current"` -- mapped to
+                `SwEdrawingSaveAsOption.swEdrawingSaveAll`/`swEdrawingSaveActive`.
+                Unlike `export_pdf`/`export_dxf_dwg`, an explicit sheet-name
+                list is **not** accepted: `swEdrawingSaveAsOption_e`'s third
+                member, `swEdrawingSaveSelected`, saves whatever is currently
+                selected via `ISelectionMgr`, not a named-sheet list -- there
+                is no documented "these specific sheets" mode for eDrawings
+                export to fall back to, so this tool fails fast on anything
+                else rather than silently reinterpreting it.
+
+        Returns:
+            Result dict. On success, `data` has `path`, `sheets`,
+            `size_bytes`, `errors`, `warnings`, `decoded_errors`, and
+            `addin_available: True`. On failure, `data["addin_available"]`
+            is `False` when the failure looks like a missing/unavailable
+            eDrawings add-in specifically -- either a decoded `SaveAs3`
+            error bitmask containing `swFileSaveFormatNotAvailable`,
+            `swFileSaveAsBadEDrawingsVersion`, or `swFileSaveAsNotSupported`
+            (the dossier's own troubleshooting note ties
+              `swFileSaveAsNotSupported` to automation-specific failure
+            modes), or a raised COM exception whose message mentions
+            "add-in"/"addin"/"edrawings" -- and `True` for any other kind of
+            failure (bad sheets value, unwritable path, etc.), so a caller
+            can distinguish "eDrawings itself isn't available" from an
+            ordinary export failure without parsing the message text.
+        """
+        doc, err = self.get_drawing_doc()
+        if err:
+            return err
+
+        if not (isinstance(sheets, str) and sheets in ("all", "current")):
+            return self._result(
+                False,
+                "sheets must be 'all' or 'current' for eDrawings export -- "
+                "swEdrawingSaveAsOption_e has no 'specified sheets' mode "
+                f"(got {sheets!r})",
+                SwErrors.swInvalidInput,
+            )
+        selection_value = int(
+            SwEdrawingSaveAsOption.swEdrawingSaveAll if sheets == "all"
+            else SwEdrawingSaveAsOption.swEdrawingSaveActive)
+
+        output_path = os.path.abspath(output_path)
+        ext = ".edrw"
+        if os.path.splitext(output_path)[1].lower() != ext:
+            return self._result(
+                False,
+                f"output_path must end with {ext!r} for a drawing eDrawings "
+                f"export, got {output_path!r}",
+                SwErrors.swInvalidInput)
+
+        dir_path = os.path.dirname(output_path)
+        if dir_path and not os.path.exists(dir_path):
+            try:
+                os.makedirs(dir_path)
+            except OSError as e:
+                return self._result(
+                    False, f"Could not create output directory {dir_path!r}: {e}",
+                    SwErrors.swExportError)
+
+        pref_id = int(SwUserPreferenceIntegerValue.swEdrawingsSaveAsSelectionOption)
+        try:
+            original_selection = self._sw_app.GetUserPreferenceIntegerValue(pref_id)
+        except Exception as e:
+            logger.error(f"export_edrawings read selection preference error: {e}")
+            return self._result(False, f"Read preference error: {e}", SwErrors.swUnknownError)
+        try:
+            self._sw_app.SetUserPreferenceIntegerValue(pref_id, selection_value)
+        except Exception as e:
+            logger.error(f"export_edrawings set selection preference error: {e}")
+            return self._result(False, f"Set preference error: {e}", SwErrors.swUnknownError)
+
+        errors = com_backend.byref_int()
+        warnings = com_backend.byref_int()
+        try:
+            export_data = com_backend.null_dispatch()
+            advanced_options = com_backend.null_dispatch()
+            saved = doc.Extension.SaveAs3(
+                output_path, int(SwSaveAsVersion.swSaveAsCurrentVersion),
+                int(SwSaveAsOptions.swSaveAsOptions_Silent),
+                export_data, advanced_options, errors, warnings,
+            )
+        except Exception as e:
+            logger.error(f"export_edrawings error: {e}")
+            addin_unavailable = _looks_like_missing_addin(str(e))
+            message = (
+                f"eDrawings export failed, possibly because the eDrawings "
+                f"add-in is not loaded: {e}"
+            ) if addin_unavailable else f"eDrawings export error: {e}"
+            return self._result(
+                False, message, SwErrors.swExportError,
+                {"addin_available": not addin_unavailable})
+        finally:
+            try:
+                self._sw_app.SetUserPreferenceIntegerValue(pref_id, original_selection)
+            except Exception as e:
+                logger.error(f"export_edrawings restore selection preference error: {e}")
+
+        error_code = int(errors.value or 0)
+        warning_code = int(warnings.value or 0)
+        decoded = decode_save_error(error_code)
+        data = {
+            "path": output_path, "sheets": sheets, "errors": error_code,
+            "warnings": warning_code, "decoded_errors": decoded,
+        }
+
+        if not saved or error_code != 0:
+            addin_related = bool(error_code & _EDRAWINGS_ADDIN_ERROR_BITS)
+            data["addin_available"] = not addin_related
+            if addin_related:
+                reason = (
+                    f"{decoded} -- this may mean the eDrawings add-in is "
+                    f"not loaded, or (if running SOLIDWORKS Connected) that "
+                    f"eDrawings export is unsupported in that mode"
+                )
+            else:
+                reason = decoded if error_code != 0 else "SaveAs3 returned false"
+            return self._result(
+                False, f"eDrawings export failed: {reason}", SwErrors.swFileSaveError, data)
+
+        if not os.path.exists(output_path):
+            return self._result(
+                False,
+                f"SaveAs3 reported success but no file was written to {output_path!r}",
+                SwErrors.swExportError, data,
+            )
+
+        data["size_bytes"] = os.path.getsize(output_path)
+        data["addin_available"] = True
+        return self._result(True, f"Exported eDrawings: {output_path}", SwErrors.swSuccess, data)
 
     def get_custom_properties(self, configuration: Optional[str] = None) -> Dict:
         """

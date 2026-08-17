@@ -395,6 +395,13 @@ class SwUserPreferenceToggle(IntEnum):
     swAutomaticScaling3ViewDrawings = 86
     swPDFExportHighQuality = 325
 
+    #: `export_dxf_dwg`'s layer-mapping toggles (sw-jcq.2). Enable custom
+    #: SOLIDWORKS-to-DXF/DWG layer mapping.
+    swDxfMapping = 8
+    #: Suppress the layer-mapping dialog popup on each save when
+    #: `swDxfMapping = True` -- critical for unattended batch export.
+    swDXFDontShowMap = 0x15
+
 
 class SwBreakLineOrientation(IntEnum):
     """Break line orientation (swBreakLineOrientation_e).
@@ -1039,6 +1046,61 @@ class SwDxfMultisheet(IntEnum):
     swDxfActiveSheetOnly = 0
     swDxfSeparateSheets = 1
     swDxfMultiSheet = 2
+
+
+class SwUserPreferenceIntegerValue(IntEnum):
+    """Curated subset of application-level integer-valued system options
+    (swUserPreferenceIntegerValue_e), consumed by
+    ISldWorks::GetUserPreferenceIntegerValue / SetUserPreferenceIntegerValue.
+
+    Same "own enumeration page publishes no numeric values" situation as
+    SwUserPreferenceToggle above (confirmed independently in
+    docs/api/05-export-and-layers.md). Members here were tracked down via the
+    same third-party SwConst_TLB.pas transcription already trusted for
+    SwUserPreferenceToggle -- see that class's docstring and
+    docs/api/05-export-and-layers.md's Enums section (swUserPreferenceIntegerValue_e
+    numeric-values note, sw-jcq.2) for the sourcing/corroboration caveats.
+
+    Source: docs/api/05-export-and-layers.md (Enums section,
+    swUserPreferenceIntegerValue_e table).
+    """
+
+    swDxfVersion = 0
+    swDxfOutputFonts = 1
+    swDxfMappingFileIndex = 2
+    swDxfOutputLineStyles = 0x87
+    swDxfOutputNoScale = 0x88
+    swEdrawingsSaveAsSelectionOption = 0xED
+    swDxfMultiSheetOption = 0xFD
+
+
+class SwUserPreferenceStringListValue(IntEnum):
+    """String-list-valued application system options
+    (swUserPreferenceStringListValue_e), consumed by
+    ISldWorks::GetUserPreferenceStringListValue / SetUserPreferenceStringListValue.
+
+    Source: docs/api/05-export-and-layers.md (Enums section,
+    swUserPreferenceStringListValue_e -- status: unverified, see that
+    record's Gotchas for the sourcing/parameter-shape caveats).
+    """
+
+    swDxfMappingFiles = 0
+
+
+class SwEdrawingSaveAsOption(IntEnum):
+    """Which sheets/content an eDrawings export includes
+    (swEdrawingSaveAsOption_e), consumed as the Value argument of
+    ISldWorks::SetUserPreferenceIntegerValue when UserPreferenceValue is
+    SwUserPreferenceIntegerValue.swEdrawingsSaveAsSelectionOption.
+
+    Source: docs/api/05-export-and-layers.md (Enums section,
+    swEdrawingSaveAsOption_e -- status: unverified, see that record's
+    Gotchas for the sourcing caveats).
+    """
+
+    swEdrawingSaveActive = 1
+    swEdrawingSaveAll = 2
+    swEdrawingSaveSelected = 3
 
 
 class SwLineWeights(IntEnum):

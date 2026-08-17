@@ -2,8 +2,8 @@
 Drawing Document & Session Tools
 ---------------------------------
 new_drawing_from_template, get_document_type, open_or_activate_document,
-rebuild_document, save_drawing, export_pdf, get_custom_properties,
-set_custom_properties.
+rebuild_document, save_drawing, export_pdf, export_dxf_dwg, export_edrawings,
+get_custom_properties, set_custom_properties.
 
 Backed by `DrawingOperations` (solidworks_mcp/automation/drawings.py), per
 docs/api/01-documents-and-sheets.md.
@@ -187,6 +187,112 @@ def export_pdf(arguments: dict) -> Dict:
         arguments.get("open_after", False),
         arguments.get("keep_invisible_layers", False),
         arguments.get("high_quality", True),
+    )
+
+
+@tool(
+    name="export_dxf_dwg",
+    description=(
+        "Export the active drawing's sheet(s) to DXF/DWG via "
+        "IModelDocExtension::SaveAs3 + swDxfOutputFonts/swDxfMultiSheetOption/"
+        "swDxfVersion user preferences -- not IDrawingDoc::ExportToDWG2, which "
+        "does not exist for drawings (see docs/api/05-export-and-layers.md). "
+        "Verifies every expected output file on disk afterward and reports "
+        "all paths and sizes."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "output_path": {
+                "type": "string",
+                "description": (
+                    "Destination .dxf/.dwg path; parent directory is created "
+                    "if missing. In per-sheet mode, each sheet's file is "
+                    "named '<output_path without extension>_<sheet><ext>'"
+                ),
+            },
+            "format": {
+                "type": "string", "default": "dxf", "enum": ["dxf", "dwg"],
+            },
+            "sheets": {
+                "default": "all",
+                "description": (
+                    "'all', 'current', or an explicit list of sheet names "
+                    "(validated against GetSheetNames before any COM call). "
+                    "An explicit list always exports one file per sheet, "
+                    "regardless of multisheet"
+                ),
+                "oneOf": [
+                    {"type": "string", "enum": ["all", "current"]},
+                    {"type": "array", "items": {"type": "string"}},
+                ],
+            },
+            "version": {
+                "type": "string",
+                "description": (
+                    "DXF/DWG release, e.g. 'R2018', 'R12'; omit to leave the "
+                    "current session setting untouched"
+                ),
+            },
+            "map_file": {
+                "type": "string",
+                "description": "Layer-mapping file; validated to exist before any COM call",
+            },
+            "export_fonts_as": {
+                "type": "string", "default": "geometry",
+                "enum": ["geometry", "truetype"],
+            },
+            "multisheet": {
+                "type": "string", "default": "single_file",
+                "enum": ["single_file", "separate_files"],
+                "description": (
+                    "For sheets='all': combine into one file, or export one "
+                    "file per sheet. Ignored for sheets='current'"
+                ),
+            },
+        },
+        "required": ["output_path"],
+    },
+)
+def export_dxf_dwg(arguments: dict) -> Dict:
+    return sw_automation.export_dxf_dwg(
+        arguments.get("output_path", ""),
+        arguments.get("format", "dxf"),
+        arguments.get("sheets", "all"),
+        arguments.get("version"),
+        arguments.get("map_file"),
+        arguments.get("export_fonts_as", "geometry"),
+        arguments.get("multisheet", "single_file"),
+    )
+
+
+@tool(
+    name="export_edrawings",
+    description=(
+        "Export the active drawing to eDrawings (.edrw) via "
+        "IModelDocExtension::SaveAs3 + swEdrawingsSaveAsSelectionOption, for "
+        "review-only stakeholders. Reports a clear message (data.addin_available) "
+        "when the eDrawings add-in appears unavailable rather than a generic COM error."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "output_path": {
+                "type": "string",
+                "description": "Destination .edrw path; parent directory is created if missing",
+            },
+            "sheets": {
+                "type": "string", "default": "all", "enum": ["all", "current"],
+                "description": "swEdrawingSaveAsOption_e has no 'specified sheets' mode",
+            },
+        },
+        "required": ["output_path"],
+    },
+)
+def export_edrawings(arguments: dict) -> Dict:
+    return sw_automation.export_edrawings(
+        arguments.get("output_path", ""),
+        arguments.get("sheets", "all"),
     )
 
 

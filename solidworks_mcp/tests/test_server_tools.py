@@ -48,6 +48,8 @@ EXPECTED_TOOL_NAMES = {
     "rebuild_document",
     "save_drawing",
     "export_pdf",
+    "export_dxf_dwg",
+    "export_edrawings",
     "get_custom_properties",
     "set_custom_properties",
     # Drawing View Creation & Discovery Tools
