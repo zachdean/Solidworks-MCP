@@ -72,9 +72,13 @@ def tool(name: str, description: str, schema: Dict[str, Any], *,
         min_release: the SOLIDWORKS release year (e.g. `2025`) this tool's
             COM calls require, if higher than the project-wide floor
             (`config.min_release`). `dispatch()` checks this -- via
-            `version_gate.require_version` -- before invoking `handler`, so
-            a handler never runs against a release too old for the overload
-            it calls. Omit for tools that need nothing beyond the project
+            `version_gate.require_version` -- before invoking `handler`,
+            for every call made while already connected. The gate cannot
+            fire on a call made *before* anything is connected: there is no
+            version to read yet, and most handlers connect lazily inside
+            themselves, so the first such call still reaches its COM work
+            on whatever release it finds. Every call after that one is
+            gated. Omit for tools that need nothing beyond the project
             floor, which is nearly all of them. Pass `0` (not `None`) to
             exempt a tool from the gate entirely -- see
             `version_gate.effective_min_release`; reserved for discovery
@@ -157,10 +161,15 @@ def dispatch(name: str, arguments: dict) -> Dict[str, Any]:
     Checks `version_gate.require_version` first -- if the connected
     SOLIDWORKS release is older than the tool's effective `min_release`, the
     handler never runs and the gate's error result (naming the tool, the
-    connected version, and the required version) is returned instead. A
-    handler that has never called `automation.connect()` is not gated (see
-    `version_gate.require_version`); the handler's own connection attempt
-    surfaces its own error in that case.
+    connected version, and the required version) is returned instead.
+
+    Note the one hole this leaves: while nothing is connected the gate has
+    no version to judge and passes (see `version_gate.require_version`), so
+    a handler that connects lazily does reach its COM work on the first
+    call. In a `create_drawing_pack` run against an unsupported release
+    that means step 1 executes and step 2 onward is refused -- the pack
+    fails partway rather than up front. Calling `connect_solidworks` (or
+    `get_capabilities`) before the real work closes the hole.
 
     Returns:
         The handler's standard result dict, or the gate's error result.

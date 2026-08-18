@@ -88,3 +88,34 @@ class TestDossierCrossReference:
         index = gen_tools_doc.build_dossier_index()
         assert "IDrawingDoc::NewSheet4" in index
         assert "ISldWorks::RevisionNumber" in index
+
+
+class TestOutputIsConfigIndependent:
+    """The committed `docs/TOOLS.md` must depend on committed code only.
+    `config.py` loads `solidworks_mcp/config.json` at import, and lowering
+    `min_release` there is the documented way to test against an older
+    install -- it must not rewrite every "Minimum release:" line and fail
+    `check.sh` for a reason unrelated to the developer's change."""
+
+    def test_lowering_the_configured_floor_does_not_change_the_doc(
+        self, gen_tools_doc, monkeypatch
+    ):
+        from solidworks_mcp import config as config_module
+
+        before = gen_tools_doc.generate()
+
+        monkeypatch.setattr(config_module.get_config(), "min_release", 2021)
+        assert config_module.get_config().min_release == 2021
+
+        assert gen_tools_doc.generate() == before
+
+    def test_declared_floor_still_reaches_the_doc(self, gen_tools_doc):
+        """Config-independent must not mean release-blind: the committed
+        default is still what gets rendered."""
+        from solidworks_mcp.config import SolidWorksConfig
+
+        default = SolidWorksConfig.__dataclass_fields__["min_release"].default
+        content = gen_tools_doc.generate()
+
+        assert f"- **Minimum release:** SOLIDWORKS {default}" in content
+        assert "- **Minimum release:** none -- exempt from the version gate" in content

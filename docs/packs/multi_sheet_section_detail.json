@@ -7,6 +7,7 @@
       "model_path": "C:\\Parts\\housing.sldprt",
       "paper_size": "A2",
       "scale": {"num": 1, "denom": 1},
+      "auto_arrange": false,
       "views": [
         {
           "kind": "model",
@@ -36,6 +37,7 @@
       "model_path": "C:\\Parts\\housing.sldprt",
       "paper_size": "A2",
       "scale": {"num": 2, "denom": 1},
+      "auto_arrange": false,
       "views": [
         {
           "kind": "model",

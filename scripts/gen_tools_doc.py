@@ -9,6 +9,7 @@ build instead of silently drifting from the code.
 from __future__ import annotations
 
 import argparse
+import functools
 import re
 import sys
 from pathlib import Path
@@ -66,6 +67,15 @@ def find_dossier_refs(description: str, index: Dict[str, Tuple[str, str]]) -> Li
     return list(seen.values())
 
 
+@functools.lru_cache(maxsize=1)
+def _default_min_release() -> int:
+    """The project-wide version floor as *committed* -- `SolidWorksConfig`'s
+    dataclass default, read without consulting the config.json a developer
+    may have edited locally. See `render_tool`."""
+    from solidworks_mcp.config import SolidWorksConfig
+    return SolidWorksConfig.__dataclass_fields__["min_release"].default
+
+
 def _load_registry():
     """Import the tool registry -- a real package import (not exec-by-path, unlike
     `check_api_docs.py`'s test double), since registering every tool requires the
@@ -76,11 +86,20 @@ def _load_registry():
 
 def render_tool(entry: Dict[str, Any], dossier_index: Dict[str, Tuple[str, str]]) -> str:
     lines = [f"## `{entry['name']}`", "", entry["description"].strip(), ""]
-    min_release = entry["effective_min_release"]
-    if min_release is None:
+    # Folded against `_default_min_release()` -- the committed dataclass
+    # default -- rather than `entry["effective_min_release"]`, which uses
+    # the *loaded* `get_config().min_release`. `config.py` reads
+    # `solidworks_mcp/config.json` at import, so a developer who lowers the
+    # floor locally (the documented way to test against an older install)
+    # would otherwise rewrite all 111 of these lines and fail
+    # `gen_tools_doc.py --check` for a reason unrelated to their change.
+    # A committed, checked-in doc has to depend on committed code only.
+    declared = entry["min_release"]
+    if declared == 0:
         lines.append("- **Minimum release:** none -- exempt from the version gate")
     else:
-        lines.append(f"- **Minimum release:** SOLIDWORKS {min_release}")
+        floor = _default_min_release() if declared is None else max(_default_min_release(), declared)
+        lines.append(f"- **Minimum release:** SOLIDWORKS {floor}")
 
     properties = entry["schema"].get("properties") or {}
     required = set(entry["schema"].get("required") or [])

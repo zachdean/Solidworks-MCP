@@ -159,14 +159,18 @@ def _order_views(views: List[ViewSpec]) -> List[ViewSpec]:
 # ---------------------------------------------------------------------------
 
 
-def _compile_view(view: ViewSpec, sheet_name: str) -> Step:
+def _compile_view(view: ViewSpec, sheet_name: str, sheet_model_path: str = "") -> Step:
     label = f"view:{view.name}" if view.name else f"view:{view.target}"
 
     if view.kind == "model":
         return Step(
             tool="insert_model_view",
             args={
-                "model_path": view.model_path,
+                # `SheetSpec.model_path` is the sheet-wide default: it is a
+                # required field, and setting it there (the obvious place)
+                # while omitting it on the view used to discard it silently
+                # and fail validation naming the *view* field instead.
+                "model_path": view.model_path or sheet_model_path,
                 "view_name": view.orientation,
                 "x": view.x,
                 "y": view.y,
@@ -479,14 +483,17 @@ def _compile_sheet(sheet: SheetSpec, index: int, drawing_template: str) -> List[
 
     # 3. insert views (parents before children)
     for view in _order_views(sheet.views):
-        steps.append(_compile_view(view, sheet.name))
+        steps.append(_compile_view(view, sheet.name, sheet.model_path))
 
-    # 4. auto-arrange
-    steps.append(Step(
-        tool="auto_arrange_views",
-        args={"sheet_name": Ref(sheet_key)},
-        category="other", label=f"auto_arrange:{sheet.name}",
-    ))
+    # 4. auto-arrange -- skipped when the sheet opts out, since this repacks
+    # every root view into a grid via `IView::Position` and would otherwise
+    # discard the `x`/`y` each ViewSpec declared (see `SheetSpec.auto_arrange`).
+    if sheet.auto_arrange:
+        steps.append(Step(
+            tool="auto_arrange_views",
+            args={"sheet_name": Ref(sheet_key)},
+            category="other", label=f"auto_arrange:{sheet.name}",
+        ))
 
     # 5. REBUILD -- dimension/BOM values are stale until this runs, and the
     # next phase (model items + annotations) reads them.

@@ -105,6 +105,17 @@ def _convert_value(tp, value):
     origin = get_origin(tp)
     if origin in (list, List):
         (item_t,) = get_args(tp)
+        # Guard the iteration: a `dict` or a `str` handed to a `List[...]`
+        # field is iterable, so an unguarded comprehension silently turns
+        # `{"x": 1, "y": 2}` into `[["x"], ["y"]]` and `"abc"` into
+        # `[["a"], ["b"], ["c"]]`. Both survive `validate()` (a non-empty
+        # list of the right length) and only surface as garbage at the COM
+        # boundary, so reject the wrong shape here where the field name is
+        # still in hand.
+        if not isinstance(value, (list, tuple)):
+            raise TypeError(
+                f"expected a list, got {type(value).__name__} ({value!r})"
+            )
         return [_convert_value(item_t, v) for v in value]
     if origin in (dict, Dict):
         return dict(value)
@@ -130,11 +141,31 @@ class _DataclassJSON:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]):
         hints = _hints(cls)
+        field_names = {f.name for f in dataclasses.fields(cls)}
+
+        # `generate_schema()` emits `additionalProperties: false` for every
+        # one of these dataclasses, but nothing re-validates the spec against
+        # that schema server-side -- so silently dropping extras here makes
+        # the tool *more* permissive than its own advertised schema. A typo
+        # is the common case and the silent outcome is the worst one:
+        # `{"num": 2, "den": 1}` yields a 1:1 scale, and a misspelled view
+        # field surfaces later as "missing required field" naming the
+        # spelling the caller thought they used.
+        unknown = sorted(set(data) - field_names)
+        if unknown:
+            raise TypeError(
+                f"{cls.__name__}: unknown field(s) {unknown!r}; "
+                f"expected any of {sorted(field_names)!r}"
+            )
+
         kwargs = {}
         for f in dataclasses.fields(cls):
             if f.name not in data:
                 continue
-            kwargs[f.name] = _convert_value(hints[f.name], data[f.name])
+            try:
+                kwargs[f.name] = _convert_value(hints[f.name], data[f.name])
+            except TypeError as exc:
+                raise TypeError(f"{cls.__name__}.{f.name}: {exc}") from exc
         return cls(**kwargs)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -281,7 +312,20 @@ class SheetSpec(_DataclassJSON):
     views: List[ViewSpec] = field(default_factory=list)
     annotations: List[AnnotationSpec] = field(default_factory=list)
     tables: List[TableSpec] = field(default_factory=list)
+    # NOTE: written via `set_custom_properties`, which targets
+    # `CustomPropertyManager("")` -- the *document*, not this sheet. In a
+    # multi-sheet pack the last sheet declaring a given key wins for the
+    # whole document; there is no per-sheet custom-property scope in the
+    # underlying API.
     properties: Dict[str, str] = field(default_factory=dict)
+    # `auto_arrange_views` repacks every root view into a grid via
+    # `IView::Position`, which overwrites the `x`/`y` each ViewSpec
+    # declares. It runs by default because most packs don't place views
+    # by hand, but a pack that does place them (and any pack whose
+    # annotations are positioned in sheet space relative to those views)
+    # must be able to turn it off -- otherwise the declared coordinates
+    # are accepted, validated, and then silently discarded.
+    auto_arrange: bool = True
 
 
 @dataclass
@@ -344,6 +388,13 @@ def _datum_letter(ref) -> Optional[str]:
 def _validate_sheet(sheet: SheetSpec, loc: str) -> List[str]:
     errors: List[str] = []
     defined_views: set = set()
+    # Grown while walking the annotation list, not collected up front: this
+    # ordering is load-bearing, not an oversight. `_compile_sheet` emits
+    # annotations in spec order, and `add_gtol` enumerates the drawing's
+    # existing datums and hard-fails on a letter that is not there yet
+    # ("create them first via add_datum_feature"). So a GTOL listed above
+    # the `datum_feature` defining its letter really would fail at
+    # execution, and catching it here is the whole point.
     defined_datums: set = set()
     has_bom = any(t.kind == "bom" for t in sheet.tables)
 
@@ -355,8 +406,15 @@ def _validate_sheet(sheet: SheetSpec, loc: str) -> List[str]:
             continue
 
         for field_name in _VIEW_REQUIRED_BY_KIND[view.kind]:
-            if _is_missing(getattr(view, field_name)):
-                errors.append(f"{vloc} (kind='{view.kind}'): missing required field '{field_name}'")
+            if not _is_missing(getattr(view, field_name)):
+                continue
+            # A model view inherits the sheet's own `model_path` when it
+            # doesn't name one (see `_compile_view`), so only complain when
+            # neither is set -- and say so, since the sheet-level field is
+            # where a caller would naturally have put it.
+            if field_name == "model_path" and not _is_missing(sheet.model_path):
+                continue
+            errors.append(f"{vloc} (kind='{view.kind}'): missing required field '{field_name}'")
 
         if view.kind == "broken_out" and view.depth is not None and view.depth_reference is not None:
             errors.append(f"{vloc}: broken_out view must give exactly one of 'depth'/'depth_reference', not both")

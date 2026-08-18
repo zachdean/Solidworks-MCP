@@ -189,7 +189,11 @@ def _execute_steps(steps, on_error: str) -> Dict:
         "action from the caller. A 'hole' table has no spec field for its "
         "required datum origin, so one is always inserted anchored at the "
         "view origin (0, 0); a real per-hole-table datum still requires "
-        "editing the table afterward."
+        "editing the table afterward. Note that the auto-arrange step "
+        "repositions every view and so overwrites the x/y each view "
+        "declares; set a sheet's auto_arrange to false to keep the "
+        "declared placement (and to keep sheet-space annotation "
+        "coordinates aligned with the views they point at)."
     ),
     schema={
         "type": "object",

@@ -320,3 +320,45 @@ class TestGetCapabilities:
         by_name = {entry["name"]: entry for entry in result["data"]["tools"]}
         assert by_name["connect_solidworks"]["usable"] is True
         assert result["data"]["connected_release"] == 2025
+
+    def test_unreadable_version_reports_connected_not_disconnected(self, tool_sw):
+        """Connected, but `RevisionNumber` doesn't parse. Reporting "not
+        connected" here sent the caller off to reconnect when the real fault
+        is an unreadable version -- and this tool exists precisely to say
+        why everything else is refused."""
+        app = tool_sw("part")
+        app.set_return("RevisionNumber", "not-a-version")
+
+        result = dispatch("get_capabilities", {})
+
+        assert result["success"] is True
+        assert result["data"]["connected"] is True
+        assert result["data"]["connected_release"] is None
+        assert result["data"]["version_error"]
+        assert "could not be read" in result["message"]
+        assert "Not connected" not in result["message"]
+
+    def test_unreadable_version_marks_gated_tools_unusable(self, tool_sw):
+        app = tool_sw("part")
+        app.set_return("RevisionNumber", "not-a-version")
+
+        result = dispatch("get_capabilities", {})
+
+        by_name = {entry["name"]: entry for entry in result["data"]["tools"]}
+        # The gate refuses these (it can't read a version to judge), but the
+        # exempt tool must still report itself usable.
+        assert by_name["connect_solidworks"]["usable"] is False
+        assert by_name["get_capabilities"]["usable"] is True
+
+    def test_nothing_connected_reports_tools_as_usable(self):
+        """`usable` must mirror what `dispatch` actually enforces. While
+        nothing is connected `require_version` passes every tool through, so
+        reporting the whole toolset unusable -- in a fresh session, the exact
+        moment the docstring says to call this -- was wrong."""
+        result = dispatch("get_capabilities", {})
+
+        assert result["data"]["connected"] is False
+        assert result["data"]["version_error"] is None
+        by_name = {entry["name"]: entry for entry in result["data"]["tools"]}
+        assert by_name["connect_solidworks"]["usable"] is True
+        assert by_name["get_capabilities"]["usable"] is True

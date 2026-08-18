@@ -104,6 +104,50 @@ class TestRoundTrip:
         assert loaded.to_dict() == pack.to_dict()
 
 
+class TestFromDictRejectsBadInput:
+    """`generate_schema()` advertises `additionalProperties: false` and typed
+    list fields, but nothing re-validates a spec against that schema server
+    side -- so `from_dict` is the only thing standing between a malformed
+    pack and a COM call. It used to accept both of these silently."""
+
+    def test_unknown_field_is_rejected_not_dropped(self):
+        with pytest.raises(TypeError, match="unknown field"):
+            ScaleSpec.from_dict({"num": 2, "den": 1})
+
+    def test_unknown_field_names_the_offender_and_the_alternatives(self):
+        with pytest.raises(TypeError, match=r"ScaleSpec.*'den'.*denom"):
+            ScaleSpec.from_dict({"num": 2, "den": 1})
+
+    def test_unknown_nested_field_is_rejected(self):
+        with pytest.raises(TypeError, match="unknown field"):
+            PackSpec.from_dict({
+                "drawing_template": "t.drwdot", "output": "o.slddrw",
+                "sheets": [{"name": "S1", "model_path": "p.sldprt", "viewz": []}],
+            })
+
+    def test_dict_for_a_list_field_is_rejected(self):
+        """`{"x": 1, "y": 2}` is iterable, so the unguarded comprehension
+        turned it into `[["x"], ["y"]]` -- a 2-element list that sails
+        through `validate()` and reaches CreateSectionViewAt5 as garbage."""
+        with pytest.raises(TypeError, match="cut_points.*expected a list"):
+            ViewSpec.from_dict({
+                "kind": "section", "name": "S", "parent": "V1",
+                "cut_points": {"x": 1, "y": 2},
+            })
+
+    def test_string_for_a_list_field_is_rejected(self):
+        with pytest.raises(TypeError, match="profile_points.*expected a list"):
+            ViewSpec.from_dict({
+                "kind": "crop", "target": "V1", "profile_points": "abc",
+            })
+
+    def test_tuple_is_still_accepted_for_a_list_field(self):
+        view = ViewSpec.from_dict({
+            "kind": "crop", "target": "V1", "profile_points": ([0, 0], [1, 1]),
+        })
+        assert view.profile_points == [[0, 0], [1, 1]]
+
+
 class TestSchema:
     def test_schema_json_is_valid_json(self):
         with open(SCHEMA_PATH, encoding="utf-8") as fh:
@@ -345,9 +389,19 @@ class TestValidateErrorClasses:
         assert pack.validate() == []
 
     def test_missing_required_field_on_view(self):
-        pack = _minimal_pack(views=[ViewSpec(kind="model", name="V1")])  # no model_path
+        # No model_path on the view *or* the sheet -- the sheet-level value
+        # is a legitimate fallback (see TestSheetModelPathFallback), so it
+        # has to be absent from both for this to be an error.
+        sheet = SheetSpec(name="Sheet1", views=[ViewSpec(kind="model", name="V1")])
+        pack = PackSpec(drawing_template="C:\\t.drwdot", output="C:\\o.slddrw", sheets=[sheet])
         errors = pack.validate()
         assert any("missing required field 'model_path'" in e for e in errors)
+
+    def test_missing_required_field_on_view_with_no_sheet_fallback(self):
+        """A required view field the sheet cannot supply is still caught."""
+        pack = _minimal_pack(views=[ViewSpec(kind="section", name="S1", parent="V1")])
+        errors = pack.validate()
+        assert any("missing required field 'cut_points'" in e for e in errors)
 
     def test_missing_required_field_on_pack(self):
         pack = PackSpec(drawing_template="", output="", sheets=[])
@@ -467,3 +521,64 @@ def test_validate_does_not_mutate_pack():
     before = copy.deepcopy(pack.to_dict())
     pack.validate()
     assert pack.to_dict() == before
+
+
+class TestSheetModelPathFallback:
+    """`SheetSpec.model_path` is a required field that nothing consumed: a
+    caller who set it there (the obvious place) and omitted it on the model
+    view got "missing required field 'model_path'" naming the *view*, while
+    the value they did supply was discarded."""
+
+    def test_model_view_may_omit_model_path_when_the_sheet_sets_it(self):
+        pack = _minimal_pack(views=[ViewSpec(kind="model", name="V1")])
+        assert pack.sheets[0].model_path  # supplied by _minimal_pack
+        assert pack.validate() == []
+
+    def test_view_model_path_still_wins_over_the_sheet(self):
+        from solidworks_mcp.pack import compile as pack_compile
+
+        pack = _minimal_pack(
+            views=[ViewSpec(kind="model", name="V1", model_path="C:\\other.sldprt")]
+        )
+        step = next(s for s in pack_compile(pack) if s.tool == "insert_model_view")
+        assert step.args["model_path"] == "C:\\other.sldprt"
+
+    def test_sheet_model_path_reaches_the_compiled_step(self):
+        from solidworks_mcp.pack import compile as pack_compile
+
+        pack = _minimal_pack(views=[ViewSpec(kind="model", name="V1")])
+        step = next(s for s in pack_compile(pack) if s.tool == "insert_model_view")
+        assert step.args["model_path"] == pack.sheets[0].model_path
+
+
+class TestAutoArrangeOptOut:
+    """`auto_arrange_views` repacks every root view via `IView::Position`,
+    overwriting each ViewSpec's declared x/y. It stays on by default, but a
+    pack that places views by hand must be able to turn it off."""
+
+    def _tools(self, pack):
+        from solidworks_mcp.pack import compile as pack_compile
+
+        return [s.tool for s in pack_compile(pack)]
+
+    def test_auto_arrange_runs_by_default(self):
+        pack = _minimal_pack(views=[_model_view()])
+        assert pack.sheets[0].auto_arrange is True
+        assert "auto_arrange_views" in self._tools(pack)
+
+    def test_auto_arrange_can_be_turned_off(self):
+        pack = _minimal_pack(views=[_model_view(x=10, y=20)])
+        pack.sheets[0].auto_arrange = False
+        assert "auto_arrange_views" not in self._tools(pack)
+
+    def test_opting_out_keeps_every_other_step(self):
+        pack = _minimal_pack(views=[_model_view(x=10, y=20)])
+        with_arrange = self._tools(pack)
+        pack.sheets[0].auto_arrange = False
+        without = self._tools(pack)
+        assert [t for t in with_arrange if t != "auto_arrange_views"] == without
+
+    def test_auto_arrange_round_trips_through_json(self):
+        pack = _minimal_pack(views=[_model_view()])
+        pack.sheets[0].auto_arrange = False
+        assert PackSpec.from_dict(pack.to_dict()).sheets[0].auto_arrange is False
