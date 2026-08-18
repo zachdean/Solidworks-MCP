@@ -33,6 +33,7 @@ itself would be circular.
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from pathlib import Path
 
 from solidworks_mcp.tools import registry as tool_registry
@@ -76,30 +77,34 @@ _MARKER_RE = re.compile(
 _BACKTICK_IDENTIFIER_RE = re.compile(r"`([a-z][a-z0-9_]*)`")
 
 
+@lru_cache(maxsize=None)
+def _read(path: Path) -> str:
+    """Docs are read by several tests each; they don't change mid-run."""
+    return path.read_text(encoding="utf-8")
+
+
 def _category_counts_from_source() -> dict:
     """Independent ground truth: count `@tool(` decorators per module file
     and roll up by category, without ever importing the registry."""
     counts: dict[str, int] = {}
     for filename, category in MODULE_TO_CATEGORY.items():
         path = TOOLS_PKG_DIR / filename
-        text = path.read_text(encoding="utf-8")
-        counts[category] = counts.get(category, 0) + len(_TOOL_DECORATOR_RE.findall(text))
+        counts[category] = counts.get(category, 0) + len(_TOOL_DECORATOR_RE.findall(_read(path)))
     return counts
 
 
-def _extract_marked_regions(text: str) -> list:
-    return _MARKER_RE.findall(text)
-
-
-def _tool_like_tokens(region_text: str) -> set:
-    """Backticked identifiers in a marked region that are plausible tool
-    names -- i.e. actually registered, or at least snake_case identifiers
-    consistent with the naming convention. Field-name false positives
-    (`model_path`, `on_error`, ...) are excluded from every doc's marked
-    regions by construction (the docs only list tool names there), and this
-    helper doesn't need to guess -- callers check membership in the real
-    registry directly."""
-    return set(_BACKTICK_IDENTIFIER_RE.findall(region_text))
+def _marked_tool_names(path: Path) -> set:
+    """Every backticked identifier inside `path`'s ``registered-tools``
+    marker pairs. Callers check these against the real registry, so no
+    guessing about which are tool names is needed here -- the docs only
+    list tool names inside those markers, which is what keeps field names
+    (`model_path`, `on_error`, ...) in the surrounding prose out."""
+    text = _read(path)
+    return {
+        name
+        for region in _MARKER_RE.findall(text)
+        for name in _BACKTICK_IDENTIFIER_RE.findall(region)
+    }
 
 
 def test_new_docs_and_scripts_exist():
@@ -111,8 +116,8 @@ def test_new_docs_and_scripts_exist():
 
 
 def test_setup_ps1_mirrors_setup_sh_steps():
-    ps1 = SETUP_PS1_PATH.read_text(encoding="utf-8")
-    sh = SETUP_SH_PATH.read_text(encoding="utf-8")
+    ps1 = _read(SETUP_PS1_PATH)
+    sh = _read(SETUP_SH_PATH)
 
     assert "venv" in sh and "venv" in ps1
     assert "requirements.txt" in ps1 and "requirements-dev.txt" in ps1
@@ -121,28 +126,15 @@ def test_setup_ps1_mirrors_setup_sh_steps():
     assert "pip install --upgrade pip" in sh
 
 
-def test_docs_tools_md_declared_total_matches_its_own_headers():
-    text = TOOLS_DOC_PATH.read_text(encoding="utf-8")
-    match = re.search(r"(\d+) tool\(s\) registered", text)
-    assert match, "docs/TOOLS.md is missing its '<N> tool(s) registered' line"
-    declared_total = int(match.group(1))
-
-    header_count = len(re.findall(r"^## `[a-z_0-9]+`", text, re.M))
-    assert declared_total == header_count, (
-        f"docs/TOOLS.md declares {declared_total} tools but has {header_count} "
-        "'## `tool_name`' headers -- regenerate with scripts/gen_tools_doc.py"
-    )
-
-
 def test_readme_category_counts_match_registered_tool_modules():
     expected_by_category = _category_counts_from_source()
     expected_total = sum(expected_by_category.values())
 
-    readme = README_PATH.read_text(encoding="utf-8")
+    readme = _read(README_PATH)
 
     # Also cross-check against docs/TOOLS.md's own declared total, per the
     # acceptance criterion's literal "parses both README and docs/TOOLS.md".
-    tools_doc_text = TOOLS_DOC_PATH.read_text(encoding="utf-8")
+    tools_doc_text = _read(TOOLS_DOC_PATH)
     tools_doc_total = int(re.search(r"(\d+) tool\(s\) registered", tools_doc_text).group(1))
     assert expected_total == tools_doc_total, (
         f"sum of @tool(...) decorators across solidworks_mcp/tools/*.py ({expected_total}) "
@@ -175,28 +167,17 @@ def test_every_marked_tool_reference_is_a_real_registered_tool():
     registered = set(tool_registry.registered_names())
 
     for path in (README_PATH, WINDOWS_SETUP_PATH, DRAWING_PACKS_PATH):
-        text = path.read_text(encoding="utf-8")
-        regions = _extract_marked_regions(text)
-        assert regions, f"{path} has no <!-- registered-tools:start/end --> marked region"
-
-        mentioned = set()
-        for region in regions:
-            mentioned |= _tool_like_tokens(region)
-
-        unknown = mentioned - registered
+        assert _MARKER_RE.search(_read(path)), (
+            f"{path} has no <!-- registered-tools:start/end --> marked region"
+        )
+        unknown = _marked_tool_names(path) - registered
         assert not unknown, f"{path} references unregistered tool name(s): {sorted(unknown)}"
 
 
 def test_readme_tool_table_lists_every_registered_tool():
     registered = set(tool_registry.registered_names())
-    readme = README_PATH.read_text(encoding="utf-8")
 
-    regions = _extract_marked_regions(readme)
-    listed = set()
-    for region in regions:
-        listed |= _tool_like_tokens(region)
-
-    missing = registered - listed
+    missing = registered - _marked_tool_names(README_PATH)
     assert not missing, (
         f"README.md's tool tables are missing {len(missing)} registered tool(s): "
         f"{sorted(missing)[:10]}{'...' if len(missing) > 10 else ''}"

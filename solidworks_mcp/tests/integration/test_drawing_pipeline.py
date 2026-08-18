@@ -5,10 +5,12 @@ Exercises the drawing-side tool surface end-to-end against the real
 geometry `scripts/make_test_geometry.py` produces (see conftest.py for how
 that's located, and how the whole module skips cleanly without it).
 
-Geometry recap -- must match scripts/make_test_geometry.py's constants of
-the same name: a bracket with an 80x50mm base (X x Z), 20mm tall, 4
-mounting holes inset 12mm from each edge, a 3mm fillet on the (+X, +Z)
-corner, and a 2mm 45-degree chamfer on the (-X, -Z) corner. The two
+Geometry recap -- every number below comes from
+`solidworks_mcp.testing.bracket_geometry`, the shared contract
+scripts/make_test_geometry.py builds from: a bracket with an 80x50mm base
+(X x Z), 20mm tall, 4 mounting holes inset 12mm from each edge, a 3mm
+fillet on the (+X, +Z) corner, and a 2mm 45-degree chamfer on the
+(-X, -Z) corner. The two
 remaining corners, (+X, -Z) and (-X, +Z), are untouched -- tests that need
 a stable vertex/edge target use those instead of a modified corner, so a
 SelectByID2 proximity pick doesn't land on a fillet arc or a chamfer edge
@@ -17,11 +19,11 @@ that wasn't there when the coordinate was chosen.
 Coordinate convention: every x/y this module passes to place or pick
 something is SHEET-space millimeters -- the same convention
 `insert_model_view`'s own x/y use ("sheet-space meters"). A point on the
-bracket's *Front view, placed at (_VIEW_X, _VIEW_Y) with the sheet's
+bracket's *Front view, placed at (PART_VIEW_X, PART_VIEW_Y) with the sheet's
 default 1:1 scale, appears on the sheet at
-`(_VIEW_X + local_x, _VIEW_Y + local_z)`: Front looks straight down at the
+`(PART_VIEW_X + local_x, PART_VIEW_Y + local_z)`: Front looks straight down at the
 sketch plane, so the view's on-sheet layout matches the part's local (X, Z)
-directly. `_sheet_point()` below is that mapping; `insert_section_view`/
+directly. `bracket_geometry.entity()` is that mapping; `insert_section_view`/
 `insert_detail_view`'s `cut_points`/`center_x`/`center_y` are the one
 exception -- their own docstrings say those are in the parent view's local
 coordinate space, not sheet space, so those two tests pass local
@@ -34,54 +36,36 @@ as "the approximation was off, adjust the coordinates" -- every assertion
 below includes the result message and, where useful, the full data payload,
 so that diagnosis doesn't require re-running interactively.
 """
-import copy
-import json
 import sys
 
 import pytest
 
+# The bracket's dimensions and this sheet-space mapping are the shared
+# contract scripts/make_test_geometry.py builds the fixture from, so a
+# dimension change can't leave these picks aiming at coordinates the
+# geometry no longer has.
+from solidworks_mcp.testing.bracket_geometry import (
+    BOTTOM_EDGE_MIDPOINT,
+    CORNER_BOTTOM_RIGHT,
+    CORNER_TOP_LEFT,
+    FACE_CENTER,
+    HALF_DEPTH_MM,
+    HALF_WIDTH_MM,
+    HOLE_INSET_MM,
+    PART_VIEW_X,
+    PART_VIEW_Y,
+    entity,
+)
+from solidworks_mcp.testing.pack_examples import load_example_pack
 from solidworks_mcp.tools.registry import dispatch
 from solidworks_mcp.utils import find_template
 
-from .conftest import BRACKET_ASSEMBLY, BRACKET_PART, GENERATED_DIR, REPO_ROOT
+from .conftest import BRACKET_ASSEMBLY, BRACKET_PART, GENERATED_DIR
 
 pytestmark = [
     pytest.mark.windows,
     pytest.mark.skipif(sys.platform != "win32", reason="requires Windows + SolidWorks"),
 ]
-
-# Must match scripts/make_test_geometry.py.
-_HALF_WIDTH_MM = 40.0  # BASE_WIDTH_MM / 2
-_HALF_DEPTH_MM = 25.0  # BASE_DEPTH_MM / 2
-_HOLE_INSET_MM = 12.0
-
-_VIEW_X, _VIEW_Y = 100.0, 100.0
-
-# Untouched corners (neither the filleted (+X,+Z) nor the chamfered (-X,-Z)
-# corner) -- stable vertex targets for entity-picking tests.
-_CORNER_BOTTOM_RIGHT = (_HALF_WIDTH_MM, -_HALF_DEPTH_MM)
-_CORNER_TOP_LEFT = (-_HALF_WIDTH_MM, _HALF_DEPTH_MM)
-_BOTTOM_EDGE_MIDPOINT = (0.0, -_HALF_DEPTH_MM)
-_FACE_CENTER = (0.0, 0.0)  # clear of all 4 holes (each inset 12mm from an edge)
-
-
-def _sheet_point(local_x, local_z):
-    return _VIEW_X + local_x, _VIEW_Y + local_z
-
-
-def _vertex(local_x, local_z):
-    x, y = _sheet_point(local_x, local_z)
-    return {"kind": "vertex", "x": x, "y": y}
-
-
-def _edge(local_x, local_z):
-    x, y = _sheet_point(local_x, local_z)
-    return {"kind": "edge", "x": x, "y": y}
-
-
-def _face(local_x, local_z):
-    x, y = _sheet_point(local_x, local_z)
-    return {"kind": "face", "x": x, "y": y}
 
 
 def _new_drawing():
@@ -93,14 +77,14 @@ def _new_drawing():
 @pytest.fixture
 def part_drawing_view():
     """A fresh drawing with the bracket part's *Front view already
-    inserted at (_VIEW_X, _VIEW_Y) -- shared setup for tests whose subject
+    inserted at (PART_VIEW_X, PART_VIEW_Y) -- shared setup for tests whose subject
     is something *on* a view, not view creation itself. Function-scoped
     (recreated per test) so `_close_documents_after_test` can close it
     without disturbing any other test."""
     _new_drawing()
     result = dispatch("insert_model_view", {
         "model_path": str(BRACKET_PART), "view_name": "*Front",
-        "x": _VIEW_X, "y": _VIEW_Y,
+        "x": PART_VIEW_X, "y": PART_VIEW_Y,
     })
     assert result["success"], result["message"]
     return result["data"]["view_name"]
@@ -113,7 +97,7 @@ def assembly_drawing_view():
     _new_drawing()
     result = dispatch("insert_model_view", {
         "model_path": str(BRACKET_ASSEMBLY), "view_name": "*Isometric",
-        "x": _VIEW_X, "y": _VIEW_Y,
+        "x": PART_VIEW_X, "y": PART_VIEW_Y,
     })
     assert result["success"], result["message"]
     return result["data"]["view_name"]
@@ -142,7 +126,7 @@ def test_insert_model_view():
     _new_drawing()
     result = dispatch("insert_model_view", {
         "model_path": str(BRACKET_PART), "view_name": "*Front",
-        "x": _VIEW_X, "y": _VIEW_Y,
+        "x": PART_VIEW_X, "y": PART_VIEW_Y,
     })
     assert result["success"], result["message"]
     assert result["data"]["view_name"]
@@ -154,15 +138,15 @@ def test_insert_section_view(part_drawing_view):
     # (holes sit at local x=+/-28mm).
     result = dispatch("insert_section_view", {
         "parent_view_name": part_drawing_view,
-        "cut_points": [{"x": 0, "y": -_HALF_DEPTH_MM}, {"x": 0, "y": _HALF_DEPTH_MM}],
+        "cut_points": [{"x": 0, "y": -HALF_DEPTH_MM}, {"x": 0, "y": HALF_DEPTH_MM}],
         "x": 250, "y": 100,
     })
     assert result["success"], (result["message"], result.get("data"))
 
 
 def test_insert_detail_view(part_drawing_view):
-    hole_x = _HALF_WIDTH_MM - _HOLE_INSET_MM
-    hole_z = _HALF_DEPTH_MM - _HOLE_INSET_MM
+    hole_x = HALF_WIDTH_MM - HOLE_INSET_MM
+    hole_z = HALF_DEPTH_MM - HOLE_INSET_MM
     result = dispatch("insert_detail_view", {
         "parent_view_name": part_drawing_view,
         "center_x": hole_x, "center_y": hole_z, "radius": 15,
@@ -185,7 +169,7 @@ def test_insert_model_items(part_drawing_view):
 def test_add_dimension(part_drawing_view):
     result = dispatch("add_dimension", {
         "view_name": part_drawing_view,
-        "entities": [_vertex(*_CORNER_BOTTOM_RIGHT), _vertex(*_CORNER_TOP_LEFT)],
+        "entities": [entity("vertex", *CORNER_BOTTOM_RIGHT), entity("vertex", *CORNER_TOP_LEFT)],
         "x": 200, "y": 60,
         "dimension_type": "smart",
     })
@@ -213,7 +197,7 @@ def test_add_property_note(part_drawing_view):
 def test_add_datum_feature(part_drawing_view):
     result = dispatch("add_datum_feature", {
         "view_name": part_drawing_view,
-        "entity": _edge(*_BOTTOM_EDGE_MIDPOINT),
+        "entity": entity("edge", *BOTTOM_EDGE_MIDPOINT),
         "label": "A", "x": 0, "y": 90,
     })
     assert result["success"], (result["message"], result.get("data"))
@@ -226,7 +210,7 @@ def test_add_gtol(part_drawing_view):
     # already exist on the drawing.
     result = dispatch("add_gtol", {
         "view_name": part_drawing_view,
-        "entity": _face(*_FACE_CENTER),
+        "entity": entity("face", *FACE_CENTER),
         "symbol": "flatness", "tolerance": 0.05,
         "x": 150, "y": 60,
     })
@@ -256,7 +240,7 @@ def test_insert_bom_table_with_balloons(assembly_drawing_view):
 def test_insert_hole_table(part_drawing_view):
     result = dispatch("insert_hole_table", {
         "view_name": part_drawing_view,
-        "datum_entity": _vertex(*_CORNER_TOP_LEFT),
+        "datum_entity": entity("vertex", *CORNER_TOP_LEFT),
         "x": 250, "y": 60,
     })
     assert result["success"], (result["message"], result.get("data"))
@@ -297,29 +281,27 @@ def test_create_drawing_pack_from_example(created_files):
     at the generated assembly instead of the example's own placeholder
     Windows paths.
 
-    The example's balloon annotations target hand-picked coordinates
+    The retargeting itself is `load_example_pack` (shared with
+    scripts/validate_on_windows.py, which runs the same pack): the
+    example's balloon annotations target hand-picked coordinates
     calibrated for its own (unrelated) gearbox model, meaningless against
-    this fixture's geometry -- this test drops them and keeps the BOM
-    table (whose x/y are sheet placement, not an entity pick) to still
-    exercise the pack's table machinery without guessing coordinates that
-    would never land on real geometry. docs/packs/assembly_with_bom.json
+    this fixture's geometry, so they are dropped while the BOM table
+    (whose x/y are sheet placement, not an entity pick) stays and still
+    exercises the pack's table machinery. docs/packs/assembly_with_bom.json
     itself is read-only here, never edited.
     """
-    example_path = REPO_ROOT / "docs" / "packs" / "assembly_with_bom.json"
-    spec = copy.deepcopy(json.loads(example_path.read_text(encoding="utf-8")))
-
     drawing_template = find_template("drawing")
     assert drawing_template, "no drawing template found on this SolidWorks install"
 
     output_path = GENERATED_DIR / "_test_pack_output.slddrw"
     created_files.append(output_path)
 
-    spec["drawing_template"] = drawing_template
-    spec["output"] = str(output_path)
-    sheet = spec["sheets"][0]
-    sheet["model_path"] = str(BRACKET_ASSEMBLY)
-    sheet["views"][0]["model_path"] = str(BRACKET_ASSEMBLY)
-    sheet["annotations"] = []
+    spec = load_example_pack(
+        "assembly_with_bom",
+        model_path=BRACKET_ASSEMBLY,
+        output_path=output_path,
+        drawing_template=drawing_template,
+    )
 
     result = dispatch("create_drawing_pack", {"spec": spec})
     assert result["success"], (result["message"], result["data"]["summary"])

@@ -18,8 +18,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "validate_on_windows.py"
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def validate_module():
+    """Module-scoped: exec'ing the runner rebuilds its whole TOOL_SPECS
+    table, and the two tests that mutate module state both restore it (one
+    in a `finally`, one via `monkeypatch`)."""
     spec = importlib.util.spec_from_file_location("validate_on_windows", SCRIPT_PATH)
     module = importlib.util.module_from_spec(spec)
     # dataclasses' deferred (`from __future__ import annotations`) type

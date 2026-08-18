@@ -66,13 +66,38 @@ import subprocess
 import sys
 import time
 import traceback
+from collections import Counter
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT))
+# Guarded: `solidworks_mcp/tests/test_validation_runner.py` execs this module
+# by path, and an unguarded insert would leave a duplicate repo root on
+# `sys.path` for the rest of the pytest session.
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+# The bracket fixture's geometry contract -- the dimensions
+# scripts/make_test_geometry.py builds from and the sheet-space mapping
+# solidworks_mcp/tests/integration/ picks against. Constants and pure
+# functions only, no COM.
+from solidworks_mcp.testing.bracket_geometry import (  # noqa: E402
+    ASSEMBLY_VIEW_X,
+    ASSEMBLY_VIEW_Y,
+    BOTTOM_EDGE_MIDPOINT,
+    CORNER_BOTTOM_RIGHT,
+    CORNER_TOP_LEFT,
+    FACE_CENTER,
+    HALF_DEPTH_MM,
+    HALF_WIDTH_MM,
+    HOLE_INSET_MM,
+    PART_VIEW_X,
+    PART_VIEW_Y,
+    entity,
+)
+from solidworks_mcp.testing.pack_examples import load_example_pack  # noqa: E402
 
 # Safe to import unconditionally on any platform: `solidworks_mcp.tools`
 # registers every tool as an import-time side effect (schema + handler
@@ -89,44 +114,6 @@ DEFAULT_GEOMETRY_DIR = REPO_ROOT / "tests" / "fixtures" / "generated"
 DEFAULT_OUTPUT_DIR = DEFAULT_GEOMETRY_DIR
 BRACKET_PART_NAME = "bracket.sldprt"
 BRACKET_ASSEMBLY_NAME = "bracket_assembly.sldasm"
-
-# ============================================================================
-# Geometry conventions -- must match scripts/make_test_geometry.py's
-# BASE_WIDTH_MM/BASE_DEPTH_MM/HOLE_INSET_MM (see that script's module
-# docstring), and solidworks_mcp/tests/integration/test_drawing_pipeline.py's
-# sheet-space mapping for the bracket part's *Front view.
-# ============================================================================
-_HALF_WIDTH_MM = 40.0
-_HALF_DEPTH_MM = 25.0
-_HOLE_INSET_MM = 12.0
-
-_PART_VIEW_X, _PART_VIEW_Y = 100.0, 100.0
-_ASM_VIEW_X, _ASM_VIEW_Y = 300.0, 100.0
-
-_CORNER_BOTTOM_RIGHT = (_HALF_WIDTH_MM, -_HALF_DEPTH_MM)
-_CORNER_TOP_LEFT = (-_HALF_WIDTH_MM, _HALF_DEPTH_MM)
-_BOTTOM_EDGE_MIDPOINT = (0.0, -_HALF_DEPTH_MM)
-_FACE_CENTER = (0.0, 0.0)
-
-
-def _sheet_point(local_x: float, local_z: float) -> tuple:
-    return _PART_VIEW_X + local_x, _PART_VIEW_Y + local_z
-
-
-def _vertex(local_x: float, local_z: float) -> Dict[str, Any]:
-    x, y = _sheet_point(local_x, local_z)
-    return {"kind": "vertex", "x": x, "y": y}
-
-
-def _edge(local_x: float, local_z: float) -> Dict[str, Any]:
-    x, y = _sheet_point(local_x, local_z)
-    return {"kind": "edge", "x": x, "y": y}
-
-
-def _face(local_x: float, local_z: float) -> Dict[str, Any]:
-    x, y = _sheet_point(local_x, local_z)
-    return {"kind": "face", "x": x, "y": y}
-
 
 # Throwaway-part block conventions used by the sketches/features section
 # (see `_pre_create_sketch` and friends) -- deliberately the *tools' own*
@@ -154,16 +141,7 @@ class ToolRecord:
     reason: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "name": self.name,
-            "status": self.status,
-            "arguments": self.arguments,
-            "message": self.message,
-            "elapsed_seconds": round(self.elapsed_seconds, 4),
-            "error": self.error,
-            "com_hresult": self.com_hresult,
-            "reason": self.reason,
-        }
+        return {**asdict(self), "elapsed_seconds": round(self.elapsed_seconds, 4)}
 
 
 def _extract_hresult(exc: BaseException) -> Optional[int]:
@@ -222,6 +200,24 @@ EXCLUSIONS: Dict[str, str] = {
 # invocation elsewhere in the sweep.
 # ============================================================================
 
+# Names that only mean something inside one drawing document -- cleared
+# together whenever a fresh drawing is built (see
+# `ScriptContext._reset_drawing_scoped_state`).
+_DRAWING_SCOPED_ATTRS = (
+    "view_name",
+    "extra_view_name",
+    "assembly_view_name",
+    "bom_table_name",
+    "hole_table_name",
+    "revision_table_name",
+    "layer_name",
+    "note_name",
+    "dimension_name",
+    "datum_label",
+    "extra_sheet_name",
+)
+
+
 class ScriptContext:
     def __init__(self, dispatch_fn: Callable[[str, dict], Dict[str, Any]],
                  part_path: Path, assembly_path: Path, output_dir: Path):
@@ -232,21 +228,20 @@ class ScriptContext:
 
         self.drawing_path: Optional[str] = None
         self.sheet_name: Optional[str] = None
-        self.view_name: Optional[str] = None
-        self.extra_view_name: Optional[str] = None
-        self.assembly_view_name: Optional[str] = None
-        self.bom_table_name: Optional[str] = None
-        self.hole_table_name: Optional[str] = None
-        self.revision_table_name: Optional[str] = None
-        self.layer_name: Optional[str] = None
-        self.note_name: Optional[str] = None
-        self.dimension_name: Optional[str] = None
-        self.datum_label: Optional[str] = None
-        self.extra_sheet_name: Optional[str] = None
+        self._reset_drawing_scoped_state()
         self.part_doc_active = False
         self.block_extruded = False
         self.automation = sw_automation
         self.warnings: List[str] = []
+
+    def _reset_drawing_scoped_state(self) -> None:
+        """Clear every name that only means something inside one drawing
+        document. Called at startup and again whenever `ensure_drawing`
+        has to build a fresh drawing, so there is one list of these
+        attributes rather than an initialiser and a reset block that have
+        to be kept in step."""
+        for attr in _DRAWING_SCOPED_ATTRS:
+            setattr(self, attr, None)
 
     def _try(self, name: str, args: dict) -> Dict[str, Any]:
         try:
@@ -283,19 +278,8 @@ class ScriptContext:
         result = self._try("new_drawing_from_template", {})
         if not result.get("success"):
             return
-        data = result.get("data") or {}
-        self.sheet_name = data.get("sheet_name")
-        self.view_name = None
-        self.extra_view_name = None
-        self.assembly_view_name = None
-        self.bom_table_name = None
-        self.hole_table_name = None
-        self.revision_table_name = None
-        self.layer_name = None
-        self.note_name = None
-        self.dimension_name = None
-        self.datum_label = None
-        self.extra_sheet_name = None
+        self._reset_drawing_scoped_state()
+        self.sheet_name = (result.get("data") or {}).get("sheet_name")
 
         save_path = str(self.output_dir / "_validation_drawing.slddrw")
         save_result = self._try("save_drawing", {"filepath": save_path})
@@ -309,7 +293,7 @@ class ScriptContext:
         self.view_name = None
         result = self._try("insert_model_view", {
             "model_path": str(self.part_path), "view_name": "*Front",
-            "x": _PART_VIEW_X, "y": _PART_VIEW_Y, "sheet_name": self.sheet_name,
+            "x": PART_VIEW_X, "y": PART_VIEW_Y, "sheet_name": self.sheet_name,
         })
         if result.get("success"):
             self.view_name = (result.get("data") or {}).get("view_name")
@@ -322,7 +306,7 @@ class ScriptContext:
         self.assembly_view_name = None
         result = self._try("insert_model_view", {
             "model_path": str(self.assembly_path), "view_name": "*Isometric",
-            "x": _ASM_VIEW_X, "y": _ASM_VIEW_Y, "sheet_name": self.sheet_name,
+            "x": ASSEMBLY_VIEW_X, "y": ASSEMBLY_VIEW_Y, "sheet_name": self.sheet_name,
         })
         if result.get("success"):
             self.assembly_view_name = (result.get("data") or {}).get("view_name")
@@ -350,7 +334,7 @@ class ScriptContext:
             return
         self.hole_table_name = None
         result = self._try("insert_hole_table", {
-            "view_name": self.view_name, "datum_entity": _vertex(*_CORNER_TOP_LEFT),
+            "view_name": self.view_name, "datum_entity": entity("vertex", *CORNER_TOP_LEFT),
             "x": 250, "y": 60,
         })
         if result.get("success"):
@@ -389,7 +373,7 @@ class ScriptContext:
             return
         result = self._try("add_dimension", {
             "view_name": self.view_name,
-            "entities": [_vertex(*_CORNER_BOTTOM_RIGHT), _vertex(*_CORNER_TOP_LEFT)],
+            "entities": [entity("vertex", *CORNER_BOTTOM_RIGHT), entity("vertex", *CORNER_TOP_LEFT)],
             "x": 200, "y": 60, "dimension_type": "smart",
         })
         if result.get("success"):
@@ -400,7 +384,7 @@ class ScriptContext:
         if self.datum_label:
             return
         result = self._try("add_datum_feature", {
-            "view_name": self.view_name, "entity": _edge(*_BOTTOM_EDGE_MIDPOINT),
+            "view_name": self.view_name, "entity": entity("edge", *BOTTOM_EDGE_MIDPOINT),
             "label": "A", "x": 0, "y": 90,
         })
         if result.get("success"):
@@ -475,22 +459,9 @@ def _post_capture(field_name: str, data_key: str = "name"):
     return _post
 
 
-def _pre_add_sheet(ctx: ScriptContext) -> None:
-    ctx.ensure_drawing()
-
-
 def _post_add_sheet(ctx: ScriptContext, result: Dict[str, Any]) -> None:
     if result.get("success"):
         ctx.extra_sheet_name = "ValidationSheet2"
-
-
-def _pre_insert_model_view_extra(ctx: ScriptContext) -> None:
-    ctx.ensure_part_view()
-
-
-def _post_insert_model_view_extra(ctx: ScriptContext, result: Dict[str, Any]) -> None:
-    if result.get("success"):
-        ctx.extra_view_name = (result.get("data") or {}).get("view_name")
 
 
 def _pre_cut_extrude(ctx: ScriptContext) -> None:
@@ -520,10 +491,6 @@ def _pre_chamfer_edges(ctx: ScriptContext) -> None:
     ctx.select_block_edge(-_BLOCK_HALF_WIDTH_MM, -_BLOCK_HALF_DEPTH_MM)
 
 
-def _pre_delete_table(ctx: ScriptContext) -> None:
-    ctx.ensure_hole_table()
-
-
 def _build_delete_table(ctx: ScriptContext) -> Dict[str, Any]:
     return {"table_name": ctx.hole_table_name or ctx.bom_table_name or ""}
 
@@ -534,33 +501,41 @@ def _pre_set_table_position(ctx: ScriptContext) -> None:
         ctx._try("set_table_anchor", {"table_name": ctx.bom_table_name, "anchored": False})
 
 
+def _build_create_drawing_pack(ctx: ScriptContext) -> Dict[str, Any]:
+    """The same retargeting `solidworks_mcp/tests/integration/
+    test_drawing_pipeline.py` does -- a real docs/packs/ example pointed at
+    the generated assembly, with its calibrated (gearbox-specific) balloon
+    coordinates dropped."""
+    from solidworks_mcp.utils import find_template
+    return {"spec": load_example_pack(
+        "assembly_with_bom",
+        model_path=ctx.assembly_path,
+        output_path=ctx.output_dir / "_validation_pack_output.slddrw",
+        drawing_template=find_template("drawing"),
+    )}
+
+
 TOOL_SPECS: Dict[str, ToolSpec] = {
     # -- capabilities / connection ---------------------------------------
-    "get_capabilities": ToolSpec(build=lambda ctx: {}),
-    "connect_solidworks": ToolSpec(build=lambda ctx: {}),
-    "get_solidworks_info": ToolSpec(build=lambda ctx: {}),
+    "get_capabilities": ToolSpec(),
+    "connect_solidworks": ToolSpec(),
+    "get_solidworks_info": ToolSpec(),
 
     # -- documents ---------------------------------------------------------
-    "create_new_part": ToolSpec(build=lambda ctx: {}),
-    "create_new_assembly": ToolSpec(build=lambda ctx: {}),
+    "create_new_part": ToolSpec(),
+    "create_new_assembly": ToolSpec(),
     "open_document": ToolSpec(build=lambda ctx: {"filepath": str(ctx.part_path)}),
     "save_document": ToolSpec(
         build=lambda ctx: {"filepath": str(ctx.output_dir / "_validation_save_document.sldprt")}),
     "close_document": ToolSpec(build=lambda ctx: {"save": False}),
-    "get_document_info": ToolSpec(build=lambda ctx: {}),
-    "list_open_documents": ToolSpec(build=lambda ctx: {}),
+    "get_document_info": ToolSpec(),
+    "list_open_documents": ToolSpec(),
 
     # -- drawing documents ---------------------------------------------------
-    "new_drawing_from_template": ToolSpec(
-        build=lambda ctx: {},
-        post=lambda ctx, result: (
-            ctx.__setattr__("sheet_name", (result.get("data") or {}).get("sheet_name"))
-            if result.get("success") else None
-        ),
-    ),
-    "get_document_type": ToolSpec(build=lambda ctx: {}),
+    "new_drawing_from_template": ToolSpec(post=_post_capture("sheet_name", "sheet_name")),
+    "get_document_type": ToolSpec(),
     "open_or_activate_document": ToolSpec(build=lambda ctx: {"filepath": str(ctx.assembly_path)}),
-    "rebuild_document": ToolSpec(pre=lambda ctx: ctx.ensure_drawing(), build=lambda ctx: {}),
+    "rebuild_document": ToolSpec(pre=lambda ctx: ctx.ensure_drawing()),
     "save_drawing": ToolSpec(
         pre=lambda ctx: ctx.ensure_drawing(),
         build=lambda ctx: {"filepath": str(ctx.output_dir / "_validation_save_drawing.slddrw")},
@@ -579,7 +554,7 @@ TOOL_SPECS: Dict[str, ToolSpec] = {
         pre=lambda ctx: ctx.ensure_drawing(),
         build=lambda ctx: {"output_path": str(ctx.output_dir / "_validation_export.edrw")},
     ),
-    "get_custom_properties": ToolSpec(pre=lambda ctx: ctx.ensure_drawing(), build=lambda ctx: {}),
+    "get_custom_properties": ToolSpec(pre=lambda ctx: ctx.ensure_drawing()),
     "set_custom_properties": ToolSpec(
         pre=lambda ctx: ctx.ensure_drawing(),
         build=lambda ctx: {"properties": {"ValidationRunProperty": "scripts/validate_on_windows.py"}},
@@ -594,13 +569,13 @@ TOOL_SPECS: Dict[str, ToolSpec] = {
 
     # -- sheets --------------------------------------------------------------
     "add_sheet": ToolSpec(
-        pre=_pre_add_sheet, build=lambda ctx: {"name": "ValidationSheet2"}, post=_post_add_sheet),
+        pre=lambda ctx: ctx.ensure_drawing(), build=lambda ctx: {"name": "ValidationSheet2"}, post=_post_add_sheet),
     "activate_sheet": ToolSpec(
         pre=lambda ctx: ctx.ensure_drawing(),
         build=lambda ctx: {"name": ctx.extra_sheet_name or ctx.sheet_name or "Sheet1"},
     ),
-    "list_sheets": ToolSpec(pre=lambda ctx: ctx.ensure_drawing(), build=lambda ctx: {}),
-    "get_active_sheet": ToolSpec(pre=lambda ctx: ctx.ensure_drawing(), build=lambda ctx: {}),
+    "list_sheets": ToolSpec(pre=lambda ctx: ctx.ensure_drawing()),
+    "get_active_sheet": ToolSpec(pre=lambda ctx: ctx.ensure_drawing()),
     "set_sheet_properties": ToolSpec(
         pre=lambda ctx: ctx.ensure_drawing(),
         build=lambda ctx: {"sheet_name": ctx.sheet_name, "scale_num": 1, "scale_denom": 2},
@@ -627,12 +602,12 @@ TOOL_SPECS: Dict[str, ToolSpec] = {
 
     # -- view creation --------------------------------------------------------
     "insert_model_view": ToolSpec(
-        pre=_pre_insert_model_view_extra,
+        pre=lambda ctx: ctx.ensure_part_view(),
         build=lambda ctx: {
             "model_path": str(ctx.part_path), "view_name": "*Right",
-            "x": _PART_VIEW_X + 200, "y": _PART_VIEW_Y, "sheet_name": ctx.sheet_name,
+            "x": PART_VIEW_X + 200, "y": PART_VIEW_Y, "sheet_name": ctx.sheet_name,
         },
-        post=_post_insert_model_view_extra,
+        post=_post_capture("extra_view_name", "view_name"),
     ),
     "insert_standard_3_view": ToolSpec(
         pre=lambda ctx: ctx.ensure_drawing(), build=lambda ctx: {"model_path": str(ctx.part_path)}),
@@ -645,15 +620,15 @@ TOOL_SPECS: Dict[str, ToolSpec] = {
     "insert_auxiliary_view": ToolSpec(
         pre=lambda ctx: ctx.ensure_part_view(),
         build=lambda ctx: {
-            "parent_view_name": ctx.view_name, "edge_selection": _edge(*_BOTTOM_EDGE_MIDPOINT),
-            "x": _PART_VIEW_X + 200, "y": _PART_VIEW_Y + 150, "label": "B",
+            "parent_view_name": ctx.view_name, "edge_selection": entity("edge", *BOTTOM_EDGE_MIDPOINT),
+            "x": PART_VIEW_X + 200, "y": PART_VIEW_Y + 150, "label": "B",
         },
     ),
     "insert_section_view": ToolSpec(
         pre=lambda ctx: ctx.ensure_part_view(),
         build=lambda ctx: {
             "parent_view_name": ctx.view_name,
-            "cut_points": [{"x": 0, "y": -_HALF_DEPTH_MM}, {"x": 0, "y": _HALF_DEPTH_MM}],
+            "cut_points": [{"x": 0, "y": -HALF_DEPTH_MM}, {"x": 0, "y": HALF_DEPTH_MM}],
             "x": 250, "y": 100,
         },
     ),
@@ -661,7 +636,7 @@ TOOL_SPECS: Dict[str, ToolSpec] = {
         pre=lambda ctx: ctx.ensure_part_view(),
         build=lambda ctx: {
             "parent_view_name": ctx.view_name,
-            "center_x": _HALF_WIDTH_MM - _HOLE_INSET_MM, "center_y": _HALF_DEPTH_MM - _HOLE_INSET_MM,
+            "center_x": HALF_WIDTH_MM - HOLE_INSET_MM, "center_y": HALF_DEPTH_MM - HOLE_INSET_MM,
             "radius": 15, "x": 250, "y": 250,
         },
     ),
@@ -698,7 +673,7 @@ TOOL_SPECS: Dict[str, ToolSpec] = {
     # -- view layout -----------------------------------------------------------
     "move_view": ToolSpec(
         pre=lambda ctx: ctx.ensure_part_view(),
-        build=lambda ctx: {"view_name": ctx.view_name, "x": _PART_VIEW_X + 10, "y": _PART_VIEW_Y + 10},
+        build=lambda ctx: {"view_name": ctx.view_name, "x": PART_VIEW_X + 10, "y": PART_VIEW_Y + 10},
     ),
     "align_view": ToolSpec(
         pre=lambda ctx: ctx.ensure_part_view(),
@@ -726,17 +701,16 @@ TOOL_SPECS: Dict[str, ToolSpec] = {
         pre=lambda ctx: ctx.ensure_part_view(),
         build=lambda ctx: {
             "view_name": ctx.view_name,
-            "entities": [_vertex(*_CORNER_BOTTOM_RIGHT), _vertex(*_CORNER_TOP_LEFT)],
+            "entities": [entity("vertex", *CORNER_BOTTOM_RIGHT), entity("vertex", *CORNER_TOP_LEFT)],
             "x": 200, "y": 60, "dimension_type": "smart",
         },
-        post=lambda ctx, result: ctx.__setattr__(
-            "dimension_name", (result.get("data") or {}).get("name")) if result.get("success") else None,
+        post=_post_capture("dimension_name"),
     ),
     "add_ordinate_dimensions": ToolSpec(
         pre=lambda ctx: ctx.ensure_part_view(),
         build=lambda ctx: {
-            "view_name": ctx.view_name, "origin_entity": _vertex(*_CORNER_TOP_LEFT),
-            "entities": [_vertex(*_CORNER_BOTTOM_RIGHT)], "x": 50, "y": 140,
+            "view_name": ctx.view_name, "origin_entity": entity("vertex", *CORNER_TOP_LEFT),
+            "entities": [entity("vertex", *CORNER_BOTTOM_RIGHT)], "x": 50, "y": 140,
         },
     ),
     "set_dimension_value": ToolSpec(
@@ -760,16 +734,16 @@ TOOL_SPECS: Dict[str, ToolSpec] = {
             "property_name": "PartNo", "x": 20, "y": 40, "source": "sheet", "prefix": "Part No: ",
         },
     ),
-    "list_notes": ToolSpec(pre=lambda ctx: ctx.ensure_drawing(), build=lambda ctx: {}),
+    "list_notes": ToolSpec(pre=lambda ctx: ctx.ensure_drawing()),
     "edit_note": ToolSpec(
         pre=lambda ctx: ctx.ensure_note(),
         build=lambda ctx: {"note_name": ctx.note_name or "", "text": "Updated validation note"},
     ),
-    "list_datums": ToolSpec(pre=lambda ctx: ctx.ensure_drawing(), build=lambda ctx: {}),
+    "list_datums": ToolSpec(pre=lambda ctx: ctx.ensure_drawing()),
     "add_datum_feature": ToolSpec(
         pre=lambda ctx: ctx.ensure_part_view(),
         build=lambda ctx: {
-            "view_name": ctx.view_name, "entity": _edge(*_BOTTOM_EDGE_MIDPOINT), "label": "A",
+            "view_name": ctx.view_name, "entity": entity("edge", *BOTTOM_EDGE_MIDPOINT), "label": "A",
             "x": 0, "y": 90,
         },
         post=_post_capture("datum_label", "label"),
@@ -777,27 +751,27 @@ TOOL_SPECS: Dict[str, ToolSpec] = {
     "add_gtol": ToolSpec(
         pre=lambda ctx: ctx.ensure_part_view(),
         build=lambda ctx: {
-            "view_name": ctx.view_name, "entity": _face(*_FACE_CENTER), "symbol": "flatness",
+            "view_name": ctx.view_name, "entity": entity("face", *FACE_CENTER), "symbol": "flatness",
             "tolerance": 0.05, "x": 150, "y": 60,
         },
     ),
     "add_datum_target": ToolSpec(
         pre=lambda ctx: ctx.ensure_part_view(),
         build=lambda ctx: {
-            "view_name": ctx.view_name, "entity": _face(*_FACE_CENTER), "label": "a1",
+            "view_name": ctx.view_name, "entity": entity("face", *FACE_CENTER), "label": "a1",
             "area_type": "point", "size": 5, "x": 170, "y": 60,
         },
     ),
     "add_surface_finish": ToolSpec(
         pre=lambda ctx: ctx.ensure_part_view(),
         build=lambda ctx: {
-            "view_name": ctx.view_name, "entity": _edge(*_BOTTOM_EDGE_MIDPOINT), "x": 0, "y": 110,
+            "view_name": ctx.view_name, "entity": entity("edge", *BOTTOM_EDGE_MIDPOINT), "x": 0, "y": 110,
         },
     ),
     "add_weld_symbol": ToolSpec(
         pre=lambda ctx: ctx.ensure_part_view(),
         build=lambda ctx: {
-            "view_name": ctx.view_name, "entity": _edge(*_BOTTOM_EDGE_MIDPOINT), "x": 0, "y": 130,
+            "view_name": ctx.view_name, "entity": entity("edge", *BOTTOM_EDGE_MIDPOINT), "x": 0, "y": 130,
         },
     ),
     "add_center_marks": ToolSpec(
@@ -835,8 +809,8 @@ TOOL_SPECS: Dict[str, ToolSpec] = {
         pre=lambda ctx: ctx.ensure_assembly_view(),
         build=lambda ctx: {
             "view_name": ctx.assembly_view_name,
-            "entity": {"kind": "component", "x": _ASM_VIEW_X, "y": _ASM_VIEW_Y},
-            "x": _ASM_VIEW_X + 40, "y": _ASM_VIEW_Y + 40,
+            "entity": {"kind": "component", "x": ASSEMBLY_VIEW_X, "y": ASSEMBLY_VIEW_Y},
+            "x": ASSEMBLY_VIEW_X + 40, "y": ASSEMBLY_VIEW_Y + 40,
         },
     ),
     "renumber_balloons": ToolSpec(
@@ -850,12 +824,12 @@ TOOL_SPECS: Dict[str, ToolSpec] = {
     "insert_hole_table": ToolSpec(
         pre=lambda ctx: ctx.ensure_part_view(),
         build=lambda ctx: {
-            "view_name": ctx.view_name, "datum_entity": _vertex(*_CORNER_TOP_LEFT), "x": 250, "y": 60,
+            "view_name": ctx.view_name, "datum_entity": entity("vertex", *CORNER_TOP_LEFT), "x": 250, "y": 60,
         },
         post=_post_capture("hole_table_name"),
     ),
     "insert_revision_table": ToolSpec(
-        pre=lambda ctx: ctx.ensure_drawing(), build=lambda ctx: {}, post=_post_capture("revision_table_name"),
+        pre=lambda ctx: ctx.ensure_drawing(), post=_post_capture("revision_table_name"),
     ),
     "add_revision": ToolSpec(
         pre=lambda ctx: ctx.ensure_revision_table(),
@@ -887,7 +861,7 @@ TOOL_SPECS: Dict[str, ToolSpec] = {
         pre=lambda ctx: ctx.ensure_bom_table(),
         build=lambda ctx: {"table_name": ctx.bom_table_name or "", "anchored": True},
     ),
-    "delete_table": ToolSpec(pre=_pre_delete_table, build=_build_delete_table),
+    "delete_table": ToolSpec(pre=lambda ctx: ctx.ensure_hole_table(), build=_build_delete_table),
 
     # -- layers ------------------------------------------------------------------
     "create_layer": ToolSpec(
@@ -896,7 +870,7 @@ TOOL_SPECS: Dict[str, ToolSpec] = {
         post=lambda ctx, result: ctx.__setattr__("layer_name", "ValidationLayer")
         if result.get("success") else None,
     ),
-    "list_layers": ToolSpec(pre=lambda ctx: ctx.ensure_drawing(), build=lambda ctx: {}),
+    "list_layers": ToolSpec(pre=lambda ctx: ctx.ensure_drawing()),
     "set_current_layer": ToolSpec(
         pre=lambda ctx: ctx.ensure_layer(), build=lambda ctx: {"name": ctx.layer_name or ""}),
     "set_layer_properties": ToolSpec(
@@ -933,12 +907,28 @@ TOOL_SPECS: Dict[str, ToolSpec] = {
     },
     "create_sketch": ToolSpec(
         pre=lambda ctx: ctx.ensure_part_document(), build=lambda ctx: {"plane": "Front"}),
-    "cut_extrude": ToolSpec(pre=_pre_cut_extrude, build=lambda ctx: {}),
-    "fillet_edges": ToolSpec(pre=_pre_fillet_edges, build=lambda ctx: {}),
-    "chamfer_edges": ToolSpec(pre=_pre_chamfer_edges, build=lambda ctx: {}),
+    "cut_extrude": ToolSpec(pre=_pre_cut_extrude),
+    "fillet_edges": ToolSpec(pre=_pre_fillet_edges),
+    "chamfer_edges": ToolSpec(pre=_pre_chamfer_edges),
 
     # -- utility -------------------------------------------------------------------
     "set_units": ToolSpec(build=lambda ctx: {"unit": "mm"}),
+
+    # -- drawing packs -------------------------------------------------------------
+    "create_drawing_pack": ToolSpec(build=_build_create_drawing_pack),
+}
+
+
+# Type-appropriate stand-ins for a required parameter with no default and
+# no well-known name. A string is also the fallback for an unknown or
+# missing type.
+_TYPE_STANDINS: Dict[Any, Any] = {
+    "string": "validation",
+    "number": 1,
+    "integer": 1,
+    "boolean": True,
+    "array": [],
+    "object": {},
 }
 
 
@@ -963,20 +953,10 @@ def _generic_value_for(param_name: str, prop: Dict[str, Any], ctx: ScriptContext
     prop_type = prop.get("type")
     if isinstance(prop_type, list):
         prop_type = prop_type[0] if prop_type else None
-    if prop_type == "string":
-        return "validation"
-    if prop_type in ("number", "integer"):
-        return 1
-    if prop_type == "boolean":
-        return True
-    if prop_type == "array":
-        return []
-    if prop_type == "object":
-        return {}
-    return "validation"
+    return _TYPE_STANDINS.get(prop_type, "validation")
 
 
-def _generic_build(name: str, schema: Dict[str, Any], ctx: ScriptContext) -> Dict[str, Any]:
+def _generic_build(schema: Dict[str, Any], ctx: ScriptContext) -> Dict[str, Any]:
     properties = schema.get("properties", {})
     required = schema.get("required", [])
     args: Dict[str, Any] = {}
@@ -991,33 +971,6 @@ def _generic_pre(schema: Dict[str, Any], ctx: ScriptContext) -> None:
         ctx.ensure_part_view()
     elif "sheet_name" in properties:
         ctx.ensure_drawing()
-
-
-# ============================================================================
-# create_drawing_pack -- self-contained, mirrors solidworks_mcp/tests/
-# integration/test_drawing_pipeline.py's test_create_drawing_pack_from_example
-# exactly: load the real docs/packs/ example, point it at the generated
-# assembly, drop its calibrated (gearbox-specific) balloon coordinates.
-# ============================================================================
-
-def _build_create_drawing_pack(ctx: ScriptContext) -> Dict[str, Any]:
-    example_path = REPO_ROOT / "docs" / "packs" / "assembly_with_bom.json"
-    spec = json.loads(example_path.read_text(encoding="utf-8"))
-
-    from solidworks_mcp.utils import find_template
-    drawing_template = find_template("drawing")
-
-    output_path = ctx.output_dir / "_validation_pack_output.slddrw"
-    spec["drawing_template"] = drawing_template or spec.get("drawing_template")
-    spec["output"] = str(output_path)
-    sheet = spec["sheets"][0]
-    sheet["model_path"] = str(ctx.assembly_path)
-    sheet["views"][0]["model_path"] = str(ctx.assembly_path)
-    sheet["annotations"] = []
-    return {"spec": spec}
-
-
-TOOL_SPECS["create_drawing_pack"] = ToolSpec(build=_build_create_drawing_pack)
 
 
 # ============================================================================
@@ -1085,12 +1038,13 @@ def run_validation(
 
         spec = tool_specs.get(name)
         try:
-            if spec is not None and spec.pre is not None:
-                spec.pre(ctx)
-            elif spec is None:
+            if spec is None:
                 _generic_pre(entry["schema"], ctx)
-
-            arguments = spec.build(ctx) if spec is not None else _generic_build(name, entry["schema"], ctx)
+                arguments = _generic_build(entry["schema"], ctx)
+            else:
+                if spec.pre is not None:
+                    spec.pre(ctx)
+                arguments = spec.build(ctx)
         except Exception as exc:  # noqa: BLE001 -- a broken arg-builder must not abort the sweep
             records.append(ToolRecord(
                 name=name, status="fail", arguments={},
@@ -1133,8 +1087,7 @@ def run_validation(
 
 def build_report(records: List[ToolRecord], meta: Dict[str, Any]) -> Dict[str, Any]:
     summary = {"total": len(records), "pass": 0, "fail": 0, "skipped": 0, "filtered": 0}
-    for record in records:
-        summary[record.status] = summary.get(record.status, 0) + 1
+    summary.update(Counter(record.status for record in records))
     return {
         "meta": meta,
         "summary": summary,
@@ -1401,8 +1354,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         report["summary"]["skipped"], report["summary"]["filtered"], output_dir,
     )
 
-    exit_code = 1 if report["summary"]["fail"] > 0 else 0
-    return exit_code
+    return 1 if report["summary"]["fail"] > 0 else 0
 
 
 if __name__ == "__main__":

@@ -52,30 +52,27 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT))
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+# The bracket's dimensions live in the shared contract module rather than
+# here, so the integration suite and scripts/validate_on_windows.py pick
+# entities against the same numbers this script builds from.
+from solidworks_mcp.testing.bracket_geometry import (  # noqa: E402
+    ASSEMBLY_COMPONENT_SPACING_MM,
+    BASE_HEIGHT_MM,
+    CHAMFER_ANGLE_DEG,
+    CHAMFER_DISTANCE_MM,
+    FILLET_RADIUS_MM,
+    HALF_DEPTH_MM,
+    HALF_WIDTH_MM,
+    HOLE_INSET_MM,
+    HOLE_RADIUS_MM,
+)
 
 DEFAULT_OUT_DIR = REPO_ROOT / "tests" / "fixtures" / "generated"
 
 logger = logging.getLogger("make_test_geometry")
-
-# ============================================================================
-# Bracket geometry (all lengths in mm -- the unit this script sets as
-# default before doing anything else)
-# ============================================================================
-
-BASE_WIDTH_MM = 80.0   # X extent
-BASE_DEPTH_MM = 50.0   # Z extent (sketched as the Front sketch's local Y)
-BASE_HEIGHT_MM = 20.0  # extrude depth, along the Front plane's normal
-
-HOLE_RADIUS_MM = 4.0
-HOLE_INSET_MM = 12.0   # each mounting hole's center, inset from both edges
-
-FILLET_RADIUS_MM = 3.0
-CHAMFER_DISTANCE_MM = 2.0
-CHAMFER_ANGLE_DEG = 45.0
-
-# The offset between the two assembly instances, along X, in mm.
-ASSEMBLY_COMPONENT_SPACING_MM = 120.0
 
 PART_PROPERTIES = {
     "PartNo": "BR-1001",
@@ -123,38 +120,35 @@ def _select_vertical_edge(sw, x_mm: float, z_mm: float, height_mm: float, label:
 def build_bracket_part(sw, out_dir: Path) -> Path:
     """Build the bracket part and save it under `out_dir`. Returns the
     saved part's path."""
-    half_w = BASE_WIDTH_MM / 2
-    half_d = BASE_DEPTH_MM / 2
-
     _check("create_new_part", sw.create_new_part())
     _check("create_sketch(base)", sw.create_sketch("Front"))
-    _check("draw_rectangle(base)", sw.draw_rectangle(-half_w, -half_d, half_w, half_d))
+    _check("draw_rectangle(base)",
+           sw.draw_rectangle(-HALF_WIDTH_MM, -HALF_DEPTH_MM, HALF_WIDTH_MM, HALF_DEPTH_MM))
     _check("extrude_sketch(base)", sw.extrude_sketch(BASE_HEIGHT_MM))
 
-    sketched_on_top = False
+    # Same both-signs extrude-direction probe as `_select_vertical_edge`.
     for sign in (1, -1):
         result = sw.create_sketch_on_face(0, sign * BASE_HEIGHT_MM, 0)
         if result.get("success"):
-            sketched_on_top = True
             logger.info("create_sketch_on_face(top): %s", result.get("message"))
             break
-    if not sketched_on_top:
+    else:
         raise GeometryBuildError(
             "Could not find the extruded block's top face for the hole sketch"
         )
 
-    hole_x = half_w - HOLE_INSET_MM
-    hole_z = half_d - HOLE_INSET_MM
+    hole_x = HALF_WIDTH_MM - HOLE_INSET_MM
+    hole_z = HALF_DEPTH_MM - HOLE_INSET_MM
     hole_centers = [(hole_x, hole_z), (-hole_x, hole_z), (-hole_x, -hole_z), (hole_x, -hole_z)]
     for cx, cz in hole_centers:
         _check("draw_circle(hole)", sw.draw_circle(cx, cz, HOLE_RADIUS_MM))
 
     _check("cut_extrude(holes)", sw.cut_extrude(through_all=True))
 
-    _select_vertical_edge(sw, half_w, half_d, BASE_HEIGHT_MM, "fillet edge")
+    _select_vertical_edge(sw, HALF_WIDTH_MM, HALF_DEPTH_MM, BASE_HEIGHT_MM, "fillet edge")
     _check("fillet_edges", sw.fillet_edges(FILLET_RADIUS_MM))
 
-    _select_vertical_edge(sw, -half_w, -half_d, BASE_HEIGHT_MM, "chamfer edge")
+    _select_vertical_edge(sw, -HALF_WIDTH_MM, -HALF_DEPTH_MM, BASE_HEIGHT_MM, "chamfer edge")
     _check("chamfer_edges", sw.chamfer_edges(CHAMFER_DISTANCE_MM, CHAMFER_ANGLE_DEG))
 
     _check("set_custom_properties(part)", sw.set_custom_properties(dict(PART_PROPERTIES)))
@@ -176,8 +170,8 @@ def build_assembly(sw, part_path: Path, out_dir: Path) -> Path:
 
     part_path_str = str(part_path)
     spacing_m = sw.units.to_meters(ASSEMBLY_COMPONENT_SPACING_MM, "mm")
-    inserted = 0
-    for index, x_m in enumerate((0.0, spacing_m)):
+    positions = (0.0, spacing_m)
+    for index, x_m in enumerate(positions):
         # IAssemblyDoc::AddComponent5(ComponentName, Options, ConfigName,
         # UseLightWeightDefault, ReferencedConfigName, X, Y, Z) -> IComponent2.
         # See the module docstring: public SOLIDWORKS API knowledge, not
@@ -187,8 +181,7 @@ def build_assembly(sw, part_path: Path, out_dir: Path) -> Path:
             raise GeometryBuildError(
                 f"AddComponent5 failed to insert component #{index + 1} from {part_path_str!r}"
             )
-        inserted += 1
-    logger.info("Inserted %d component(s) into the assembly", inserted)
+    logger.info("Inserted %d component(s) into the assembly", len(positions))
 
     _check("rebuild_document(assembly)", sw.rebuild_document())
     _check("set_custom_properties(assembly)", sw.set_custom_properties(dict(ASSEMBLY_PROPERTIES)))
