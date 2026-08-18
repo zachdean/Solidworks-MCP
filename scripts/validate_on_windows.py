@@ -279,6 +279,13 @@ class ScriptContext:
         if not result.get("success"):
             return
         self._reset_drawing_scoped_state()
+        # The old path names a document this context no longer describes, so
+        # drop it before the save that may or may not replace it -- otherwise
+        # a failed save leaves `drawing_path` pointing at the *previous*
+        # drawing while every scoped name belongs to the new one, and a later
+        # `ensure_drawing()` would reactivate that stale document and return
+        # happily.
+        self.drawing_path = None
         self.sheet_name = (result.get("data") or {}).get("sheet_name")
 
         save_path = str(self.output_dir / "_validation_drawing.slddrw")
@@ -415,16 +422,21 @@ class ScriptContext:
         result = self._try("extrude_sketch", {})
         self.block_extruded = bool(result.get("success"))
 
-    def select_block_edge(self, x_mm: float, z_mm: float) -> None:
+    def select_block_edge(self, x_mm: float, y_mm: float) -> None:
         """Best-effort direct edge selection for fillet_edges/chamfer_edges,
         which take no entity argument of their own -- they act on whatever
         is currently selected (see solidworks_mcp/automation/selection.py).
         No MCP tool exposes selection-by-coordinate, so this reaches the
         automation layer directly, same as scripts/make_test_geometry.py's
         `_select_vertical_edge` (not a dispatch() call, so it isn't part of
-        the report; the fillet/chamfer tool call right after it is)."""
+        the report; the fillet/chamfer tool call right after it is).
+
+        `ensure_extruded_block` sketches on the Front plane (= the global XY
+        plane) and extrudes along Z, so the edge to pick is the one at the
+        (x, y) corner, probed at half the extrude depth along Z -- both
+        signs, since `extrude_sketch` doesn't report which way it went."""
         for sign in (1, -1):
-            y_mm = sign * _BLOCK_HEIGHT_MM / 2
+            z_mm = sign * _BLOCK_HEIGHT_MM / 2
             try:
                 result = self.automation.select_by_id("", "EDGE", x_mm, y_mm, z_mm)
             except Exception as exc:  # noqa: BLE001
@@ -432,7 +444,7 @@ class ScriptContext:
                 continue
             if result.get("success"):
                 return
-        self.warnings.append(f"select_block_edge: no edge found near x={x_mm} z={z_mm}")
+        self.warnings.append(f"select_block_edge: no edge found near x={x_mm} y={y_mm}")
 
 
 # ============================================================================
@@ -1188,7 +1200,12 @@ def _suppress_dimension_value_dialog(app: Any):
 
     try:
         original = app.GetUserPreferenceToggle(pref_id)
-        app.SetUserPreferenceToggle(pref_id, True)
+        # False, not True: `swInputDimValOnCreate` *is* the "Input dimension
+        # value" option, so True is what makes the modal Modify dialog pop up
+        # on dimension creation. Setting it False is what suppresses it.
+        # (Note the opposite polarity from `swDXFDontShowMap` below, whose
+        # name already carries the negation.)
+        app.SetUserPreferenceToggle(pref_id, False)
     except Exception as exc:  # noqa: BLE001
         logger.warning("dimension-value dialog suppression unavailable: %s", exc)
         yield

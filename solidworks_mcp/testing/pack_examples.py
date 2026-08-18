@@ -26,8 +26,8 @@ def load_example_pack(
     output_path: Union[str, Path],
     drawing_template: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Return `docs/packs/<name>.json` parsed and retargeted: first sheet
-    and its first view pointed at `model_path`, `output` at `output_path`,
+    """Return `docs/packs/<name>.json` parsed and retargeted: *every* sheet
+    and *every* view pointed at `model_path`, `output` at `output_path`,
     `drawing_template` replaced when one is given (the examples' own path
     is a placeholder), and annotations dropped.
 
@@ -35,13 +35,23 @@ def load_example_pack(
     calibrated for their own model; the sheet's tables stay, since their
     x/y are sheet placement rather than picks. Each call re-parses, so
     callers get a spec they can mutate freely.
+
+    All sheets/views rather than just the first: `multi_sheet_section_detail`
+    has two sheets and a second view per sheet, and any left unretargeted
+    would keep the example's placeholder `C:\\Parts\\...` path and fail on a
+    machine that has no such file.
     """
     spec = json.loads((PACKS_DIR / f"{name}.json").read_text(encoding="utf-8"))
     if drawing_template:
         spec["drawing_template"] = drawing_template
     spec["output"] = str(output_path)
-    sheet = spec["sheets"][0]
-    sheet["model_path"] = str(model_path)
-    sheet["views"][0]["model_path"] = str(model_path)
-    sheet["annotations"] = []
+    for sheet in spec["sheets"]:
+        sheet["model_path"] = str(model_path)
+        for view in sheet.get("views") or []:
+            # Only views that name a model of their own: a section/detail
+            # view derives from its parent view instead, and giving it a
+            # `model_path` it never had would not be a retarget.
+            if "model_path" in view:
+                view["model_path"] = str(model_path)
+        sheet["annotations"] = []
     return spec

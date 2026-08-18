@@ -101,18 +101,23 @@ def _check(step: str, result: dict) -> dict:
     return result
 
 
-def _select_vertical_edge(sw, x_mm: float, z_mm: float, height_mm: float, label: str) -> None:
-    """Select the vertical (extrude-direction) edge at model (x, ?, z),
-    trying both signs of the extrude direction -- see the module docstring
-    for why the sign is ambiguous from here."""
+def _select_vertical_edge(sw, x_mm: float, y_mm: float, height_mm: float, label: str) -> None:
+    """Select the extrude-direction edge at model (x, y, ?), trying both
+    signs of the extrude direction -- see the module docstring for why the
+    sign is ambiguous from here.
+
+    The base sketch is on the Front plane (= the global XY plane, see
+    `SwPlanes.FRONT`), so the sketch's local x/y are the model's X/Y and
+    `extrude_sketch` runs along **Z**. The edge to pick is therefore the
+    one at the (x, y) corner, probed at half the extrude depth along Z."""
     for sign in (1, -1):
-        y_mm = sign * height_mm / 2
+        z_mm = sign * height_mm / 2
         result = sw.select_by_id("", "EDGE", x_mm, y_mm, z_mm)
         if result.get("success"):
             logger.info("%s: selected edge near (%.1f, %.1f, %.1f)mm", label, x_mm, y_mm, z_mm)
             return
     raise GeometryBuildError(
-        f"{label}: could not select an edge near x={x_mm}mm z={z_mm}mm "
+        f"{label}: could not select an edge near x={x_mm}mm y={y_mm}mm "
         "(tried both extrude directions)"
     )
 
@@ -126,9 +131,11 @@ def build_bracket_part(sw, out_dir: Path) -> Path:
            sw.draw_rectangle(-HALF_WIDTH_MM, -HALF_DEPTH_MM, HALF_WIDTH_MM, HALF_DEPTH_MM))
     _check("extrude_sketch(base)", sw.extrude_sketch(BASE_HEIGHT_MM))
 
-    # Same both-signs extrude-direction probe as `_select_vertical_edge`.
+    # Same both-signs extrude-direction probe as `_select_vertical_edge`:
+    # the block was extruded along Z, so its top face is the z = +/-
+    # BASE_HEIGHT_MM plane, probed at the face's center (x=y=0).
     for sign in (1, -1):
-        result = sw.create_sketch_on_face(0, sign * BASE_HEIGHT_MM, 0)
+        result = sw.create_sketch_on_face(0, 0, sign * BASE_HEIGHT_MM)
         if result.get("success"):
             logger.info("create_sketch_on_face(top): %s", result.get("message"))
             break
@@ -138,10 +145,10 @@ def build_bracket_part(sw, out_dir: Path) -> Path:
         )
 
     hole_x = HALF_WIDTH_MM - HOLE_INSET_MM
-    hole_z = HALF_DEPTH_MM - HOLE_INSET_MM
-    hole_centers = [(hole_x, hole_z), (-hole_x, hole_z), (-hole_x, -hole_z), (hole_x, -hole_z)]
-    for cx, cz in hole_centers:
-        _check("draw_circle(hole)", sw.draw_circle(cx, cz, HOLE_RADIUS_MM))
+    hole_y = HALF_DEPTH_MM - HOLE_INSET_MM
+    hole_centers = [(hole_x, hole_y), (-hole_x, hole_y), (-hole_x, -hole_y), (hole_x, -hole_y)]
+    for cx, cy in hole_centers:
+        _check("draw_circle(hole)", sw.draw_circle(cx, cy, HOLE_RADIUS_MM))
 
     _check("cut_extrude(holes)", sw.cut_extrude(through_all=True))
 

@@ -22,9 +22,12 @@ from typing import Any, Dict, Tuple
 # The part, as built
 # ============================================================================
 
+# The base sketch is on the Front plane, which *is* the global XY plane
+# (`SwPlanes.FRONT`), so the sketch's local x/y are the model's X/Y and the
+# extrude runs along the model's Z.
 BASE_WIDTH_MM = 80.0   # X extent
-BASE_DEPTH_MM = 50.0   # Z extent (sketched as the Front sketch's local Y)
-BASE_HEIGHT_MM = 20.0  # extrude depth, along the Front plane's normal
+BASE_DEPTH_MM = 50.0   # Y extent
+BASE_HEIGHT_MM = 20.0  # Z extent -- the extrude depth, along the Front plane's normal
 
 HOLE_RADIUS_MM = 4.0
 HOLE_INSET_MM = 12.0   # each mounting hole's center, inset from both edges
@@ -55,8 +58,11 @@ BOTTOM_EDGE_MIDPOINT: Tuple[float, float] = (0.0, -HALF_DEPTH_MM)
 FACE_CENTER: Tuple[float, float] = (0.0, 0.0)  # clear of all 4 holes
 
 
-def entity(kind: str, local_x: float, local_z: float) -> Dict[str, Any]:
+def entity(kind: str, local_x: float, local_y: float) -> Dict[str, Any]:
     """An entity-picking dict for `kind` ("vertex"/"edge"/"face") at the
-    part view's local (x, z), translated into the sheet coordinates the
-    picking tools take."""
-    return {"kind": kind, "x": PART_VIEW_X + local_x, "y": PART_VIEW_Y + local_z}
+    part view's local (x, y), translated into the sheet coordinates the
+    picking tools take.
+
+    The *Front view looks down the model's Z, so the view's local x/y are
+    the model's X/Y -- the same axes `BASE_WIDTH_MM`/`BASE_DEPTH_MM` name."""
+    return {"kind": kind, "x": PART_VIEW_X + local_x, "y": PART_VIEW_Y + local_y}

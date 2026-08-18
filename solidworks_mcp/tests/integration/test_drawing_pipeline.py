@@ -304,6 +304,11 @@ def test_create_drawing_pack_from_example(created_files):
     )
 
     result = dispatch("create_drawing_pack", {"spec": spec})
-    assert result["success"], (result["message"], result["data"]["summary"])
-    assert result["data"]["summary"]["sheets_created"] >= 1
-    assert result["data"]["summary"]["views_inserted"] >= 1
+    # `.get()` on the summary: create_drawing_pack returns early without one
+    # for a rejected spec (see drawing_pack.py's validation branches), and a
+    # KeyError raised while building this message would hide the `message`
+    # that actually explains the failure.
+    summary = (result.get("data") or {}).get("summary")
+    assert result["success"], (result["message"], summary)
+    assert summary["sheets_created"] >= 1
+    assert summary["views_inserted"] >= 1

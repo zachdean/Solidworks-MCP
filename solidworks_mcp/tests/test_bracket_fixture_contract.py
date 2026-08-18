@@ -68,6 +68,29 @@ class TestLoadExamplePack:
         assert sheet["views"][0]["model_path"] == "C:/models/bracket_assembly.sldasm"
         assert sheet["annotations"] == []
 
+    def test_retargets_every_sheet_and_every_model_view(self, tmp_path):
+        # multi_sheet_section_detail has two sheets, each with a model view
+        # and a derived one. Leaving any model view on the example's
+        # placeholder path would fail on a machine that has no such file;
+        # the derived views have no model_path and must not gain one.
+        spec = load_example_pack(
+            "multi_sheet_section_detail",
+            model_path="C:/models/bracket.sldprt",
+            output_path=tmp_path / "o.slddrw",
+        )
+
+        assert len(spec["sheets"]) > 1, "fixture should exercise more than one sheet"
+        derived_views = 0
+        for sheet in spec["sheets"]:
+            assert sheet["model_path"] == "C:/models/bracket.sldprt"
+            assert sheet["annotations"] == []
+            for view in sheet["views"]:
+                if "model_path" in view:
+                    assert view["model_path"] == "C:/models/bracket.sldprt"
+                else:
+                    derived_views += 1
+        assert derived_views, "derived views should keep deriving from their parent view"
+
     def test_keeps_the_examples_own_template_when_none_is_found(self, tmp_path):
         # find_template() returns None off Windows / on an install with no
         # matching template; the example's own value has to survive that.

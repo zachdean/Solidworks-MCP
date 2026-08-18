@@ -39,10 +39,14 @@ above). Activate the venv afterward with:
 .venv\Scripts\Activate.ps1
 ```
 
-`scripts\check.sh` and `scripts\validate_on_windows.py` both auto-detect
-`.venv\Scripts\python.exe` when `.venv/bin/python` doesn't exist, so you don't
-need the venv activated to run either -- activation is only for convenience
-in an interactive shell.
+`scripts\check.sh` auto-detects `.venv\Scripts\python.exe` when
+`.venv/bin/python` doesn't exist, so it runs without the venv activated.
+
+`scripts\make_test_geometry.py` and `scripts\validate_on_windows.py` do *not*
+-- they run under whatever interpreter invokes them, and they need the venv's
+`mcp` and `pywin32`. Either activate the venv first or invoke them through the
+venv's interpreter explicitly (`.venv\Scripts\python.exe scripts\...`), as
+every command below does. A system Python will fail at import.
 
 ## Running the end-to-end validation runner
 
