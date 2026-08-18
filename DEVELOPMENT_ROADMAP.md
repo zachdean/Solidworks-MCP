@@ -1688,6 +1688,18 @@ def mate_distance(self, entity1, entity2, distance, unit="mm") -> Dict:
 
 ### 7.3 Drawing Tools
 
+> **⚠️ Historical / superseded.** This section is the original Phase 4 sketch
+> of drawing support, kept for project history only. The drawing tool set was
+> actually implemented with a much larger surface (111 tools total) and
+> researched COM signatures that differ from the illustrative code below —
+> `create_drawing`/`add_drawing_view`/`add_drawing_dimension` were never built
+> as named here. **For the real, current signatures, parameters, and minimum
+> SOLIDWORKS release of every drawing tool, see the hand-researched dossier in
+> [`docs/api/`](docs/api/README.md) and the generated, always-up-to-date
+> [`docs/TOOLS.md`](docs/TOOLS.md)** — not the snippets in this section. See
+> also [`docs/DRAWING_PACKS.md`](docs/DRAWING_PACKS.md) for the declarative
+> pack spec that composes many of these tools into one call.
+
 #### Task 4.6: Create Drawing
 ```python
 def create_drawing(self, paper_size="A4", orientation="landscape") -> Dict:
