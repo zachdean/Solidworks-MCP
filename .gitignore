@@ -14,3 +14,4 @@ build/
 .ruff_cache/
 htmlcov/
 .coverage
+tests/fixtures/generated/
